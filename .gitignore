@@ -39,3 +39,9 @@
 
 # debug information files
 *.dwo
+
+# ignore build
+build
+.vscode
+CMakeSettings.json
+.vs
