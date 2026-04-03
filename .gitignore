@@ -42,6 +42,14 @@
 
 # ignore build
 build
+
+#ignore assets and scripts files
+assets
+scripts
+
+# ImGui runtime settings
+imgui.ini
+
 .vscode
 CMakeSettings.json
 .vs
