@@ -10,6 +10,17 @@ option(POSEWEAVER_BUILD_APP "Build PoseWeaver app" ON)
 
 include(FetchContent)
 
+# cnpy allows to read .npy files (to read SMPL models and poses)
+FetchContent_Declare(
+	cnpy
+	GIT_REPOSITORY https://github.com/rogersce/cnpy.git
+	GIT_TAG        4e8810b1a8637695171ed346ce68f6984e585ef4
+	PATCH_COMMAND  ${CMAKE_COMMAND}
+		-DSOURCE_DIR=<SOURCE_DIR>
+		-DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/cnpy-zip64.patch
+		-P ${CMAKE_CURRENT_LIST_DIR}/cmake/patch_cnpy_zip64.cmake
+)
+
 set(LIBIGL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LIBIGL_BUILD_TUTORIALS OFF CACHE BOOL "" FORCE)
 set(LIBIGL_INSTALL OFF CACHE BOOL "" FORCE)
@@ -25,6 +36,17 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libigl)
 
+FetchContent_GetProperties(cnpy)
+if(NOT cnpy_POPULATED)
+	FetchContent_Populate(cnpy)
+	add_library(cnpy STATIC
+		${cnpy_SOURCE_DIR}/cnpy.cpp
+	)
+	target_include_directories(cnpy PUBLIC ${cnpy_SOURCE_DIR})
+	find_package(ZLIB REQUIRED)
+	target_link_libraries(cnpy PUBLIC ZLIB::ZLIB)
+endif()
+
 if(POSEWEAVER_BUILD_APP)
 	add_executable(poseweaver
 		src/app/main.cpp
@@ -32,6 +54,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/core/Assets.cpp
 		src/core/Assets.h
 		src/core/Paths.h
+		src/smpl/Smplh.cpp
+		src/smpl/Smplh.h
 		src/render/Renderer.cpp
 		src/render/Renderer.h
 		src/ui/Ui.cpp
@@ -46,7 +70,7 @@ if(POSEWEAVER_BUILD_APP)
 		POSEWEAVER_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
 	)
 
-	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui)
+	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy)
 
 	if(MSVC)
 		target_compile_options(poseweaver PRIVATE /W4)
