@@ -61,12 +61,28 @@ namespace poseweaver
         std::vector<std::string> lines;
     };
 
+    struct ViewOptions
+    {
+        bool wireframe = false;
+        float wireframe_size = 1.5f;
+        float light_amount = 1.0f;
+    };
+
+    struct UiLayoutState
+    {
+        // Width of the left-side controls panel in screen space (pixels).
+        float left_panel_width = 360.0f;
+    };
+
     struct AppState
     {
         SimulationControls controls;
         SimulationParams params;
         SelectionState selection;
         ViewportRect cloth_view;
+
+        ViewOptions view;
+        UiLayoutState layout;
 
         DebugConsoleState console;
 

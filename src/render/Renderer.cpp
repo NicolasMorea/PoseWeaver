@@ -45,50 +45,17 @@ namespace poseweaver
             append_segment(p1, p2, c, { 0, 0, 0 }, { 0, 0, 0.75 }, { 0.2, 0.4, 1.0 });
 
             // Ground grid
-            const double extent = 2.0;
-            const int steps = 20;
-            const Eigen::RowVector3d grid_col{ 0.45, 0.45, 0.45 };
-            for (int i = 0; i <= steps; ++i)
-            {
-                const double t = (double)i / (double)steps;
-                const double x = -extent + 2.0 * extent * t;
-                append_segment(p1, p2, c, { x, 0.0, -extent }, { x, 0.0, extent }, grid_col);
-
-                const double z = -extent + 2.0 * extent * t;
-                append_segment(p1, p2, c, { -extent, 0.0, z }, { extent, 0.0, z }, grid_col);
-            }
-
-            // Cloth preview grid
-            // const Eigen::RowVector3d cloth_col{ 0.95, 0.85, 0.20 };
-            // const double size = 0.8;
-            // const int n = 18;
-
-            // for (int j = 0; j <= n; ++j)
+            // const double extent = 2.0;
+            // const int steps = 20;
+            // const Eigen::RowVector3d grid_col{ 0.62, 0.62, 0.62 };
+            // for (int i = 0; i <= steps; ++i)
             // {
-            //     const double v = (double)j / (double)n;
-            //     const double z = -size + 2.0 * size * v;
-            //     for (int i = 0; i < n; ++i)
-            //     {
-            //         const double u0 = (double)i / (double)n;
-            //         const double u1 = (double)(i + 1) / (double)n;
-            //         const double x0 = -size + 2.0 * size * u0;
-            //         const double x1 = -size + 2.0 * size * u1;
-            //         append_segment(p1, p2, c, { x0, 1.0, z }, { x1, 1.0, z }, cloth_col);
-            //     }
-            // }
+            //     const double t = (double)i / (double)steps;
+            //     const double x = -extent + 2.0 * extent * t;
+            //     append_segment(p1, p2, c, { x, 0.0, -extent }, { x, 0.0, extent }, grid_col);
 
-            // for (int i = 0; i <= n; ++i)
-            // {
-            //     const double u = (double)i / (double)n;
-            //     const double x = -size + 2.0 * size * u;
-            //     for (int j = 0; j < n; ++j)
-            //     {
-            //         const double v0 = (double)j / (double)n;
-            //         const double v1 = (double)(j + 1) / (double)n;
-            //         const double z0 = -size + 2.0 * size * v0;
-            //         const double z1 = -size + 2.0 * size * v1;
-            //         append_segment(p1, p2, c, { x, 1.0, z0 }, { x, 1.0, z1 }, cloth_col);
-            //     }
+            //     const double z = -extent + 2.0 * extent * t;
+            //     append_segment(p1, p2, c, { -extent, 0.0, z }, { extent, 0.0, z }, grid_col);
             // }
 
             const int count = (int)p1.size();
@@ -128,6 +95,14 @@ namespace poseweaver
 
         m_viewer.window = m_window;
         m_viewer.init();
+
+        {
+            auto& core = m_viewer.core();
+            core.is_shadow_mapping = false;
+            core.is_directional_light = true;
+            core.light_position = Eigen::Vector3f(0.6f, 1.0f, 0.8f);
+            core.lighting_factor = 1.0f;
+        }
 
         m_grid_mesh_index = 0;
         m_loaded_mesh_index = m_viewer.append_mesh(true);
@@ -188,11 +163,12 @@ namespace poseweaver
 
         data.clear();
         data.set_mesh(V, F);
+        data.show_faces = 1;
         data.show_lines = 0;
         data.show_overlay = 0;
+        data.set_colors(Eigen::RowVector3d(0.85, 0.86, 0.88));
         data.set_visible(true);
 
-        // Fit camera to the newly loaded mesh.
         m_viewer.core().align_camera_center(V, F);
 
         m_loaded_mesh_name = std::move(desired);
@@ -253,7 +229,7 @@ namespace poseweaver
 
         glViewport(0, 0, fb_width, fb_height);
         glDisable(GL_SCISSOR_TEST);
-        glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
+        glClearColor(0.45f, 0.45f, 0.47f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         if (!state.cloth_view.valid)
@@ -261,11 +237,24 @@ namespace poseweaver
 
         ensure_selected_mesh_loaded(state);
 
+        // Apply view options even if mesh didn't change.
+        {
+            auto& mesh = m_viewer.data(m_loaded_mesh_index);
+            const float line_w = std::clamp(state.view.wireframe_size, 1.0f, 12.0f);
+            mesh.show_faces = 1;
+            mesh.show_lines = state.view.wireframe ? 1 : 0;
+            mesh.line_width = line_w;
+        }
+
         const auto& r = state.cloth_view;
         auto& core = m_viewer.core();
         core.viewport = Eigen::Vector4f((float)r.x, (float)r.y, (float)r.width, (float)r.height);
-        core.background_color = Eigen::Vector4f(0.06f, 0.06f, 0.07f, 1.0f);
+        core.background_color = Eigen::Vector4f(0.45f, 0.45f, 0.47f, 1.0f);
         core.depth_test = true;
+        core.lighting_factor = std::clamp(state.view.light_amount, 0.0f, 2.0f);
+
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(r.x, r.y, r.width, r.height);
 
         m_viewer.draw();
 
