@@ -1,332 +1,287 @@
 #include "render/Renderer.h"
 
-#include <cmath>
-#include <vector>
+#include "core/Paths.h"
+
+#include <Eigen/Core>
 #include <glad/glad.h>
+#include <igl/read_triangle_mesh.h>
+
+#include <GLFW/glfw3.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <vector>
 
 namespace poseweaver
 {
     namespace
     {
-        struct Vec3
+        static void append_segment(
+            std::vector<Eigen::RowVector3d>& p1,
+            std::vector<Eigen::RowVector3d>& p2,
+            std::vector<Eigen::RowVector3d>& c,
+            const Eigen::RowVector3d& a,
+            const Eigen::RowVector3d& b,
+            const Eigen::RowVector3d& col)
         {
-            float x = 0.0f;
-            float y = 0.0f;
-            float z = 0.0f;
-        };
-
-        struct Mat4
-        {
-            float m[16] = {
-                1, 0, 0, 0,
-                0, 1, 0, 0,
-                0, 0, 1, 0,
-                0, 0, 0, 1,
-            };
-        };
-
-        static Mat4 mul(const Mat4& a, const Mat4& b)
-        {
-            Mat4 out;
-            for (int c = 0; c < 4; ++c)
-            {
-                for (int r = 0; r < 4; ++r)
-                {
-                    out.m[c * 4 + r] =
-                        a.m[0 * 4 + r] * b.m[c * 4 + 0] +
-                        a.m[1 * 4 + r] * b.m[c * 4 + 1] +
-                        a.m[2 * 4 + r] * b.m[c * 4 + 2] +
-                        a.m[3 * 4 + r] * b.m[c * 4 + 3];
-                }
-            }
-            return out;
+            p1.push_back(a);
+            p2.push_back(b);
+            c.push_back(col);
         }
 
-        static Mat4 translate(float x, float y, float z)
+        static void build_scene_edges(Eigen::MatrixXd& P1, Eigen::MatrixXd& P2, Eigen::MatrixXd& C)
         {
-            Mat4 t;
-            t.m[12] = x;
-            t.m[13] = y;
-            t.m[14] = z;
-            return t;
-        }
+            std::vector<Eigen::RowVector3d> p1;
+            std::vector<Eigen::RowVector3d> p2;
+            std::vector<Eigen::RowVector3d> c;
 
-        static Mat4 rotate_x(float deg)
-        {
-            const float a = deg * 3.14159265f / 180.0f;
-            const float c = std::cos(a);
-            const float s = std::sin(a);
-            Mat4 r;
-            r.m[5] = c;
-            r.m[6] = s;
-            r.m[9] = -s;
-            r.m[10] = c;
-            return r;
-        }
+            p1.reserve(8192);
+            p2.reserve(8192);
+            c.reserve(8192);
 
-        static Mat4 rotate_y(float deg)
-        {
-            const float a = deg * 3.14159265f / 180.0f;
-            const float c = std::cos(a);
-            const float s = std::sin(a);
-            Mat4 r;
-            r.m[0] = c;
-            r.m[2] = -s;
-            r.m[8] = s;
-            r.m[10] = c;
-            return r;
-        }
+            // Axes
+            append_segment(p1, p2, c, { 0, 0, 0 }, { 0.75, 0, 0 }, { 1.0, 0.2, 0.2 });
+            append_segment(p1, p2, c, { 0, 0, 0 }, { 0, 0.75, 0 }, { 0.2, 1.0, 0.2 });
+            append_segment(p1, p2, c, { 0, 0, 0 }, { 0, 0, 0.75 }, { 0.2, 0.4, 1.0 });
 
-        static Mat4 perspective(float fov_y_deg, float aspect, float z_near, float z_far)
-        {
-            const float fov = fov_y_deg * 3.14159265f / 180.0f;
-            const float f = 1.0f / std::tan(fov * 0.5f);
-            Mat4 p{};
-            for (float& v : p.m)
-                v = 0.0f;
-            p.m[0] = f / aspect;
-            p.m[5] = f;
-            p.m[10] = (z_far + z_near) / (z_near - z_far);
-            p.m[11] = -1.0f;
-            p.m[14] = (2.0f * z_far * z_near) / (z_near - z_far);
-            return p;
-        }
-
-        struct Vertex
-        {
-            float px, py, pz;
-            float cr, cg, cb;
-        };
-
-        static unsigned int compile_shader(unsigned int type, const char* src)
-        {
-            const unsigned int s = glCreateShader(type);
-            glShaderSource(s, 1, &src, nullptr);
-            glCompileShader(s);
-
-            int ok = 0;
-            glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-            if (!ok)
-            {
-                glDeleteShader(s);
-                return 0;
-            }
-            return s;
-        }
-
-        static unsigned int link_program(unsigned int vs, unsigned int fs)
-        {
-            const unsigned int p = glCreateProgram();
-            glAttachShader(p, vs);
-            glAttachShader(p, fs);
-            glLinkProgram(p);
-
-            int ok = 0;
-            glGetProgramiv(p, GL_LINK_STATUS, &ok);
-            if (!ok)
-            {
-                glDeleteProgram(p);
-                return 0;
-            }
-            return p;
-        }
-
-        static Mat4 build_mvp(int width, int height)
-        {
-            const float aspect = (height > 0) ? (float)width / (float)height : 1.0f;
-            const Mat4 p = perspective(45.0f, aspect, 0.05f, 100.0f);
-            Mat4 v = mul(rotate_y(-35.0f), rotate_x(25.0f));
-            v = mul(translate(0.0f, -0.7f, -4.0f), v);
-            return mul(p, v);
-        }
-
-        static void push_line(std::vector<Vertex>& v, Vec3 a, Vec3 b, Vec3 c)
-        {
-            v.push_back(Vertex{ a.x, a.y, a.z, c.x, c.y, c.z });
-            v.push_back(Vertex{ b.x, b.y, b.z, c.x, c.y, c.z });
-        }
-
-        static void build_scene_lines(std::vector<Vertex>& out)
-        {
-            out.clear();
-            out.reserve(8192);
-
-            push_line(out, { 0, 0, 0 }, { 0.75f, 0, 0 }, { 1.0f, 0.2f, 0.2f });
-            push_line(out, { 0, 0, 0 }, { 0, 0.75f, 0 }, { 0.2f, 1.0f, 0.2f });
-            push_line(out, { 0, 0, 0 }, { 0, 0, 0.75f }, { 0.2f, 0.4f, 1.0f });
-
-            const float extent = 2.0f;
+            // Ground grid
+            const double extent = 2.0;
             const int steps = 20;
-            const Vec3 grid_col{ 0.35f, 0.35f, 0.35f };
+            const Eigen::RowVector3d grid_col{ 0.45, 0.45, 0.45 };
             for (int i = 0; i <= steps; ++i)
             {
-                const float t = (float)i / (float)steps;
-                const float x = -extent + 2.0f * extent * t;
-                push_line(out, { x, 0, -extent }, { x, 0, extent }, grid_col);
+                const double t = (double)i / (double)steps;
+                const double x = -extent + 2.0 * extent * t;
+                append_segment(p1, p2, c, { x, 0.0, -extent }, { x, 0.0, extent }, grid_col);
 
-                const float z = -extent + 2.0f * extent * t;
-                push_line(out, { -extent, 0, z }, { extent, 0, z }, grid_col);
+                const double z = -extent + 2.0 * extent * t;
+                append_segment(p1, p2, c, { -extent, 0.0, z }, { extent, 0.0, z }, grid_col);
             }
 
-            const Vec3 cloth_col{ 0.95f, 0.85f, 0.2f };
-            const float size = 0.8f;
-            const int n = 18;
+            // Cloth preview grid
+            // const Eigen::RowVector3d cloth_col{ 0.95, 0.85, 0.20 };
+            // const double size = 0.8;
+            // const int n = 18;
 
-            for (int j = 0; j <= n; ++j)
+            // for (int j = 0; j <= n; ++j)
+            // {
+            //     const double v = (double)j / (double)n;
+            //     const double z = -size + 2.0 * size * v;
+            //     for (int i = 0; i < n; ++i)
+            //     {
+            //         const double u0 = (double)i / (double)n;
+            //         const double u1 = (double)(i + 1) / (double)n;
+            //         const double x0 = -size + 2.0 * size * u0;
+            //         const double x1 = -size + 2.0 * size * u1;
+            //         append_segment(p1, p2, c, { x0, 1.0, z }, { x1, 1.0, z }, cloth_col);
+            //     }
+            // }
+
+            // for (int i = 0; i <= n; ++i)
+            // {
+            //     const double u = (double)i / (double)n;
+            //     const double x = -size + 2.0 * size * u;
+            //     for (int j = 0; j < n; ++j)
+            //     {
+            //         const double v0 = (double)j / (double)n;
+            //         const double v1 = (double)(j + 1) / (double)n;
+            //         const double z0 = -size + 2.0 * size * v0;
+            //         const double z1 = -size + 2.0 * size * v1;
+            //         append_segment(p1, p2, c, { x, 1.0, z0 }, { x, 1.0, z1 }, cloth_col);
+            //     }
+            // }
+
+            const int count = (int)p1.size();
+            P1.resize(count, 3);
+            P2.resize(count, 3);
+            C.resize(count, 3);
+            for (int i = 0; i < count; ++i)
             {
-                const float v = (float)j / (float)n;
-                const float z = -size + 2.0f * size * v;
-                for (int i = 0; i < n; ++i)
-                {
-                    const float u0 = (float)i / (float)n;
-                    const float u1 = (float)(i + 1) / (float)n;
-                    const float x0 = -size + 2.0f * size * u0;
-                    const float x1 = -size + 2.0f * size * u1;
-                    push_line(out, { x0, 1.0f, z }, { x1, 1.0f, z }, cloth_col);
-                }
-            }
-
-            for (int i = 0; i <= n; ++i)
-            {
-                const float u = (float)i / (float)n;
-                const float x = -size + 2.0f * size * u;
-                for (int j = 0; j < n; ++j)
-                {
-                    const float v0 = (float)j / (float)n;
-                    const float v1 = (float)(j + 1) / (float)n;
-                    const float z0 = -size + 2.0f * size * v0;
-                    const float z1 = -size + 2.0f * size * v1;
-                    push_line(out, { x, 1.0f, z0 }, { x, 1.0f, z1 }, cloth_col);
-                }
+                P1.row(i) = p1[(size_t)i];
+                P2.row(i) = p2[(size_t)i];
+                C.row(i) = c[(size_t)i];
             }
         }
-    }
 
-    bool Renderer::ensure_initialized()
-    {
-        if (m_program != 0)
-            return true;
-
-        const char* vs_src = R"(
-    #version 330 core
-    layout(location = 0) in vec3 a_pos;
-    layout(location = 1) in vec3 a_col;
-    uniform mat4 u_mvp;
-    out vec3 v_col;
-    void main() {
-    v_col = a_col;
-    gl_Position = u_mvp * vec4(a_pos, 1.0);
-    }
-    )";
-
-        const char* fs_src = R"(
-    #version 330 core
-    in vec3 v_col;
-    out vec4 out_col;
-    void main() {
-    out_col = vec4(v_col, 1.0);
-    }
-    )";
-
-        const unsigned int vs = compile_shader(GL_VERTEX_SHADER, vs_src);
-        const unsigned int fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
-        if (!vs || !fs)
-            return false;
-
-        m_program = link_program(vs, fs);
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        if (!m_program)
-            return false;
-
-        m_u_mvp = glGetUniformLocation(m_program, "u_mvp");
-        if (m_u_mvp < 0)
-            return false;
-
-        glGenVertexArrays(1, &m_vao);
-        glGenBuffers(1, &m_vbo);
-        glBindVertexArray(m_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_DYNAMIC_DRAW);
-
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(3 * sizeof(float)));
-
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-
-        return true;
-    }
-
-    void Renderer::shutdown()
-    {
-        if (m_vbo)
+        static int mouse_button_to_igl(int glfw_button)
         {
-            glDeleteBuffers(1, &m_vbo);
-            m_vbo = 0;
+            if (glfw_button == GLFW_MOUSE_BUTTON_LEFT)
+                return (int)igl::opengl::glfw::Viewer::MouseButton::Left;
+            if (glfw_button == GLFW_MOUSE_BUTTON_RIGHT)
+                return (int)igl::opengl::glfw::Viewer::MouseButton::Right;
+            return (int)igl::opengl::glfw::Viewer::MouseButton::Middle;
         }
-        if (m_vao)
-        {
-            glDeleteVertexArrays(1, &m_vao);
-            m_vao = 0;
-        }
-        if (m_program)
-        {
-            glDeleteProgram(m_program);
-            m_program = 0;
-        }
-        m_u_mvp = -1;
     }
 
-    void Renderer::render_cloth_view(const AppState& state)
+    void Renderer::init(GLFWwindow* window)
     {
-        if (!ensure_initialized())
+        m_window = window;
+        ensure_initialized();
+    }
+
+    void Renderer::ensure_initialized()
+    {
+        if (m_initialized)
+            return;
+        if (m_window == nullptr)
             return;
 
-        const Mat4 mvp = build_mvp(state.cloth_view.width, state.cloth_view.height);
+        m_viewer.window = m_window;
+        m_viewer.init();
 
-        std::vector<Vertex> lines;
-        build_scene_lines(lines);
+        m_grid_mesh_index = 0;
+        m_loaded_mesh_index = m_viewer.append_mesh(true);
 
-        glUseProgram(m_program);
-        glUniformMatrix4fv(m_u_mvp, 1, GL_FALSE, mvp.m);
-        glBindVertexArray(m_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(lines.size() * sizeof(Vertex)), lines.data(), GL_DYNAMIC_DRAW);
+        // Keep the loaded mesh hidden until a selection is made.
+        m_viewer.data(m_loaded_mesh_index).set_visible(false);
 
-        glEnable(GL_DEPTH_TEST);
-        glDrawArrays(GL_LINES, 0, (GLsizei)lines.size());
+        ensure_grid_built();
 
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-        glUseProgram(0);
+        m_initialized = true;
+    }
+
+    void Renderer::ensure_grid_built()
+    {
+        Eigen::MatrixXd P1, P2, C;
+        build_scene_edges(P1, P2, C);
+
+        auto& grid = m_viewer.data(m_grid_mesh_index);
+        grid.clear();
+        grid.show_faces = 0;
+        grid.show_lines = 0;
+        grid.line_width = 2.5f;
+        grid.add_edges(P1, P2, C);
+        grid.set_visible(true);
+    }
+
+    void Renderer::ensure_selected_mesh_loaded(const AppState& state)
+    {
+        std::string desired;
+        if (state.selection.mesh_index >= 0 && state.selection.mesh_index < (int)state.selection.meshes.size())
+            desired = state.selection.meshes[(size_t)state.selection.mesh_index];
+
+        if (desired == m_loaded_mesh_name)
+            return;
+
+        auto& data = m_viewer.data(m_loaded_mesh_index);
+
+        if (desired.empty())
+        {
+            data.clear();
+            data.set_visible(false);
+            m_loaded_mesh_name.clear();
+            return;
+        }
+
+        const std::filesystem::path mesh_path = assets_dir() / "mesh" / desired;
+
+        Eigen::MatrixXd V;
+        Eigen::MatrixXi F;
+        const bool ok = igl::read_triangle_mesh(mesh_path.string(), V, F);
+        if (!ok)
+        {
+            data.clear();
+            data.set_visible(false);
+            m_loaded_mesh_name.clear();
+            return;
+        }
+
+        data.clear();
+        data.set_mesh(V, F);
+        data.show_lines = 0;
+        data.show_overlay = 0;
+        data.set_visible(true);
+
+        // Fit camera to the newly loaded mesh.
+        m_viewer.core().align_camera_center(V, F);
+
+        m_loaded_mesh_name = std::move(desired);
+    }
+
+    void Renderer::on_framebuffer_resize(int fb_width, int fb_height)
+    {
+        m_last_fb_w = fb_width;
+        m_last_fb_h = fb_height;
+
+        m_viewer.post_resize(fb_width, fb_height);
+    }
+
+    void Renderer::on_cursor_pos(double x, double y)
+    {
+        if (!m_window)
+            return;
+
+        int win_w = 0, win_h = 0;
+        int fb_w = 0, fb_h = 0;
+        glfwGetWindowSize(m_window, &win_w, &win_h);
+        glfwGetFramebufferSize(m_window, &fb_w, &fb_h);
+
+        const double sx = (win_w > 0) ? (double)fb_w / (double)win_w : 1.0;
+        const double sy = (win_h > 0) ? (double)fb_h / (double)win_h : 1.0;
+
+        m_viewer.mouse_move((int)(x * sx), (int)(y * sy));
+    }
+
+    void Renderer::on_mouse_button(int button, int action, int mods)
+    {
+        const int mb = mouse_button_to_igl(button);
+        if (action == GLFW_PRESS)
+            m_viewer.mouse_down((igl::opengl::glfw::Viewer::MouseButton)mb, mods);
+        else if (action == GLFW_RELEASE)
+            m_viewer.mouse_up((igl::opengl::glfw::Viewer::MouseButton)mb, mods);
+    }
+
+    void Renderer::on_scroll(double /*xoffset*/, double yoffset)
+    {
+        m_viewer.mouse_scroll((float)yoffset);
+    }
+
+    void Renderer::on_key(int key, int /*scancode*/, int action, int mods)
+    {
+        if (action == GLFW_PRESS)
+            m_viewer.key_down(key, mods);
+        else if (action == GLFW_RELEASE)
+            m_viewer.key_up(key, mods);
     }
 
     void Renderer::render(const AppState& state, int fb_width, int fb_height)
     {
+        ensure_initialized();
+
+        if (fb_width != m_last_fb_w || fb_height != m_last_fb_h)
+            on_framebuffer_resize(fb_width, fb_height);
+
         glViewport(0, 0, fb_width, fb_height);
         glDisable(GL_SCISSOR_TEST);
         glClearColor(0.12f, 0.12f, 0.13f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LEQUAL);
-
         if (!state.cloth_view.valid)
             return;
 
+        ensure_selected_mesh_loaded(state);
+
         const auto& r = state.cloth_view;
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(r.x, r.y, r.width, r.height);
-        glViewport(r.x, r.y, r.width, r.height);
+        auto& core = m_viewer.core();
+        core.viewport = Eigen::Vector4f((float)r.x, (float)r.y, (float)r.width, (float)r.height);
+        core.background_color = Eigen::Vector4f(0.06f, 0.06f, 0.07f, 1.0f);
+        core.depth_test = true;
 
-        glClearColor(0.06f, 0.06f, 0.07f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        render_cloth_view(state);
+        m_viewer.draw();
 
         glDisable(GL_SCISSOR_TEST);
+    }
+
+    void Renderer::shutdown()
+    {
+        m_initialized = false;
+        m_window = nullptr;
+        m_loaded_mesh_name.clear();
+
+        for (auto& data : m_viewer.data_list)
+            data.meshgl.free();
+        for (auto& core : m_viewer.core_list)
+            core.shut();
+        m_viewer.shutdown_plugins();
     }
 }
