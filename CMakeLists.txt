@@ -8,58 +8,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(POSEWEAVER_BUILD_APP "Build PoseWeaver app" ON)
 
-find_package(OpenGL REQUIRED)
+# External dependencies
 
-# GLAD (same pinned commit as libigl recipe)
 include(FetchContent)
+
+set(LIBIGL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LIBIGL_BUILD_TUTORIALS OFF CACHE BOOL "" FORCE)
+set(LIBIGL_INSTALL OFF CACHE BOOL "" FORCE)
+
+# Enable the modules that come with libigl that we need
+set(LIBIGL_GLFW ON CACHE BOOL "" FORCE)
+set(LIBIGL_IMGUI ON CACHE BOOL "" FORCE)
+set(LIBIGL_OPENGL ON CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
-	glad
-	GIT_REPOSITORY https://github.com/libigl/libigl-glad.git
-	GIT_TAG        651a425101365aa6e8504988ef9bb363d066c5ee
+	libigl
+	GIT_REPOSITORY https://github.com/libigl/libigl.git
+	GIT_TAG        v2.6.0
 )
-FetchContent_MakeAvailable(glad)
-add_library(glad::glad ALIAS glad)
-
-# GLFW
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-if(NOT DEFINED GLFW_BUILD_WAYLAND)
-	set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "")
-endif()
-if(NOT DEFINED GLFW_BUILD_X11)
-	set(GLFW_BUILD_X11 ON CACHE BOOL "")
-endif()
-add_subdirectory(external/glfw)
-
-# Dear ImGui (as a submodule)
-add_library(imgui STATIC
-	external/imgui/imgui.cpp
-	external/imgui/imgui_demo.cpp
-	external/imgui/imgui_draw.cpp
-	external/imgui/imgui_tables.cpp
-	external/imgui/imgui_widgets.cpp
-	external/imgui/backends/imgui_impl_glfw.cpp
-	external/imgui/backends/imgui_impl_opengl3.cpp
-)
-
-
-target_include_directories(imgui PUBLIC
-	external/imgui
-	external/imgui/backends
-	external/glfw/include
-)
-
-target_compile_definitions(imgui PUBLIC GLFW_INCLUDE_NONE)
-target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_GLAD)
-target_link_libraries(imgui PUBLIC glfw OpenGL::GL glad::glad)
-
-if(MSVC)
-	target_compile_options(imgui PRIVATE /W4)
-else()
-	target_compile_options(imgui PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+FetchContent_MakeAvailable(libigl)
 
 # App
 
@@ -77,8 +44,11 @@ if(POSEWEAVER_BUILD_APP)
 	)
 
 	target_include_directories(poseweaver PRIVATE src)
-	target_compile_definitions(poseweaver PRIVATE GLFW_INCLUDE_NONE)
-	target_link_libraries(poseweaver PRIVATE imgui glfw OpenGL::GL glad::glad)
+	target_compile_definitions(poseweaver PRIVATE
+		GLFW_INCLUDE_NONE
+		IMGUI_IMPL_OPENGL_LOADER_GLAD
+	)
+	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui)
 
 	target_compile_definitions(poseweaver PRIVATE
 		POSEWEAVER_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
