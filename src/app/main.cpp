@@ -105,6 +105,7 @@ namespace
             glfwSetWindowShouldClose(window, GLFW_TRUE);
 
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
+
         if (ImGui::GetIO().WantCaptureKeyboard)
             return;
 

@@ -1,6 +1,7 @@
 #include "ui/Ui.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstddef>
 #include <string>
 #include <imgui.h>
@@ -68,7 +69,7 @@ namespace poseweaver
         const ImVec2 console_pos = ImVec2(work_pos.x, work_pos.y + top_h);
         const ImVec2 console_size = ImVec2(work_size.x, bottom_h);
 
-        // Left controls (Simulation / SMPL / Garments in one resizable window)
+        // Left controls
         if (show_controls && left_size.x > 1.0f && left_size.y > 1.0f)
         {
             ImGui::SetNextWindowPos(left_pos, ImGuiCond_Always);
@@ -91,7 +92,6 @@ namespace poseweaver
             if (hovered || active)
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
-            // Draw splitter handle
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImVec2 p0 = ImGui::GetWindowPos();
             const ImVec2 p1 = ImVec2(p0.x + splitter_size.x, p0.y + splitter_size.y);
@@ -152,19 +152,6 @@ namespace poseweaver
     {
         ImGui::Begin("Cloth View", &state.show_cloth_view, fixed_panel_flags() | ImGuiWindowFlags_NoBackground);
 
-        ImGui::TextUnformatted("View");
-        ImGui::SameLine();
-        ImGui::Checkbox("Wireframe", &state.view.wireframe);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(120.0f);
-        ImGui::SliderFloat("Size", &state.view.wireframe_size, 1.0f, 12.0f, "%.1f");
-
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(140.0f);
-        ImGui::SliderFloat("Light", &state.view.light_amount, 0.0f, 2.0f, "%.2f");
-
-        ImGui::Separator();
-
         const ImVec2 top_left = ImGui::GetCursorScreenPos();
         const ImVec2 avail = ImGui::GetContentRegionAvail();
 
@@ -173,11 +160,17 @@ namespace poseweaver
         const ImGuiIO& io = ImGui::GetIO();
         const ImVec2 scale = io.DisplayFramebufferScale;
 
-        const int x = static_cast<int>(top_left.x * scale.x);
+        // Convert ImGui screen-space (absolute) coordinates into window-local framebuffer coordinates.
+        // ImGui::GetCursorScreenPos() is in screen space relative to the platform viewport.
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const ImVec2 vp_pos = vp ? vp->Pos : ImVec2(0.0f, 0.0f);
+        const ImVec2 local = ImVec2(top_left.x - vp_pos.x, top_left.y - vp_pos.y);
+
+        const int x = static_cast<int>(local.x * scale.x);
         const int w = static_cast<int>(avail.x * scale.x);
 
         // ImGui Y is top-left, OpenGL expects bottom-left.
-        const int y_top = static_cast<int>(top_left.y * scale.y);
+        const int y_top = static_cast<int>(local.y * scale.y);
         const int h = static_cast<int>(avail.y * scale.y);
         const int y = frame.fb_height - (y_top + h);
 
@@ -236,6 +229,8 @@ namespace poseweaver
 
         if (state.show_smpl && ImGui::CollapsingHeader("SMPL", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            ImGui::Checkbox("Show character", &state.show_smpl_character);
+
             if (ImGui::TreeNode("Gender"))
             {
                 int gender = (state.selection.gender == SmplType::Male) ? 0 : 1;
@@ -260,13 +255,21 @@ namespace poseweaver
                 }
                 else
                 {
-                    if (state.selection.pose_index < 0)
-                        state.selection.pose_index = 0;
+                    if (state.selection.pose_index < -1)
+                        state.selection.pose_index = -1;
                     if (state.selection.pose_index >= (int)state.selection.poses.size())
                         state.selection.pose_index = (int)state.selection.poses.size() - 1;
 
                     if (ImGui::BeginListBox("##poses", ImVec2(-1.0f, 220.0f)))
                     {
+                        {
+                            const bool selected = (state.selection.pose_index == -1);
+                            if (ImGui::Selectable("(Rest / T-pose)", selected))
+                                state.selection.pose_index = -1;
+                            if (selected)
+                                ImGui::SetItemDefaultFocus();
+                        }
+
                         for (int i = 0; i < (int)state.selection.poses.size(); ++i)
                         {
                             const bool selected = (i == state.selection.pose_index);
@@ -277,6 +280,18 @@ namespace poseweaver
                         }
                         ImGui::EndListBox();
                     }
+                }
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNode("Shape (betas)"))
+            {
+                ImGui::TextUnformatted("Betas");
+                for (int i = 0; i < (int)state.smpl_shape.betas.size(); ++i)
+                {
+                    char label[32];
+                    std::snprintf(label, sizeof(label), "beta[%d]", i);
+                    ImGui::SliderFloat(label, &state.smpl_shape.betas[(size_t)i], -3.0f, 3.0f, "%.2f");
                 }
                 ImGui::TreePop();
             }

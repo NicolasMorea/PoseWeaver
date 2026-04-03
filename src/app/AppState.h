@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -61,17 +62,17 @@ namespace poseweaver
         std::vector<std::string> lines;
     };
 
-    struct ViewOptions
-    {
-        bool wireframe = false;
-        float wireframe_size = 1.5f;
-        float light_amount = 1.0f;
-    };
-
     struct UiLayoutState
     {
         // Width of the left-side controls panel in screen space (pixels).
         float left_panel_width = 360.0f;
+    };
+
+    struct SmplShapeState
+    {
+        // SMPLH shape parameters (betas).
+        // The shipped SMPLH models in assets/smplh use 16 betas.
+        std::array<float, 16> betas{};
     };
 
     struct AppState
@@ -81,7 +82,7 @@ namespace poseweaver
         SelectionState selection;
         ViewportRect cloth_view;
 
-        ViewOptions view;
+        SmplShapeState smpl_shape;
         UiLayoutState layout;
 
         DebugConsoleState console;
@@ -89,6 +90,7 @@ namespace poseweaver
         bool show_cloth_view = true;
         bool show_simulation = true;
         bool show_smpl = true;
+                bool show_smpl_character = true;
         bool show_garments = true;
 		bool show_console = true;
     };
