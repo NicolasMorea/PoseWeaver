@@ -273,6 +273,37 @@ namespace poseweaver
             }
         }
 
+        ImGui::Separator();
+
+        ImGui::TextUnformatted("Meshes (assets/mesh)");
+        state.selection.meshes = assets.meshes();
+
+        if (state.selection.meshes.empty())
+        {
+            ImGui::TextUnformatted("No meshes found. Add files under assets/mesh/");
+            state.selection.mesh_index = -1;
+        }
+        else
+        {
+            if (state.selection.mesh_index < 0)
+                state.selection.mesh_index = 0;
+            if (state.selection.mesh_index >= (int)state.selection.meshes.size())
+                state.selection.mesh_index = (int)state.selection.meshes.size() - 1;
+
+            if (ImGui::BeginListBox("##meshes", ImVec2(-1.0f, 220.0f)))
+            {
+                for (int i = 0; i < (int)state.selection.meshes.size(); ++i)
+                {
+                    const bool selected = (i == state.selection.mesh_index);
+                    if (ImGui::Selectable(state.selection.meshes[i].c_str(), selected))
+                        state.selection.mesh_index = i;
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndListBox();
+            }
+        }
+
         ImGui::End();
     }
 

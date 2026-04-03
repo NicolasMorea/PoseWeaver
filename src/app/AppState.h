@@ -50,6 +50,9 @@ namespace poseweaver
 
         std::vector<std::string> garments;
         int garment_index = -1;
+
+        std::vector<std::string> meshes;
+        int mesh_index = -1;
     };
 
     struct DebugConsoleState
