@@ -19,9 +19,7 @@ namespace poseweaver
     private:
         void draw_main_menu(AppState& state, const AssetIndex& assets);
         void draw_cloth_view(AppState& state, const UiFrameInfo& frame);
-        void draw_simulation(AppState& state);
-        void draw_smpl(AppState& state, const AssetIndex& assets);
-        void draw_garments(AppState& state, const AssetIndex& assets);
+		void draw_controls(AppState& state, const AssetIndex& assets);
 		void draw_console(AppState& state);
     };
 }
