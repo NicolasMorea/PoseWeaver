@@ -8,15 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(POSEWEAVER_BUILD_APP "Build PoseWeaver app" ON)
 
-# External dependencies
-
 include(FetchContent)
 
 set(LIBIGL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LIBIGL_BUILD_TUTORIALS OFF CACHE BOOL "" FORCE)
 set(LIBIGL_INSTALL OFF CACHE BOOL "" FORCE)
 
-# Enable the modules that come with libigl that we need
 set(LIBIGL_GLFW ON CACHE BOOL "" FORCE)
 set(LIBIGL_IMGUI ON CACHE BOOL "" FORCE)
 set(LIBIGL_OPENGL ON CACHE BOOL "" FORCE)
@@ -27,8 +24,6 @@ FetchContent_Declare(
 	GIT_TAG        v2.6.0
 )
 FetchContent_MakeAvailable(libigl)
-
-# App
 
 if(POSEWEAVER_BUILD_APP)
 	add_executable(poseweaver
@@ -44,19 +39,29 @@ if(POSEWEAVER_BUILD_APP)
 	)
 
 	target_include_directories(poseweaver PRIVATE src)
+
 	target_compile_definitions(poseweaver PRIVATE
 		GLFW_INCLUDE_NONE
 		IMGUI_IMPL_OPENGL_LOADER_GLAD
-	)
-	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui)
-
-	target_compile_definitions(poseweaver PRIVATE
 		POSEWEAVER_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
 	)
+
+	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui)
 
 	if(MSVC)
 		target_compile_options(poseweaver PRIVATE /W4)
 	else()
 		target_compile_options(poseweaver PRIVATE -Wall -Wextra -Wpedantic)
+	endif()
+
+	# Treat libigl headers as system headers to suppress warnings from them
+	get_target_property(IGL_GLFW_INCLUDES igl::glfw INTERFACE_INCLUDE_DIRECTORIES)
+	if(IGL_GLFW_INCLUDES)
+		target_include_directories(poseweaver SYSTEM PRIVATE ${IGL_GLFW_INCLUDES})
+	endif()
+
+	get_target_property(IGL_IMGUI_INCLUDES igl::imgui INTERFACE_INCLUDE_DIRECTORIES)
+	if(IGL_IMGUI_INCLUDES)
+		target_include_directories(poseweaver SYSTEM PRIVATE ${IGL_IMGUI_INCLUDES})
 	endif()
 endif()
