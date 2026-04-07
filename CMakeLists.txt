@@ -70,6 +70,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/core/Paths.h
 		src/simulation/ClothMeshProcessor.cpp
 		src/simulation/ClothMeshProcessor.h
+		src/simulation/ClothToSmplMapping.cpp
+		src/simulation/ClothToSmplMapping.h
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
