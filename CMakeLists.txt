@@ -47,6 +47,20 @@ if(NOT cnpy_POPULATED)
 	target_link_libraries(cnpy PUBLIC ZLIB::ZLIB)
 endif()
 
+# Ensure ZIP64 .npz files load correctly (idempotent).
+if(EXISTS "${cnpy_SOURCE_DIR}/cnpy.cpp")
+	execute_process(
+		COMMAND ${CMAKE_COMMAND}
+			-DSOURCE_DIR=${cnpy_SOURCE_DIR}
+			-DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/cmake/patches/cnpy-zip64.patch
+			-P ${CMAKE_CURRENT_LIST_DIR}/cmake/patch_cnpy_zip64.cmake
+		RESULT_VARIABLE CNPY_PATCH_RESULT
+	)
+	if(NOT CNPY_PATCH_RESULT EQUAL 0)
+		message(FATAL_ERROR "Failed to apply cnpy ZIP64 patch")
+	endif()
+endif()
+
 if(POSEWEAVER_BUILD_APP)
 	add_executable(poseweaver
 		src/app/main.cpp
@@ -54,6 +68,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/core/Assets.cpp
 		src/core/Assets.h
 		src/core/Paths.h
+		src/simulation/ClothMeshProcessor.cpp
+		src/simulation/ClothMeshProcessor.h
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp

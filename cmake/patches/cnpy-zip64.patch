@@ -1,0 +1,173 @@
+diff --git a/cnpy.cpp b/cnpy.cpp
+index 2d28578..41eef81 100644
+--- a/cnpy.cpp
++++ b/cnpy.cpp
+@@ -12,6 +12,58 @@
+ #include<stdexcept>
+ #include <regex>
+ 
++namespace
++{
++    static uint16_t read_le_u16(const char* p)
++    {
++        uint16_t v;
++        std::memcpy(&v, p, sizeof(v));
++        return v;
++    }
++
++    static uint32_t read_le_u32(const char* p)
++    {
++        uint32_t v;
++        std::memcpy(&v, p, sizeof(v));
++        return v;
++    }
++
++    static uint64_t read_le_u64(const char* p)
++    {
++        uint64_t v;
++        std::memcpy(&v, p, sizeof(v));
++        return v;
++    }
++
++    // Parse Zip64 extended information extra field (0x0001) to recover
++    // 64-bit compressed/uncompressed sizes when local header stores 0xFFFFFFFF.
++    static bool parse_zip64_sizes(const std::vector<char>& extra, uint64_t& uncompressed, uint64_t& compressed)
++    {
++        size_t i = 0;
++        while (i + 4 <= extra.size())
++        {
++            const uint16_t header_id = read_le_u16(&extra[i]);
++            const uint16_t data_size = read_le_u16(&extra[i + 2]);
++            i += 4;
++            if (i + data_size > extra.size())
++                return false;
++
++            if (header_id == 0x0001)
++            {
++                // For local file headers, sizes appear as:
++                //   uncompressed size (8 bytes) then compressed size (8 bytes)
++                if (data_size < 16)
++                    return false;
++                uncompressed = read_le_u64(&extra[i]);
++                compressed = read_le_u64(&extra[i + 8]);
++                return true;
++            }
++            i += data_size;
++        }
++        return false;
++    }
++}
++
+ char cnpy::BigEndianTest() {
+     int x = 1;
+     return (((char *)&x)[0]) ? '<' : '>';
+@@ -188,7 +240,7 @@ cnpy::NpyArray load_the_npy_file(FILE* fp) {
+     return arr;
+ }
+ 
+-cnpy::NpyArray load_the_npz_array(FILE* fp, uint32_t compr_bytes, uint32_t uncompr_bytes) {
++cnpy::NpyArray load_the_npz_array(FILE* fp, size_t compr_bytes, size_t uncompr_bytes) {
+ 
+     std::vector<unsigned char> buffer_compr(compr_bytes);
+     std::vector<unsigned char> buffer_uncompr(uncompr_bytes);
+@@ -246,7 +298,7 @@ cnpy::npz_t cnpy::npz_load(std::string fname) {
+         if(local_header[2] != 0x03 || local_header[3] != 0x04) break;
+ 
+         //read in the variable name
+-        uint16_t name_len = *(uint16_t*) &local_header[26];
++        uint16_t name_len = read_le_u16(&local_header[26]);
+         std::string varname(name_len,' ');
+         size_t vname_res = fread(&varname[0],sizeof(char),name_len,fp);
+         if(vname_res != name_len)
+@@ -256,20 +308,29 @@ cnpy::npz_t cnpy::npz_load(std::string fname) {
+         varname.erase(varname.end()-4,varname.end());
+ 
+         //read in the extra field
+-        uint16_t extra_field_len = *(uint16_t*) &local_header[28];
++        uint16_t extra_field_len = read_le_u16(&local_header[28]);
++        std::vector<char> extra;
+         if(extra_field_len > 0) {
+-            std::vector<char> buff(extra_field_len);
+-            size_t efield_res = fread(&buff[0],sizeof(char),extra_field_len,fp);
++            extra.resize(extra_field_len);
++            size_t efield_res = fread(&extra[0],sizeof(char),extra_field_len,fp);
+             if(efield_res != extra_field_len)
+                 throw std::runtime_error("npz_load: failed fread");
+         }
+ 
+-        uint16_t compr_method = *reinterpret_cast<uint16_t*>(&local_header[0]+8);
+-        uint32_t compr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+18);
+-        uint32_t uncompr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+22);
++        uint16_t compr_method = read_le_u16(&local_header[8]);
++        uint32_t compr_bytes32 = read_le_u32(&local_header[18]);
++        uint32_t uncompr_bytes32 = read_le_u32(&local_header[22]);
++
++        uint64_t compr_bytes = compr_bytes32;
++        uint64_t uncompr_bytes = uncompr_bytes32;
++        if(compr_bytes32 == 0xFFFFFFFFu || uncompr_bytes32 == 0xFFFFFFFFu)
++        {
++            if(!parse_zip64_sizes(extra, uncompr_bytes, compr_bytes))
++                throw std::runtime_error("npz_load: failed to parse Zip64 extra field sizes");
++        }
+ 
+         if(compr_method == 0) {arrays[varname] = load_the_npy_file(fp);}
+-        else {arrays[varname] = load_the_npz_array(fp,compr_bytes,uncompr_bytes);}
++        else {arrays[varname] = load_the_npz_array(fp,(size_t)compr_bytes,(size_t)uncompr_bytes);}
+     }
+ 
+     fclose(fp);
+@@ -291,7 +352,7 @@ cnpy::NpyArray cnpy::npz_load(std::string fname, std::string varname) {
+         if(local_header[2] != 0x03 || local_header[3] != 0x04) break;
+ 
+         //read in the variable name
+-        uint16_t name_len = *(uint16_t*) &local_header[26];
++        uint16_t name_len = read_le_u16(&local_header[26]);
+         std::string vname(name_len,' ');
+         size_t vname_res = fread(&vname[0],sizeof(char),name_len,fp);      
+         if(vname_res != name_len)
+@@ -299,22 +360,37 @@ cnpy::NpyArray cnpy::npz_load(std::string fname, std::string varname) {
+         vname.erase(vname.end()-4,vname.end()); //erase the lagging .npy
+ 
+         //read in the extra field
+-        uint16_t extra_field_len = *(uint16_t*) &local_header[28];
+-        fseek(fp,extra_field_len,SEEK_CUR); //skip past the extra field
+-        
+-        uint16_t compr_method = *reinterpret_cast<uint16_t*>(&local_header[0]+8);
+-        uint32_t compr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+18);
+-        uint32_t uncompr_bytes = *reinterpret_cast<uint32_t*>(&local_header[0]+22);
++        uint16_t extra_field_len = read_le_u16(&local_header[28]);
++        std::vector<char> extra;
++        if(extra_field_len > 0)
++        {
++            extra.resize(extra_field_len);
++            size_t efield_res = fread(&extra[0],sizeof(char),extra_field_len,fp);
++            if(efield_res != extra_field_len)
++                throw std::runtime_error("npz_load: failed fread");
++        }
++
++        uint16_t compr_method = read_le_u16(&local_header[8]);
++        uint32_t compr_bytes32 = read_le_u32(&local_header[18]);
++        uint32_t uncompr_bytes32 = read_le_u32(&local_header[22]);
++
++        uint64_t compr_bytes = compr_bytes32;
++        uint64_t uncompr_bytes = uncompr_bytes32;
++        if(compr_bytes32 == 0xFFFFFFFFu || uncompr_bytes32 == 0xFFFFFFFFu)
++        {
++            if(!parse_zip64_sizes(extra, uncompr_bytes, compr_bytes))
++                throw std::runtime_error("npz_load: failed to parse Zip64 extra field sizes");
++        }
+ 
+         if(vname == varname) {
+-            NpyArray array  = (compr_method == 0) ? load_the_npy_file(fp) : load_the_npz_array(fp,compr_bytes,uncompr_bytes);
++            NpyArray array  = (compr_method == 0) ? load_the_npy_file(fp) : load_the_npz_array(fp,(size_t)compr_bytes,(size_t)uncompr_bytes);
+             fclose(fp);
+             return array;
+         }
+         else {
+             //skip past the data
+-            uint32_t size = *(uint32_t*) &local_header[22];
+-            fseek(fp,size,SEEK_CUR);
++            const uint64_t size = (compr_method == 0) ? uncompr_bytes : compr_bytes;
++            fseek(fp,(long)size,SEEK_CUR);
+         }
+     }
