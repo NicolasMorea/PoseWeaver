@@ -1,6 +1,5 @@
 #include "render/Renderer.h"
 #include "core/Paths.h"
-#include "smpl/Smplh.h"
 
 #include <Eigen/Core>
 #include <glad/glad.h>
@@ -82,10 +81,14 @@ namespace poseweaver
         m_viewer.init();
 
         m_grid_mesh_index = 0;
-        m_loaded_mesh_index = m_viewer.append_mesh(true);
+        m_object_mesh_index = m_viewer.append_mesh(true);
+        m_garment_mesh_index = m_viewer.append_mesh(true);
+        m_smplh_mesh_index = m_viewer.append_mesh(true);
 
-        // Keep the loaded mesh hidden until a selection is made.
-        m_viewer.data(m_loaded_mesh_index).set_visible(false);
+        // Keep meshes hidden until a selection is made / toggles are enabled.
+        m_viewer.data(m_object_mesh_index).set_visible(false);
+        m_viewer.data(m_garment_mesh_index).set_visible(false);
+        m_viewer.data(m_smplh_mesh_index).set_visible(false);
 
         ensure_grid_built();
 
@@ -107,22 +110,25 @@ namespace poseweaver
         grid.set_visible(true);
     }
 
-    void Renderer::ensure_selected_mesh_loaded(const AppState& state)
+    void Renderer::ensure_object_mesh_loaded(const AppState& state)
     {
         std::string desired;
         if (state.selection.mesh_index >= 0 && state.selection.mesh_index < (int)state.selection.meshes.size())
             desired = state.selection.meshes[(size_t)state.selection.mesh_index];
 
-        if (desired == m_loaded_mesh_name)
+        if (desired == m_object_mesh_name)
+        {
+            m_viewer.data(m_object_mesh_index).set_visible(!desired.empty());
             return;
+        }
 
-        auto& data = m_viewer.data(m_loaded_mesh_index);
+        auto& data = m_viewer.data(m_object_mesh_index);
 
         if (desired.empty())
         {
             data.clear();
             data.set_visible(false);
-            m_loaded_mesh_name.clear();
+            m_object_mesh_name.clear();
             return;
         }
 
@@ -135,7 +141,7 @@ namespace poseweaver
         {
             data.clear();
             data.set_visible(false);
-            m_loaded_mesh_name.clear();
+            m_object_mesh_name.clear();
             return;
         }
 
@@ -149,198 +155,7 @@ namespace poseweaver
 
         m_viewer.core().align_camera_center(V, F);
 
-        m_loaded_mesh_name = std::move(desired);
-    }
-
-    void Renderer::ensure_smplh_mesh_loaded(const AppState& state)
-    {
-        const SmplType gender = state.selection.gender;
-        const std::string desired = (gender == SmplType::Male) ? "SMPLH:Male" : "SMPLH:Female";
-        auto& data = m_viewer.data(m_loaded_mesh_index);
-
-        // Allow toggling the SMPL character visibility without disabling the SMPL UI.
-        if (!state.show_smpl_character)
-        {
-            data.set_visible(false);
-            m_smplh_last_show_character = false;
-            return;
-        }
-
-        if (!m_smplh_last_show_character && state.show_smpl_character)
-        {
-            // Coming back from hidden -> ensure we update the view.
-            m_smplh_deform_dirty = true;
-            m_smplh_last_show_character = true;
-        }
-
-        if (!m_smplh_loaded || m_smplh_loaded_gender != gender)
-        {
-            const std::filesystem::path model_path = assets_dir() / "smplh" / ((gender == SmplType::Male) ? "male" : "female") / "model.npz";
-            std::string err;
-            if (!m_smplh_model.load_from_npz(model_path, &err))
-            {
-                std::fprintf(stderr, "[PoseWeaver] Failed to load SMPLH model: %s\n", err.c_str());
-                data.clear();
-                data.set_visible(false);
-                m_loaded_mesh_name.clear();
-                m_smplh_loaded = false;
-                return;
-            }
-            m_smplh_loaded = true;
-            m_smplh_loaded_gender = gender;
-
-            m_smplh_deform_dirty = true;
-            m_smplh_loaded_pose_name.clear();
-            m_smplh_loaded_pose_axis_angle.resize(0);
-
-            m_smplh_params.betas = Eigen::VectorXd::Zero(m_smplh_model.beta_count());
-            // Default to the model's rest pose (T-pose).
-            m_smplh_params.pose_axis_angle = Eigen::VectorXd::Zero(3 * m_smplh_model.joint_count());
-        }
-
-        // Apply shape (betas) from UI state.
-        {
-            const int B = m_smplh_model.beta_count();
-            if (m_smplh_params.betas.size() != B)
-            {
-                m_smplh_params.betas = Eigen::VectorXd::Zero(B);
-				m_smplh_deform_dirty = true;
-			}
-
-            const int n = std::min<int>((int)state.smpl_shape.betas.size(), B);
-            for (int i = 0; i < n; ++i)
-            {
-                const double v = (double)state.smpl_shape.betas[(size_t)i];
-                if (m_smplh_params.betas[i] != v)
-                {
-                    m_smplh_params.betas[i] = v;
-                    m_smplh_deform_dirty = true;
-                }
-            }
-            for (int i = n; i < B; ++i)
-            {
-                if (m_smplh_params.betas[i] != 0.0)
-                {
-                    m_smplh_params.betas[i] = 0.0;
-                    m_smplh_deform_dirty = true;
-                }
-            }
-        }
-
-        // Apply pose selection.
-        {
-            std::string pose_name;
-            if (state.selection.pose_index >= 0 && state.selection.pose_index < (int)state.selection.poses.size())
-                pose_name = state.selection.poses[(size_t)state.selection.pose_index];
-
-            if (pose_name != m_smplh_loaded_pose_name)
-            {
-                m_smplh_loaded_pose_name = pose_name;
-                m_smplh_loaded_pose_axis_angle.resize(0);
-
-                m_smplh_deform_dirty = true;
-
-                if (!pose_name.empty())
-                {
-                    const std::filesystem::path pose_path = assets_dir() / "poses" / pose_name;
-                    std::string pose_err;
-                    Eigen::VectorXd pose_axis_angle;
-                    if (!smplh_load_pose_npz(pose_path, pose_axis_angle, nullptr, &pose_err))
-                    {
-                        std::fprintf(stderr, "[PoseWeaver] Failed to load pose '%s': %s\n", pose_name.c_str(), pose_err.c_str());
-                    }
-                    else
-                    {
-                        m_smplh_loaded_pose_axis_angle = std::move(pose_axis_angle);
-
-                        if (m_smplh_loaded_pose_axis_angle.size() >= 3)
-                        {
-                            std::fprintf(
-                                stderr,
-                                "[PoseWeaver] Loaded pose '%s' (len=%d). root=(%.3f, %.3f, %.3f)\n",
-                                pose_name.c_str(),
-                                (int)m_smplh_loaded_pose_axis_angle.size(),
-                                m_smplh_loaded_pose_axis_angle[0],
-                                m_smplh_loaded_pose_axis_angle[1],
-                                m_smplh_loaded_pose_axis_angle[2]);
-                        }
-                    }
-                }
-            }
-
-            const int expected = 3 * m_smplh_model.joint_count();
-            if (m_smplh_params.pose_axis_angle.size() != expected)
-            {
-                m_smplh_params.pose_axis_angle = Eigen::VectorXd::Zero(expected);
-				m_smplh_deform_dirty = true;
-			}
-
-            if ((int)m_smplh_loaded_pose_axis_angle.size() == expected)
-            {
-                if (!m_smplh_params.pose_axis_angle.isApprox(m_smplh_loaded_pose_axis_angle, 0.0))
-				{
-					m_smplh_params.pose_axis_angle = m_smplh_loaded_pose_axis_angle;
-					m_smplh_deform_dirty = true;
-				}
-            }
-            else
-            {
-                // No pose selected or failed to load -> rest pose.
-				if (!m_smplh_params.pose_axis_angle.isZero())
-				{
-					m_smplh_params.pose_axis_angle.setZero();
-					m_smplh_deform_dirty = true;
-				}
-            }
-        }
-
-                bool recomputed_vertices = false;
-                if (m_smplh_deform_dirty || m_smplh_vertices.rows() == 0)
-        {
-            MatrixX3dRM V_skinned;
-            std::string eval_err;
-            if (!smplh_evaluate_lbs(m_smplh_model, m_smplh_params, V_skinned, &eval_err))
-            {
-                std::fprintf(stderr, "[PoseWeaver] SMPLH LBS eval failed: %s\n", eval_err.c_str());
-                data.clear();
-                data.set_visible(false);
-                m_loaded_mesh_name.clear();
-                return;
-            }
-            m_smplh_vertices = V_skinned;
-            recomputed_vertices = true;
-            m_smplh_deform_dirty = false;
-        }
-
-        const Eigen::MatrixXd& V = m_smplh_vertices;
-        const Eigen::MatrixXi F = m_smplh_model.F;
-
-        // If this is a fresh SMPLH selection, set the mesh topology once and align the camera.
-        // Otherwise, only update skinned vertex positions.
-        if (m_loaded_mesh_name != desired)
-        {
-            data.clear();
-            data.set_mesh(V, F);
-            data.show_faces = 1;
-            data.show_lines = 0;
-            data.show_overlay = 0;
-            data.set_colors(Eigen::RowVector3d(0.85, 0.86, 0.88));
-            data.set_visible(true);
-
-            m_viewer.core().align_camera_center(V, F);
-            m_loaded_mesh_name = desired;
-        }
-        else
-        {
-            // Only push vertices when we've recomputed skinning.
-            // (ViewerData copies V internally, so avoid doing this every frame.)
-            if (recomputed_vertices)
-            {
-                data.set_vertices(V);
-                data.compute_normals();
-            }
-            data.set_visible(true);
-        }
+        m_object_mesh_name = std::move(desired);
     }
 
     void Renderer::on_framebuffer_resize(int fb_width, int fb_height)
@@ -394,9 +209,11 @@ namespace poseweaver
         m_viewer.key_pressed(codepoint, mods);
     }
 
-    void Renderer::render(const AppState& state, int fb_width, int fb_height)
+    void Renderer::render(AppState& state, int fb_width, int fb_height)
     {
         ensure_initialized();
+
+		m_smplh_vertices_recomputed_this_frame = false;
 
         if (fb_width != m_last_fb_w || fb_height != m_last_fb_h)
             on_framebuffer_resize(fb_width, fb_height);
@@ -406,21 +223,49 @@ namespace poseweaver
         glClearColor(0.45f, 0.45f, 0.47f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // If the UI hasn't provided a valid viewport yet (or the Cloth View is hidden),
-        // fall back to rendering into the full framebuffer so the scene is never blank.
         ViewportRect view = state.cloth_view;
         if (!view.valid)
+        {
+            // fall back to rendering into the full framebuffer so the scene is never blank.
             view = ViewportRect{ 0, 0, fb_width, fb_height, (fb_width > 0 && fb_height > 0) };
-
-        if (state.show_smpl)
+        }
+        
+        // SMPL mesh (also needed to pose the garment when a pose is selected)
+        const bool need_body_for_garment = state.show_garment_mesh && (state.selection.pose_index >= 0);
+        if (state.show_smpl || need_body_for_garment)
             ensure_smplh_mesh_loaded(state);
         else
-            ensure_selected_mesh_loaded(state);
+            m_viewer.data(m_smplh_mesh_index).set_visible(false);
+
+        // Object mesh (assets/mesh)
+        if (state.show_object_mesh)
+            ensure_object_mesh_loaded(state);
+        else
+            m_viewer.data(m_object_mesh_index).set_visible(false);
+
+        // Garment mesh (assets/garments)
+        if (state.show_garment_mesh)
+            ensure_garment_mesh_loaded(state);
+        else
+            m_viewer.data(m_garment_mesh_index).set_visible(false);
+
+        // If a pose is selected for SMPL, update the garment vertices using the precomputed mapping.
+        // Version-gated: runs once per pose/garment change (not every frame).
+        handle_garment_posing(state, false);
+
+        call_commands_from_state(state);
 
         const auto& r = view;
         auto& core = m_viewer.core();
         core.viewport = Eigen::Vector4f((float)r.x, (float)r.y, (float)r.width, (float)r.height);
         core.background_color = Eigen::Vector4f(0.45f, 0.45f, 0.47f, 1.0f);
+
+        // Allow UI tabs to intentionally hide the 3D view by providing a valid-but-empty viewport.
+        if (r.width <= 0 || r.height <= 0)
+        {
+            glDisable(GL_SCISSOR_TEST);
+            return;
+        }
 
         // Clip rendering to the cloth view when available.
         if (state.cloth_view.valid)
@@ -438,11 +283,37 @@ namespace poseweaver
         glDisable(GL_SCISSOR_TEST);
     }
 
+    Renderer::UvDebugTextureInfo Renderer::uv_debug_texture_info() const
+    {
+        UvDebugTextureInfo info;
+        info.texture_id = m_uv_debug_texture_id;
+        info.width = m_uv_debug_texture_w;
+        info.height = m_uv_debug_texture_h;
+        info.valid = (m_uv_debug_texture_id != 0 && m_uv_debug_texture_w > 0 && m_uv_debug_texture_h > 0);
+        return info;
+    }
+
+    const std::vector<Renderer::UvSegment>& Renderer::smpl_uv_wireframe_segments() const
+    {
+        return m_smpl_uv_segments;
+    }
+
     void Renderer::shutdown()
     {
         m_initialized = false;
         m_window = nullptr;
-        m_loaded_mesh_name.clear();
+        m_object_mesh_name.clear();
+        m_garment_mesh_name.clear();
+        m_smplh_mesh_name.clear();
+
+        if (m_uv_debug_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_uv_debug_texture_id);
+            m_uv_debug_texture_id = 0;
+        }
+        m_uv_debug_texture_w = 0;
+        m_uv_debug_texture_h = 0;
+        m_smpl_uv_segments.clear();
 
         for (auto& data : m_viewer.data_list)
             data.meshgl.free();
