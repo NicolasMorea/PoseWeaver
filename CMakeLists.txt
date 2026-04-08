@@ -75,9 +75,21 @@ if(POSEWEAVER_BUILD_APP)
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
+		src/render/RendererCommands.cpp
+		src/render/RendererGarmentCommands.cpp
 		src/render/Renderer.h
+		src/render/RendererGarment.cpp
+		src/render/RendererSmpl.cpp
+		src/render/RendererUv.cpp
+		src/render/RendererUvCommands.cpp
+		src/render/RendererInternal.h
 		src/ui/Ui.cpp
 		src/ui/Ui.h
+		src/ui/UiControls.cpp
+		src/ui/UiConsole.cpp
+		src/ui/UiMenu.cpp
+		src/ui/UiSceneView.cpp
+		src/ui/UiInternal.h
 	)
 
 	target_include_directories(poseweaver PRIVATE src)
