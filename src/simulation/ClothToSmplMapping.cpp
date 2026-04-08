@@ -58,7 +58,7 @@ namespace poseweaver
         const double denom = d00 * d11 - d01 * d01;
         if (!(std::abs(denom) > 1e-20) || !std::isfinite(denom))
         {
-            // Degenerate triangle: fall back to nearest vertex.
+            // Degenerate triangle: fall back to nearest vertex
             const double da = (p - a).squaredNorm();
             const double db = (p - b).squaredNorm();
             const double dc = (p - c).squaredNorm();
@@ -73,7 +73,7 @@ namespace poseweaver
 
         Eigen::RowVector3d bc(u, v, w);
 
-        // Numerical noise can put us slightly outside; clamp + renormalize.
+        // Numerical noise can put us slightly outside; clamp + renormalize
         for (int k = 0; k < 3; ++k)
             bc[k] = std::clamp(bc[k], 0.0, 1.0);
 
@@ -130,7 +130,7 @@ namespace poseweaver
         Eigen::VectorXi I;
         Eigen::MatrixXd C;
 
-        // Closest point on triangle mesh for each cloth vertex.
+        // Closest point on triangle mesh for each cloth vertex
         igl::point_mesh_squared_distance(cloth_V, smpl_V, smpl_F, sqrD, I, C);
 
         if (I.size() != cloth_V.rows() || C.rows() != cloth_V.rows() || C.cols() != 3)
@@ -180,7 +180,7 @@ namespace poseweaver
             Eigen::RowVector3d T, B, N;
             if (!triangle_frame(a, b, c, T, B, N))
             {
-                // Degenerate face: store offset as-is in a fallback "basis".
+                // Degenerate face: store offset as-is in a fallback "basis"
                 out->offset_local.row(vi) = off;
             }
             else
