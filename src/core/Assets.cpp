@@ -25,9 +25,7 @@ namespace poseweaver
                 break;
             const auto& p = entry.path();
             const std::string name = p.filename().string();
-            // Filter out Windows “Mark of the Web” artifacts that can show up in extracted zips.
-            if (name.find(":Zone.Identifier") != std::string::npos)
-                continue;
+            if (name.find(":Zone.Identifier") != std::string::npos) continue;
             out.push_back(name);
         }
 
@@ -59,7 +57,6 @@ namespace poseweaver
             std::string ext = p.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 
-            // libigl read_triangle_mesh supports many common formats.
             if (ext == ".obj" || ext == ".off" || ext == ".ply" || ext == ".stl" || ext == ".mesh" || ext == ".msh" || ext == ".wrl")
                 out.push_back(name);
         }

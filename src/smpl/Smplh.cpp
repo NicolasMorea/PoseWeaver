@@ -185,8 +185,6 @@ namespace poseweaver
 				}
 				else
 				{
-					// Fortran order: memory is column-major.
-					// Repack to row-major (joint-major) [ [x,y,z] per joint ].
 					for (size_t r = 0; r < j; ++r)
 					{
 						pose_axis_angle_out[(int)(r * 3 + 0)] = src[0 * j + r];
@@ -518,6 +516,20 @@ namespace poseweaver
 
 		if (!copy_pose_array_to_axis_angle(poses, pose_axis_angle_out, error_message))
 			return false;
+
+		// The poses (AMASS) are rotated such that the body points along +Z (blue axis)
+		// So we rotate the global/root joint by -90 degrees about +X (red axis) so +Z maps to +Y
+		if (pose_axis_angle_out.size() >= 3)
+		{
+			const Eigen::Vector3d aa_root = pose_axis_angle_out.head<3>();
+			const Eigen::Matrix3d R_root = rodrigues(aa_root);
+			const double pi = std::acos(-1.0);
+			const Eigen::Matrix3d R_fix = Eigen::AngleAxisd(-0.5 * pi, Eigen::Vector3d::UnitX()).toRotationMatrix();
+			const Eigen::Matrix3d R_new = R_fix * R_root;
+
+			const Eigen::AngleAxisd aa_new(R_new);
+			pose_axis_angle_out.head<3>() = aa_new.axis() * aa_new.angle();
+		}
 
 		if (betas_out)
 		{

@@ -5,9 +5,12 @@
 #include "ui/Ui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #include <glad/glad.h>
 #include <backends/imgui_impl_opengl3.h>
@@ -15,6 +18,43 @@
 
 namespace
 {
+    static void* pw_imgui_settings_read_open(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name)
+    {
+        if (!handler || !name)
+            return nullptr;
+        // We only store a single block: [PoseWeaver][State]
+        if (std::strcmp(name, "State") != 0)
+            return nullptr;
+        return handler->UserData;
+    }
+
+    static void pw_imgui_settings_read_line(ImGuiContext*, ImGuiSettingsHandler* handler, void*, const char* line)
+    {
+        if (!handler || !handler->UserData || !line)
+            return;
+
+        auto* state = static_cast<poseweaver::AppState*>(handler->UserData);
+
+        float v = 0.0f;
+        if (std::sscanf(line, "GarmentMinClothSkinDistance=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->garment_min_cloth_skin_distance = std::clamp(v, 0.0f, 0.02f);
+        }
+    }
+
+    static void pw_imgui_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
+    {
+        if (!handler || !handler->UserData || !buf)
+            return;
+
+        auto* state = static_cast<poseweaver::AppState*>(handler->UserData);
+
+        buf->appendf("[PoseWeaver][State]\n");
+        buf->appendf("GarmentMinClothSkinDistance=%.6f\n", state->garment_min_cloth_skin_distance);
+        buf->appendf("\n");
+    }
+
     struct GlfwAppContext
     {
         poseweaver::Renderer* renderer = nullptr;
@@ -132,7 +172,7 @@ int main(int, char**)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
 
-    GLFWwindow* window = glfwCreateWindow(1280, 800, "PoseWeaver", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1600, 900, "PoseWeaver", nullptr, nullptr);
     if (window == nullptr)
         return 1;
 
@@ -157,6 +197,23 @@ int main(int, char**)
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
 
+    // Serialize some states into imgui.ini.
+    {
+        ImGuiSettingsHandler handler;
+        handler.TypeName = "PoseWeaver";
+        handler.TypeHash = ImHashStr("PoseWeaver");
+        handler.UserData = &state;
+        handler.ReadOpenFn = pw_imgui_settings_read_open;
+        handler.ReadLineFn = pw_imgui_settings_read_line;
+        handler.WriteAllFn = pw_imgui_settings_write_all;
+
+        if (ImGuiContext* ctx = ImGui::GetCurrentContext())
+            ctx->SettingsHandlers.push_back(handler);
+
+        if (const char* ini = ImGui::GetIO().IniFilename)
+            ImGui::LoadIniSettingsFromDisk(ini);
+    }
+
     GlfwAppContext app;
     app.renderer = &renderer;
     app.state = &state;
@@ -172,12 +229,12 @@ int main(int, char**)
 
     // debug info
     if (const char* version = (const char*)glGetString(GL_VERSION))
-        state.console.lines.emplace_back(std::string("GL_VERSION: ") + version);
+        poseweaver::console_add_line(state, std::string("GL_VERSION: ") + version);
     if (const char* renderer_str = (const char*)glGetString(GL_RENDERER))
-        state.console.lines.emplace_back(std::string("GL_RENDERER: ") + renderer_str);
+        poseweaver::console_add_line(state, std::string("GL_RENDERER: ") + renderer_str);
     if (const char* vendor = (const char*)glGetString(GL_VENDOR))
-        state.console.lines.emplace_back(std::string("GL_VENDOR: ") + vendor);
-    state.console.lines.emplace_back("PoseWeaver started");
+        poseweaver::console_add_line(state, std::string("GL_VENDOR: ") + vendor);
+    poseweaver::console_add_line(state, "PoseWeaver started");
 
     double last_time = glfwGetTime();
     double play_accum = 0.0;
@@ -215,7 +272,7 @@ int main(int, char**)
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        ui.draw(state, assets, poseweaver::UiFrameInfo{ fb_w, fb_h });
+        ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
 
         ImGui::Render();
 
@@ -228,6 +285,10 @@ int main(int, char**)
     }
 
     renderer.shutdown();
+
+    // Ensure custom settings are written out on exit.
+    if (const char* ini = ImGui::GetIO().IniFilename)
+        ImGui::SaveIniSettingsToDisk(ini);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
