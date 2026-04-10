@@ -1,0 +1,154 @@
+#pragma once
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+
+namespace poseweaver::collision
+{
+    struct Aabb
+    {
+        Eigen::Vector3d min = Eigen::Vector3d(
+            std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::infinity());
+        Eigen::Vector3d max = Eigen::Vector3d(
+            -std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity());
+
+        inline void expand(const Eigen::Vector3d& p)
+        {
+            min = min.cwiseMin(p);
+            max = max.cwiseMax(p);
+        }
+
+        inline void expand(const Aabb& b)
+        {
+            min = min.cwiseMin(b.min);
+            max = max.cwiseMax(b.max);
+        }
+
+        inline Eigen::Vector3d center() const { return 0.5 * (min + max); }
+        inline Eigen::Vector3d extents() const { return max - min; }
+
+        inline bool valid() const
+        {
+            return (min.array() <= max.array()).all() && min.allFinite() && max.allFinite();
+        }
+    };
+
+    inline double sqr_distance_point_aabb(const Eigen::Vector3d& p, const Aabb& b)
+    {
+        // Squared distance from point to AABB (0 if inside)
+        double d2 = 0.0;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const double v = p[axis];
+            if (v < b.min[axis])
+            {
+                const double d = b.min[axis] - v;
+                d2 += d * d;
+            }
+            else if (v > b.max[axis])
+            {
+                const double d = v - b.max[axis];
+                d2 += d * d;
+            }
+        }
+        return d2;
+    }
+
+    inline Eigen::Vector3d closest_point_on_triangle(
+        const Eigen::Vector3d& p,
+        const Eigen::Vector3d& a,
+        const Eigen::Vector3d& b,
+        const Eigen::Vector3d& c,
+        Eigen::Vector3d* out_bary = nullptr)
+    {
+        const Eigen::Vector3d ab = b - a;
+        const Eigen::Vector3d ac = c - a;
+        const Eigen::Vector3d ap = p - a;
+
+        const double d1 = ab.dot(ap);
+        const double d2 = ac.dot(ap);
+        if (d1 <= 0.0 && d2 <= 0.0)
+        {
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(1.0, 0.0, 0.0);
+            return a; // barycentric (1,0,0)
+        }
+
+        const Eigen::Vector3d bp = p - b;
+        const double d3 = ab.dot(bp);
+        const double d4 = ac.dot(bp);
+        if (d3 >= 0.0 && d4 <= d3)
+        {
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(0.0, 1.0, 0.0);
+            return b; // (0,1,0)
+        }
+
+        const double vc = d1 * d4 - d3 * d2;
+        if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+        {
+            const double v = d1 / (d1 - d3);
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(1.0 - v, v, 0.0);
+            return a + v * ab; // on AB
+        }
+
+        const Eigen::Vector3d cp = p - c;
+        const double d5 = ab.dot(cp);
+        const double d6 = ac.dot(cp);
+        if (d6 >= 0.0 && d5 <= d6)
+        {
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(0.0, 0.0, 1.0);
+            return c; // (0,0,1)
+        }
+
+        const double vb = d5 * d2 - d1 * d6;
+        if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+        {
+            const double w = d2 / (d2 - d6);
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(1.0 - w, 0.0, w);
+            return a + w * ac; // on AC
+        }
+
+        const double va = d3 * d6 - d5 * d4;
+        if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
+        {
+            const double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            if (out_bary)
+                *out_bary = Eigen::Vector3d(0.0, 1.0 - w, w);
+            return b + w * (c - b); // on BC
+        }
+
+        // Inside face region
+        const double denom = 1.0 / (va + vb + vc);
+        const double v = vb * denom;
+        const double w = vc * denom;
+        const double u = 1.0 - v - w;
+        if (out_bary)
+            *out_bary = Eigen::Vector3d(u, v, w);
+        return a + ab * v + ac * w;
+    }
+
+    inline Eigen::Vector3d triangle_unit_normal(
+        const Eigen::Vector3d& a,
+        const Eigen::Vector3d& b,
+        const Eigen::Vector3d& c)
+    {
+        Eigen::Vector3d n = (b - a).cross(c - a);
+        const double nn = n.norm();
+        if (!(nn > 1e-20) || !std::isfinite(nn))
+            return Eigen::Vector3d(0.0, 0.0, 0.0);
+        return n / nn;
+    }
+}
