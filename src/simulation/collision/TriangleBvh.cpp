@@ -211,7 +211,7 @@ namespace poseweaver::collision
             st.pop();
             const Node& n = m_nodes[(size_t)ni];
 
-            const double d2 = sqr_distance_point_aabb(p, n.box);
+            const double d2 = core::sqr_distance_point_aabb(p, n.box);
             if (d2 > best)
                 continue;
 
@@ -234,7 +234,7 @@ namespace poseweaver::collision
                     const Eigen::Vector3d a = V.row(i0);
                     const Eigen::Vector3d b = V.row(i1);
                     const Eigen::Vector3d c = V.row(i2);
-                    const Eigen::Vector3d q = closest_point_on_triangle(p, a, b, c, nullptr);
+                    const Eigen::Vector3d q = core::closest_point_on_triangle(p, a, b, c, nullptr);
                     const double cd2 = (p - q).squaredNorm();
                     if (cd2 < best)
                     {

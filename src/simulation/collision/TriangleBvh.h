@@ -1,6 +1,6 @@
 #pragma once
 
-#include "simulation/collision/Geometry.h"
+#include "core/Geometry.h"
 
 #include <Eigen/Core>
 #include <limits>
@@ -8,6 +8,8 @@
 
 namespace poseweaver::collision
 {
+    using core::Aabb;
+
     class TriangleBvh
     {
     public:
