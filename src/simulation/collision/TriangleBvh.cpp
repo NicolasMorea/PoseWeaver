@@ -46,7 +46,6 @@ namespace poseweaver::collision
         if (m_nodes.empty())
             return;
 
-        // Post-order traversal indices
         std::vector<int> order;
         order.reserve(m_nodes.size());
         std::stack<int> st;
@@ -65,7 +64,6 @@ namespace poseweaver::collision
                     st.push(n.right);
             }
         }
-        // reverse for post-order
         for (auto it = order.rbegin(); it != order.rend(); ++it)
         {
             Node& n = m_nodes[(size_t)*it];
@@ -127,12 +125,11 @@ namespace poseweaver::collision
     int TriangleBvh::build_node(const Eigen::MatrixXd& V, const Eigen::MatrixXi& F, int start, int count)
     {
         const int node_index = (int)m_nodes.size();
-        m_nodes.emplace_back();
+        m_nodes.emplace_back(); // avoid copy
         Node& node = m_nodes.back();
         node.start = start;
         node.count = count;
 
-        // Compute node bounds
         Aabb box;
         Aabb cbox;
         for (int i = 0; i < count; ++i)
@@ -174,7 +171,6 @@ namespace poseweaver::collision
         node.left = build_node(V, F, start, left_count);
         node.right = build_node(V, F, start + left_count, right_count);
 
-        // Tighten bounds from children
         Aabb merged;
         merged.expand(m_nodes[(size_t)node.left].box);
         merged.expand(m_nodes[(size_t)node.right].box);
@@ -203,12 +199,14 @@ namespace poseweaver::collision
 
         double best = max_dist2;
 
-        std::stack<int> st;
-        st.push(0);
+        // Contiguous vector stack; traverse near-to-far to tighten 'best' early for pruning.
+        std::vector<int> st;
+        st.reserve(64);
+        st.push_back(0);
         while (!st.empty())
         {
-            const int ni = st.top();
-            st.pop();
+            const int ni = st.back();
+            st.pop_back();
             const Node& n = m_nodes[(size_t)ni];
 
             const double d2 = core::sqr_distance_point_aabb(p, n.box);
@@ -247,11 +245,37 @@ namespace poseweaver::collision
             }
             else
             {
-                // Push children (no priority ordering; pruning handles most cases)
-                if (n.left >= 0)
-                    st.push(n.left);
-                if (n.right >= 0)
-                    st.push(n.right);
+                const int l = n.left;
+                const int r = n.right;
+
+                if (l >= 0 && r >= 0)
+                {
+                    const double dl = core::sqr_distance_point_aabb(p, m_nodes[(size_t)l].box);
+                    const double dr = core::sqr_distance_point_aabb(p, m_nodes[(size_t)r].box);
+
+                    // Push farther first so the nearer node is processed next.
+                    if (dl < dr)
+                    {
+                        if (dr <= best)
+                            st.push_back(r);
+                        if (dl <= best)
+                            st.push_back(l);
+                    }
+                    else
+                    {
+                        if (dl <= best)
+                            st.push_back(l);
+                        if (dr <= best)
+                            st.push_back(r);
+                    }
+                }
+                else
+                {
+                    if (l >= 0)
+                        st.push_back(l);
+                    if (r >= 0)
+                        st.push_back(r);
+                }
             }
         }
 
