@@ -7,6 +7,11 @@
 #include <igl/opengl/glfw/Viewer.h>
 #include <Eigen/Core>
 #include <cstdint>
+#include <future>
+#include <memory>
+#include <atomic>
+#include <mutex>
+#include <array>
 #include <vector>
 
 struct GLFWwindow;
@@ -16,6 +21,16 @@ namespace poseweaver
     class Renderer
     {
     public:
+        struct SceneCameraInfo
+        {
+            Eigen::Matrix4f view = Eigen::Matrix4f::Identity();
+            Eigen::Matrix4f proj = Eigen::Matrix4f::Identity();
+            float camera_zoom = 1.0f;
+            float camera_base_zoom = 1.0f;
+            bool orthographic = false;
+            bool valid = false;
+        };
+
         struct UvDebugTextureInfo
         {
             unsigned int texture_id = 0;
@@ -45,6 +60,8 @@ namespace poseweaver
         void init(GLFWwindow* window);
         void render(AppState& state, int fb_width, int fb_height);
 
+        SceneCameraInfo scene_camera_info() const;
+
         UvDebugTextureInfo uv_debug_texture_info() const;
         const std::vector<UvSegment>& smpl_uv_wireframe_segments() const;
 
@@ -67,6 +84,7 @@ namespace poseweaver
 
     private:
         void ensure_initialized();
+
         void ensure_grid_built();
         void ensure_object_mesh_loaded(const AppState& state);
         void ensure_garment_mesh_loaded(AppState& state);
@@ -85,6 +103,12 @@ namespace poseweaver
         void process_garment_relax(AppState& state);
         void generate_uv_debug_image(AppState& state);
 
+        void process_cloth_simulate(AppState& state);
+        void process_cloth_clear_simulation(AppState& state);
+        void process_cloth_cancel_simulation(AppState& state);
+        void update_cloth_simulation_job(AppState& state);
+        void apply_cloth_simulation_frame(AppState& state);
+
         void regenerate_uv_wireframe_segments();
         bool try_load_smpl_uv_layout_once();
 		void ensure_smpl_uv_vertex_colors();
@@ -97,6 +121,10 @@ namespace poseweaver
         int m_object_mesh_index = 1;
         int m_garment_mesh_index = 2;
         int m_smplh_mesh_index = 3;
+        int m_wind_arrow_mesh_index = 4;
+
+        // Indexed by mesh index in m_viewer.data_list.
+        std::array<bool, 8> m_two_light_shader_installed{};
 
         std::string m_object_mesh_name;
         std::string m_garment_mesh_name;
@@ -106,7 +134,6 @@ namespace poseweaver
         Eigen::MatrixXd m_garment_rest_vertices;
         bool m_smplh_vertices_recomputed_this_frame = false;
 
-        // Cached SMPLH model and parameters
         bool m_smplh_loaded = false;
         SmplType m_smplh_loaded_gender = SmplType::Male;
         SmplhModel m_smplh_model;
@@ -115,6 +142,11 @@ namespace poseweaver
 
         bool m_smplh_deform_dirty = true;
         bool m_smplh_last_show_character = true;
+        bool m_garment_last_show_mesh = false;
+
+        bool m_garment_vertex_merge_settings_valid = false;
+        bool m_garment_vertex_merge_enabled_last = true;
+        double m_garment_vertex_merge_distance_last = 0.0025;
 
         std::uint64_t m_last_garment_pushout_request_id = 0;
 
@@ -124,32 +156,74 @@ namespace poseweaver
 
         std::uint64_t m_last_garment_relax_request_id = 0;
 
-        // UV debug texture (generated on demand)
         unsigned int m_uv_debug_texture_id = 0;
         int m_uv_debug_texture_w = 0;
         int m_uv_debug_texture_h = 0;
         std::uint64_t m_last_uv_image_request_id = 0;
+
+        std::uint64_t m_last_cloth_simulate_request_id = 0;
+        std::uint64_t m_last_cloth_clear_simulation_request_id = 0;
+        std::uint64_t m_last_cloth_cancel_simulation_request_id = 0;
+
+        std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
+        std::uint64_t m_cloth_sim_pose_version = 0;
+        std::uint64_t m_cloth_sim_garment_version = 0;
+
+        struct ClothSimJobResult
+        {
+            bool ok = false;
+            std::vector<Eigen::MatrixXd> frames; // each is (#V x 3)
+            int steps_simulated = 0;
+            int last_step_contacts = 0;
+            std::string timing_report;
+            std::string error;
+        };
+
+        std::future<ClothSimJobResult> m_cloth_sim_future;
+        bool m_cloth_sim_job_running = false;
+        std::shared_ptr<std::atomic_bool> m_cloth_sim_cancel_flag;
+        std::shared_ptr<std::atomic_int> m_cloth_sim_progress_steps_done;
+        int m_cloth_sim_progress_steps_total = 0;
+        std::string m_cloth_sim_last_error;
+
+        bool m_cloth_sim_restart_pending = false;
+
+        Eigen::MatrixXd m_cloth_sim_reset_frame0;
+        bool m_cloth_sim_reset_frame0_valid = false;
+        std::uint64_t m_cloth_sim_reset_pose_version = 0;
+        std::uint64_t m_cloth_sim_reset_garment_version = 0;
+
+        struct ClothSimPreviewState
+        {
+            std::mutex mutex;
+            Eigen::MatrixXd V; // (#V x 3)
+            bool valid = false;
+
+            Eigen::MatrixXd body_V; // (#Vbody x 3)
+            bool body_valid = false;
+            std::atomic_uint64_t seq{ 0 };
+        };
+
+        std::shared_ptr<ClothSimPreviewState> m_cloth_sim_preview_state;
+        std::shared_ptr<std::atomic_bool> m_cloth_sim_preview_enabled;
+        std::uint64_t m_cloth_sim_preview_last_seq_applied = 0;
 
         std::uint64_t m_pose_version = 0;
         std::uint64_t m_garment_version = 0;
         std::uint64_t m_last_posed_pose_version = 0;
         std::uint64_t m_last_posed_garment_version = 0;
 
-        // UV wireframe segments in UV space (u,v in [0,1])
         std::vector<UvSegment> m_smpl_uv_segments;
 
-        // Garment UV overlay (computed from garment→SMPL mapping)
         std::vector<UvSegment> m_garment_uv_segments;
         std::vector<UvTriangle> m_garment_uv_triangles;
         bool m_garment_uv_overlay_valid = false;
 
-        // Cached per-vertex colors derived from UVs (for 3D SMPL visualization)
         Eigen::MatrixXd m_smpl_uv_vertex_colors; // (#V x 3)
         Eigen::MatrixXd m_smpl_uv_per_vertex;    // (#V x 2), averaged if UV layout has seams
         bool m_smpl_uv_vertex_colors_valid = false;
         bool m_last_smpl_color_by_uv = false;
 
-        // Garment per-vertex colors derived from mapped SMPL UVs
         Eigen::MatrixXd m_garment_uv_vertex_colors; // (#Vcloth x 3)
         bool m_garment_uv_vertex_colors_valid = false;
         bool m_last_garment_color_by_smpl_uv = false;
@@ -158,19 +232,17 @@ namespace poseweaver
         std::string m_garment_mapping_mesh_name;
         SmplType m_garment_mapping_gender = SmplType::Male;
 
-        // Avoid retrying a failing cloth→SMPL mapping every frame.
+        // Avoids retrying a failing cloth→SMPL mapping every frame.
         std::string m_garment_last_mapping_attempt_mesh_name;
         SmplType m_garment_last_mapping_attempt_gender = SmplType::Male;
         bool m_garment_last_mapping_attempt_failed = false;
         std::string m_garment_last_mapping_attempt_error;
 
-        // Optional UV layout loaded from assets (if present)
         bool m_smpl_uv_layout_loaded = false;
         std::string m_smpl_uv_layout_source;
         Eigen::MatrixXd m_smpl_uv_coords;   // (#UV x 2)
         Eigen::MatrixXi m_smpl_F_uv;        // (#F x 3)
 
-        // Cached pose selection
         std::string m_smplh_loaded_pose_name;
         Eigen::VectorXd m_smplh_loaded_pose_axis_angle;
     };
