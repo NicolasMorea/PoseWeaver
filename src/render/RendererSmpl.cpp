@@ -24,12 +24,15 @@ namespace poseweaver
         }
 
         console_add_line(state, std::string("Loaded SMPLH model: ") + ((gender == SmplType::Male) ? "male" : "female"));
+        console_add_line(state,
+            std::string("SMPLH mesh: ")
+                + std::to_string(m_smplh_model.vertex_count()) + " vertices, "
+                + std::to_string(m_smplh_model.face_count()) + " faces");
         m_pose_version++;
 
         m_smplh_loaded = true;
         m_smplh_loaded_gender = gender;
 
-        // UV layout may be gender-specific (or not present at startup); force a reload attempt
         m_smpl_uv_layout_loaded = false;
         m_smpl_uv_layout_source.clear();
         m_smpl_uv_coords.resize(0, 0);
@@ -40,7 +43,6 @@ namespace poseweaver
         m_smpl_uv_vertex_colors_valid = false;
         m_last_smpl_color_by_uv = false;
 
-        // Body model changed -> invalidate garment mapping/projection caches too
         m_garment_to_smpl.clear();
         m_garment_mapping_mesh_name.clear();
         m_garment_uv_segments.clear();
@@ -55,7 +57,6 @@ namespace poseweaver
         m_smplh_loaded_pose_name.clear();
         m_smplh_loaded_pose_axis_angle.resize(0);
 
-        // Ensure parameter vectors are sized consistently
         m_smplh_params.betas = Eigen::VectorXd::Zero(m_smplh_model.beta_count());
         m_smplh_params.pose_axis_angle = Eigen::VectorXd::Zero(3 * m_smplh_model.joint_count());
 
@@ -70,10 +71,7 @@ namespace poseweaver
 
         const bool want_visible = state.show_smpl_character;
         if (!m_smplh_last_show_character && want_visible)
-        {
-            // Coming back from hidden -> ensure we update the view
             m_smplh_deform_dirty = true;
-        }
         m_smplh_last_show_character = want_visible;
 
         if (!ensure_smplh_model_loaded(state, gender))
@@ -84,7 +82,6 @@ namespace poseweaver
             return;
         }
 
-        // Apply betas from UI state
         {
             const int B = m_smplh_model.beta_count();
             if (m_smplh_params.betas.size() != B)
@@ -113,7 +110,6 @@ namespace poseweaver
             }
         }
 
-        // Apply pose selection
         {
             std::string pose_name;
             if (state.selection.pose_index >= 0 && state.selection.pose_index < (int)state.selection.poses.size())
@@ -167,7 +163,6 @@ namespace poseweaver
             }
             else
             {
-                // No pose selected or failed to load -> rest pose.
                 if (!m_smplh_params.pose_axis_angle.isZero())
                 {
                     m_smplh_params.pose_axis_angle.setZero();
@@ -201,8 +196,6 @@ namespace poseweaver
         const Eigen::MatrixXd& V = m_smplh_vertices;
         const Eigen::MatrixXi F = m_smplh_model.F;
 
-        // If this is a fresh SMPLH selection, set the mesh topology once and align the camera.
-        // Otherwise, only update skinned vertex positions.
         if (m_smplh_mesh_name != desired)
         {
             data.clear();
@@ -218,8 +211,6 @@ namespace poseweaver
         }
         else
         {
-            // Only push vertices when we've recomputed skinning.
-            // (ViewerData copies V internally, so avoid doing this every frame.)
             if (recomputed_vertices)
             {
                 data.set_vertices(V);
@@ -228,7 +219,6 @@ namespace poseweaver
             data.set_visible(want_visible);
         }
 
-        // Apply optional UV-based coloring.
         if (state.smpl_color_by_uv)
         {
             ensure_smpl_uv_vertex_colors();
@@ -237,7 +227,6 @@ namespace poseweaver
         }
         else if (m_last_smpl_color_by_uv)
         {
-            // Restore default constant color when toggling off.
             data.set_colors(Eigen::RowVector3d(0.85, 0.86, 0.88));
         }
         m_last_smpl_color_by_uv = state.smpl_color_by_uv;

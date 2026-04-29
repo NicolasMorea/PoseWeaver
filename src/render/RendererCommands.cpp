@@ -22,5 +22,12 @@ namespace poseweaver
             { process_garment_relax(state); });
         consume_request(state.uv_image_request_id, m_last_uv_image_request_id, [&]()
             { generate_uv_debug_image(state); });
+
+        consume_request(state.cloth_simulate_request_id, m_last_cloth_simulate_request_id, [&]()
+            { process_cloth_simulate(state); });
+        consume_request(state.cloth_clear_simulation_request_id, m_last_cloth_clear_simulation_request_id, [&]()
+            { process_cloth_clear_simulation(state); });
+        consume_request(state.cloth_cancel_simulation_request_id, m_last_cloth_cancel_simulation_request_id, [&]()
+            { process_cloth_cancel_simulation(state); });
     }
 }

@@ -1,5 +1,6 @@
 #include "render/Renderer.h"
 #include "render/RendererInternal.h"
+#include "core/Geometry.h"
 #include "core/Paths.h"
 #include "simulation/ClothMeshProcessor.h"
 
@@ -14,44 +15,13 @@
 
 namespace poseweaver
 {
-    namespace
-    {
-        static bool triangle_frame(
-            const Eigen::RowVector3d& a,
-            const Eigen::RowVector3d& b,
-            const Eigen::RowVector3d& c,
-            Eigen::RowVector3d& T,
-            Eigen::RowVector3d& B,
-            Eigen::RowVector3d& N)
-        {
-            const Eigen::RowVector3d e0 = b - a;
-            const Eigen::RowVector3d e1 = c - a;
-
-            const double e0n = e0.norm();
-            if (!(e0n > 1e-20) || !std::isfinite(e0n))
-                return false;
-
-            T = e0 / e0n;
-            N = e0.cross(e1);
-            const double nn = N.norm();
-            if (!(nn > 1e-20) || !std::isfinite(nn))
-                return false;
-            N /= nn;
-
-            B = N.cross(T);
-            const double bn = B.norm();
-            if (!(bn > 1e-20) || !std::isfinite(bn))
-                return false;
-            B /= bn;
-            return true;
-        }
-    }
-
     void Renderer::ensure_garment_mesh_loaded(AppState& state)
     {
         std::string desired;
         if (state.selection.garment_index >= 0 && state.selection.garment_index < (int)state.selection.garments.size())
             desired = state.selection.garments[(size_t)state.selection.garment_index];
+        const bool weld_enabled = state.garment_vertex_merge_enabled;
+        const double weld_epsilon = std::max(0.0, (double)state.garment_vertex_merge_distance);
 
         auto& data = m_viewer.data(m_garment_mesh_index);
 
@@ -61,6 +31,8 @@ namespace poseweaver
             data.clear();
             data.set_visible(false);
             m_garment_mesh_name.clear();
+            m_garment_last_show_mesh = false;
+            m_garment_vertex_merge_settings_valid = false;
             m_garment_rest_vertices.resize(0, 0);
             m_garment_to_smpl.clear();
             m_garment_mapping_mesh_name.clear();
@@ -81,7 +53,9 @@ namespace poseweaver
             return;
         }
 
-        const bool mesh_changed = (desired != m_garment_mesh_name);
+        const bool settings_changed = m_garment_vertex_merge_settings_valid
+            && (weld_enabled != m_garment_vertex_merge_enabled_last || std::abs(weld_epsilon - m_garment_vertex_merge_distance_last) > 1e-15);
+        const bool mesh_changed = (desired != m_garment_mesh_name) || settings_changed;
         if (mesh_changed)
         {
             const std::filesystem::path mesh_path = assets_dir() / "garments" / desired;
@@ -99,7 +73,7 @@ namespace poseweaver
                 return;
             }
 
-            // Weld garment mesh -> merge duplicate vertices before any mapping or processing
+            if (weld_enabled && weld_epsilon > 0.0)
             {
                 const int V_before = (int)V.rows();
                 const int F_before = (int)F.rows();
@@ -109,8 +83,7 @@ namespace poseweaver
                 Eigen::VectorXi SVI;
                 Eigen::VectorXi SVJ;
 
-                const double epsilon = 0.0025f; // 2.5mm in model units
-                igl::remove_duplicate_vertices(V, F, epsilon, V_weld, SVI, SVJ, F_weld);
+                igl::remove_duplicate_vertices(V, F, weld_epsilon, V_weld, SVI, SVJ, F_weld);
                 V = std::move(V_weld);
                 F = std::move(F_weld);
 
@@ -127,8 +100,11 @@ namespace poseweaver
             data.show_faces = 1;
             data.show_lines = 0;
             data.show_overlay = 0;
-            data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50)); // Light orange
+            data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
             data.set_visible(true);
+
+            m_viewer.selected_data_index = m_garment_mesh_index;
+            m_garment_last_show_mesh = true;
 
             m_garment_rest_vertices = V;
 
@@ -136,12 +112,14 @@ namespace poseweaver
 
             m_garment_mesh_name = desired;
             m_garment_version++;
+            m_garment_vertex_merge_settings_valid = true;
+            m_garment_vertex_merge_enabled_last = weld_enabled;
+            m_garment_vertex_merge_distance_last = weld_epsilon;
             console_add_line(state,
                 std::string("Loaded garment: ") + desired +
                 " (#V=" + std::to_string((int)V.rows()) +
                 ", #F=" + std::to_string((int)F.rows()) + ")");
 
-            // New garment -> drop any cached mapping/projection.
             m_garment_to_smpl.clear();
             m_garment_mapping_mesh_name.clear();
             m_garment_last_mapping_attempt_mesh_name.clear();
@@ -157,15 +135,16 @@ namespace poseweaver
         else
         {
             data.set_visible(true);
+
+            // Coming back from hidden -> re-select garment once so libigl shortcuts apply to it.
+            if (!m_garment_last_show_mesh)
+                m_viewer.selected_data_index = m_garment_mesh_index;
+            m_garment_last_show_mesh = true;
         }
 
-        // Ensure garment→SMPL mapping exists (computed in SMPL rest pose) and derived UV overlays/colors are up to date.
         ensure_garment_to_smpl_mapping(state);
         ensure_garment_uv_projection();
 
-        // If a SMPL pose is already selected when the garment loads, the pose will be applied in the main render loop
-
-        // Apply optional SMPL-UV based coloring to the garment.
         if (state.garment_color_by_smpl_uv)
         {
             if (m_garment_uv_vertex_colors_valid && m_garment_uv_vertex_colors.rows() == data.V.rows())
@@ -173,7 +152,7 @@ namespace poseweaver
         }
         else if (m_last_garment_color_by_smpl_uv)
         {
-            data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50)); // Restore default
+            data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
         }
         m_last_garment_color_by_smpl_uv = state.garment_color_by_smpl_uv;
     }
@@ -198,7 +177,6 @@ namespace poseweaver
         if (garment.V.rows() == 0 || garment.F.rows() == 0)
             return;
 
-        // Up to date?
         if (m_garment_to_smpl.valid() &&
             m_garment_mapping_mesh_name == m_garment_mesh_name &&
             m_garment_mapping_gender == gender &&
@@ -207,7 +185,6 @@ namespace poseweaver
             return;
         }
 
-        // don't spam logs if we already failed
         if (m_garment_last_mapping_attempt_failed &&
             m_garment_last_mapping_attempt_mesh_name == m_garment_mesh_name &&
             m_garment_last_mapping_attempt_gender == gender)
@@ -223,7 +200,6 @@ namespace poseweaver
         ClothToSmplMapping mapping;
         std::string err;
 
-        //* Always map against the SMPL rest shape in T-pose (betas=0, pose=0), not the currently posed/drawn body.
         const bool ok = compute_cloth_to_smpl_mapping(
             m_garment_rest_vertices,
             garment.F,
@@ -262,7 +238,6 @@ namespace poseweaver
             std::string("Cloth→SMPL mapping ready for ") + m_garment_mesh_name +
             " (#V=" + std::to_string((int)m_garment_to_smpl.face_index.size()) + ")");
 
-        // Mapping changed -> invalidate derived UV data.
         m_garment_uv_segments.clear();
         m_garment_uv_triangles.clear();
         m_garment_uv_overlay_valid = false;
@@ -287,7 +262,6 @@ namespace poseweaver
         if (!m_smplh_loaded)
             return;
 
-        // Ensure UV mapping (layout or fallback) is ready.
         ensure_smpl_uv_vertex_colors();
         if (!m_smpl_uv_layout_loaded)
             (void)try_load_smpl_uv_layout_once();
@@ -303,7 +277,6 @@ namespace poseweaver
         const int cloth_V = (int)garment.V.rows();
         m_garment_uv_vertex_colors.resize(cloth_V, 3);
 
-        // Compute UV (u,v) for each cloth vertex by barycentric interpolation over the mapped SMPL face.
         Eigen::MatrixXd cloth_uv(cloth_V, 2);
         cloth_uv.setZero();
 
@@ -353,7 +326,6 @@ namespace poseweaver
 
         m_garment_uv_vertex_colors_valid = true;
 
-        // Build UV-space triangles + wireframe segments for the UV projection view.
         const Eigen::MatrixXi& F = garment.F;
         const int face_count = (int)F.rows();
         m_garment_uv_triangles.clear();
@@ -420,7 +392,6 @@ namespace poseweaver
         const bool pose_selected = (state.selection.pose_index >= 0);
         if (!pose_selected)
         {
-            // Restore rest vertices when returning to rest/T-pose selection.
             if (garment.V.rows() == m_garment_rest_vertices.rows() && !garment.V.isApprox(m_garment_rest_vertices, 0.0))
             {
                 garment.set_vertices(m_garment_rest_vertices);
@@ -431,7 +402,6 @@ namespace poseweaver
             return;
         }
 
-        // Only update once per pose/garment change (unless forced by caller).
         if (!force &&
             m_last_posed_pose_version == m_pose_version &&
             m_last_posed_garment_version == m_garment_version)
@@ -480,13 +450,11 @@ namespace poseweaver
             const Eigen::RowVector3d bc = m_garment_to_smpl.barycentric.row(vi);
             const Eigen::RowVector3d p_def = bc[0] * V_def.row(ia) + bc[1] * V_def.row(ib) + bc[2] * V_def.row(ic);
 
-            // Build local frames in rest and deformed poses
             Eigen::RowVector3d T_def, B_def, N_def;
-            if (!triangle_frame(V_def.row(ia), V_def.row(ib), V_def.row(ic), T_def, B_def, N_def))
+            if (!core::triangle_frame(V_def.row(ia), V_def.row(ib), V_def.row(ic), T_def, B_def, N_def))
             {
-                // Fallback: use rest frame if deformed triangle is degenerate
                 Eigen::RowVector3d T_rest, B_rest, N_rest;
-                if (!triangle_frame(V_rest.row(ia), V_rest.row(ib), V_rest.row(ic), T_rest, B_rest, N_rest))
+                if (!core::triangle_frame(V_rest.row(ia), V_rest.row(ib), V_rest.row(ic), T_rest, B_rest, N_rest))
                 {
                     V_new.row(vi) = m_garment_rest_vertices.row(vi);
                     continue;
