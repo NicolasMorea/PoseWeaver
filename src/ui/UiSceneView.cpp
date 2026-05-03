@@ -1,19 +1,132 @@
 #include "ui/Ui.h"
 
 #include "render/Renderer.h"
+#include "ui/canva/CanvaPanel.h"
 #include "ui/UiInternal.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include <glad/glad.h>
 #include <imgui.h>
+#include <ImGuizmo.h>
 
 namespace poseweaver
 {
+    namespace
+    {
+        static bool project_to_screen(
+            const Eigen::Matrix4f& view,
+            const Eigen::Matrix4f& proj,
+            const Eigen::Vector3f& p,
+            const ImVec2& rect_top_left,
+            const ImVec2& rect_size,
+            ImVec2& out)
+        {
+            const Eigen::Vector4f hp(p.x(), p.y(), p.z(), 1.0f);
+            const Eigen::Vector4f clip = (proj * view) * hp;
+            const float w = clip.w();
+            if (!(w > 1e-8f) || !std::isfinite(w))
+                return false;
+
+            const Eigen::Vector3f ndc = clip.head<3>() / w;
+            if (!std::isfinite(ndc.x()) || !std::isfinite(ndc.y()) || !std::isfinite(ndc.z()))
+                return false;
+
+            // NDC [-1,1] -> screen, with Y flipped.
+            out.x = rect_top_left.x + (ndc.x() * 0.5f + 0.5f) * rect_size.x;
+            out.y = rect_top_left.y + (-ndc.y() * 0.5f + 0.5f) * rect_size.y;
+            return true;
+        }
+
+        static Eigen::Matrix4f make_translation(const std::array<float, 3>& p)
+        {
+            Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+            T(0, 3) = p[0];
+            T(1, 3) = p[1];
+            T(2, 3) = p[2];
+            return T;
+        }
+
+        static Eigen::Matrix4f make_wind_transform(const std::array<float, 3>& pivot, float yaw_deg, float pitch_deg)
+        {
+            constexpr float kPi = 3.14159265358979323846f;
+            const float yaw = yaw_deg * (kPi / 180.0f);
+            const float pitch = pitch_deg * (kPi / 180.0f);
+
+            const float cy = std::cos(yaw);
+            const float sy = std::sin(yaw);
+            const float cp = std::cos(pitch);
+            const float sp = std::sin(pitch);
+
+            // R = R_y(yaw) * R_x(pitch)
+            Eigen::Matrix3f Ry;
+            Ry << cy, 0.0f, sy,
+                0.0f, 1.0f, 0.0f,
+                -sy, 0.0f, cy;
+
+            Eigen::Matrix3f Rx;
+            Rx << 1.0f, 0.0f, 0.0f,
+                0.0f, cp, -sp,
+                0.0f, sp, cp;
+
+            const Eigen::Matrix3f R = (Ry * Rx).eval();
+
+            Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+            T.block<3, 3>(0, 0) = R;
+            T(0, 3) = pivot[0];
+            T(1, 3) = pivot[1];
+            T(2, 3) = pivot[2];
+            return T;
+        }
+
+        static void yaw_pitch_from_transform(const Eigen::Matrix4f& T, float prev_yaw_deg, float& out_yaw_deg, float& out_pitch_deg)
+        {
+            // Extract direction = R * +Z (matches Renderer wind_dir_from_angles_deg)
+            const Eigen::Vector3f dir = T.block<3, 3>(0, 0) * Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+            const float dx = dir.x();
+            const float dy = dir.y();
+            const float dz = dir.z();
+
+            constexpr float kPi = 3.14159265358979323846f;
+
+            // pitch = asin(-dir.y) because dir.y = -sin(pitch)
+            const float dy_clamped = std::clamp(dy, -1.0f, 1.0f);
+            const float pitch = std::asin(-dy_clamped);
+            const float cp = std::cos(pitch);
+
+            float yaw = 0.0f;
+            if (std::abs(cp) < 1e-4f)
+            {
+                // Yaw is unstable near +/-90deg pitch; keep previous.
+                yaw = prev_yaw_deg * (kPi / 180.0f);
+            }
+            else
+            {
+                yaw = std::atan2(dx, dz);
+            }
+
+            out_yaw_deg = yaw * (180.0f / kPi);
+            out_pitch_deg = pitch * (180.0f / kPi);
+        }
+
+        static float max_abs_diff(const Eigen::Matrix4f& a, const Eigen::Matrix4f& b)
+        {
+            return (a - b).cwiseAbs().maxCoeff();
+        }
+
+    }
+
     void Ui::draw_cloth_view(AppState& state, Renderer& renderer, const UiFrameInfo& frame)
     {
         ImGui::Begin("Scene View", &state.show_cloth_view,
             ui_internal::fixed_panel_flags() | ImGuiWindowFlags_NoBackground);
+
+        state.canva_tab_active = false;
 
         const ImVec2 avail_outer = ImGui::GetContentRegionAvail();
         if (avail_outer.x <= 1.0f || avail_outer.y <= 1.0f)
@@ -25,7 +138,6 @@ namespace poseweaver
 
         if (!ImGui::BeginTabBar("##center_tabs"))
         {
-            state.cloth_view.valid = false;
             ImGui::End();
             return;
         }
@@ -35,7 +147,11 @@ namespace poseweaver
             const ImVec2 top_left = ImGui::GetCursorScreenPos();
             const ImVec2 avail = ImGui::GetContentRegionAvail();
 
-            ImGui::InvisibleButton("scene_view_canvas", avail);
+            // ImGuizmo v1.61 refuses to activate if any ImGui item is hovered/active — do not place one spanning the canvas.
+            const bool was_using_gizmo = state.scene_view_gizmo_using;
+
+            state.scene_view_gizmo_over = false;
+            state.scene_view_gizmo_using = false;
 
             const ImGuiIO& io = ImGui::GetIO();
             const ImVec2 scale = io.DisplayFramebufferScale;
@@ -52,6 +168,148 @@ namespace poseweaver
             const int y = frame.fb_height - (y_top + h);
 
             state.cloth_view = ViewportRect{ x, y, w, h, (w > 0 && h > 0) };
+
+            if (avail.x > 1.0f && avail.y > 1.0f)
+            {
+                const auto cam = renderer.scene_camera_info();
+                if (cam.valid)
+                {
+                    ImGuizmo::BeginFrame();
+                    ImGuizmo::SetDrawlist();
+                    ImGuizmo::SetOrthographic(cam.orthographic);
+                    ImGuizmo::SetRect(top_left.x, top_left.y, avail.x, avail.y);
+
+                    // Match libigl's ImGuizmoWidget scaling workaround.
+                    Eigen::Matrix4f view_m = (cam.view / std::max(1e-8f, cam.camera_zoom));
+                    Eigen::Matrix4f proj_m = cam.proj;
+                    if (cam.orthographic)
+                        view_m(2, 3) -= 1000.0f; // hack depth, as in libigl
+
+                    const float z = cam.camera_base_zoom;
+                    const Eigen::Matrix4f S = (Eigen::Matrix4f() <<
+                        z, 0, 0, 0,
+                        0, z, 0, 0,
+                        0, 0, z, 0,
+                        0, 0, 0, 1).finished();
+                    view_m = (view_m * S.inverse()).eval();
+
+                    // ImGuizmo v1.61 has a single global context — draw/manipulate only one gizmo per frame.
+                    const ImVec2 mouse = ImGui::GetIO().MousePos;
+                    ImVec2 light_screen(0.0f, 0.0f);
+                    ImVec2 wind_screen(0.0f, 0.0f);
+                    const bool light_ok = project_to_screen(
+                        cam.view, cam.proj,
+                        Eigen::Vector3f(state.light_position[0], state.light_position[1], state.light_position[2]),
+                        top_left, avail, light_screen);
+                    const bool wind_ok = project_to_screen(
+                        cam.view, cam.proj,
+                        Eigen::Vector3f(state.wind_arrow_pivot[0], state.wind_arrow_pivot[1], state.wind_arrow_pivot[2]),
+                        top_left, avail, wind_screen);
+
+                    // Cache for GLFW callbacks (mouse routing).
+                    state.scene_view_light_marker_valid = light_ok;
+                    state.scene_view_wind_marker_valid = wind_ok;
+                    if (light_ok)
+                        state.scene_view_light_marker_screen = { light_screen.x, light_screen.y };
+                    if (wind_ok)
+                        state.scene_view_wind_marker_screen = { wind_screen.x, wind_screen.y };
+
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    if (dl)
+                    {
+                        if (wind_ok)
+                            dl->AddCircleFilled(wind_screen, 4.0f, IM_COL32(220, 220, 220, 200));
+                        if (light_ok)
+                            dl->AddCircleFilled(light_screen, 4.0f, IM_COL32(255, 255, 180, 220));
+                    }
+
+                    const float dxl = mouse.x - light_screen.x;
+                    const float dyl = mouse.y - light_screen.y;
+                    const float dxw = mouse.x - wind_screen.x;
+                    const float dyw = mouse.y - wind_screen.y;
+                    const float dist2_light = (light_ok) ? (dxl * dxl + dyl * dyl) : 1e30f;
+                    const float dist2_wind = (wind_ok) ? (dxw * dxw + dyw * dyw) : 1e30f;
+
+                    constexpr float kSwitchRadiusPx = 80.0f;
+                    const float switch_r2 = kSwitchRadiusPx * kSwitchRadiusPx;
+
+                    const bool near_light = (dist2_light < switch_r2);
+                    const bool near_wind = (dist2_wind < switch_r2);
+
+                    const bool should_show_any = was_using_gizmo || near_light || near_wind;
+
+                    if (!was_using_gizmo)
+                    {
+                        if (!should_show_any)
+                        {
+                            state.scene_view_active_gizmo = -1;
+                        }
+                        else
+                        {
+                            if (near_light && (!near_wind || dist2_light <= dist2_wind))
+                                state.scene_view_active_gizmo = 1;
+                            else
+                                state.scene_view_active_gizmo = 0;
+                        }
+                    }
+
+                    if (state.scene_view_active_gizmo == 1)
+                    {
+                        Eigen::Matrix4f T = make_translation(state.light_position);
+                        const Eigen::Matrix4f T0 = T;
+                        Eigen::Matrix4f Tg = (S * T).eval();
+                        ImGuizmo::Manipulate(
+                            view_m.data(), proj_m.data(),
+                            ImGuizmo::TRANSLATE, ImGuizmo::WORLD,
+                            Tg.data(), nullptr, nullptr);
+                        T = (S.inverse() * Tg).eval();
+
+                        if (max_abs_diff(T, T0) > 1e-7f)
+                        {
+                            state.light_position[0] = T(0, 3);
+                            state.light_position[1] = T(1, 3);
+                            state.light_position[2] = T(2, 3);
+                            state.light_position_initialized = true;
+                        }
+                    }
+                    else if (state.scene_view_active_gizmo == 0)
+                    {
+                        float* wind_yaw_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
+                            ? &state.params.wind_yaw_deg
+                            : &state.xpbd_params.wind_yaw_deg;
+                        float* wind_pitch_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
+                            ? &state.params.wind_pitch_deg
+                            : &state.xpbd_params.wind_pitch_deg;
+
+                        Eigen::Matrix4f T = make_wind_transform(
+                            state.wind_arrow_pivot,
+                            *wind_yaw_deg,
+                            *wind_pitch_deg);
+                        const Eigen::Matrix4f T0 = T;
+                        Eigen::Matrix4f Tg = (S * T).eval();
+                        ImGuizmo::Manipulate(
+                            view_m.data(), proj_m.data(),
+                            ImGuizmo::ROTATE, ImGuizmo::LOCAL,
+                            Tg.data(), nullptr, nullptr);
+                        T = (S.inverse() * Tg).eval();
+
+                        if (max_abs_diff(T, T0) > 1e-7f)
+                        {
+                            float yaw = *wind_yaw_deg;
+                            float pitch = *wind_pitch_deg;
+                            yaw_pitch_from_transform(T, *wind_yaw_deg, yaw, pitch);
+                            if (std::isfinite(yaw) && std::isfinite(pitch))
+                            {
+                                *wind_yaw_deg = yaw;
+                                *wind_pitch_deg = std::clamp(pitch, -89.9f, 89.9f);
+                            }
+                        }
+                    }
+
+                    state.scene_view_gizmo_over = ImGuizmo::IsOver();
+                    state.scene_view_gizmo_using = ImGuizmo::IsUsing();
+                }
+            }
 
             ImGui::EndTabItem();
         }
@@ -205,6 +463,16 @@ namespace poseweaver
                     dl->AddRect(origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y), IM_COL32(0, 0, 0, 100));
                 }
             }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("canva"))
+        {
+            state.canva_tab_active = true;
+            state.cloth_view = ViewportRect{ 0, 0, 0, 0, true };
+
+            ui_canva::draw_canva_tab(state);
 
             ImGui::EndTabItem();
         }

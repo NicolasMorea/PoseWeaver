@@ -27,30 +27,11 @@ namespace poseweaver
 
         if (ImGui::BeginTabBar("##controls_tabs"))
         {
-            if (ImGui::BeginTabItem("Setup"))
+            static bool s_default_setup_tab = true;
+            const ImGuiTabItemFlags setup_flags = s_default_setup_tab ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem("Setup", nullptr, setup_flags))
             {
-                if (state.show_simulation && ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen))
-                {
-                    ImGui::TextUnformatted(state.controls.simulating
-                        ? "Simulating: ON (placeholder; no physics implemented)"
-                        : "Simulating: OFF");
-
-                    ImGui::SliderInt("Frame", &state.controls.current_frame, 0, std::max(0, state.controls.max_frames - 1));
-                    ImGui::SliderInt("Max Frames", &state.controls.max_frames, 1, 10000);
-                    ImGui::SliderFloat("FPS", &state.controls.fps, 1.0f, 240.0f, "%.1f");
-
-                    if (ImGui::TreeNode("Parameters"))
-                    {
-                        ImGui::SliderFloat("dt", &state.params.dt, 1.0f / 240.0f, 1.0f / 10.0f, "%.5f");
-                        ImGui::SliderInt("Iterations", &state.params.solver_iterations, 1, 100);
-                        ImGui::SliderFloat("Gravity", &state.params.gravity, -50.0f, 50.0f, "%.2f");
-                        ImGui::SliderFloat("Stretch", &state.params.stretch_stiffness, 0.0f, 1.0f, "%.3f");
-                        ImGui::SliderFloat("Bend", &state.params.bend_stiffness, 0.0f, 1.0f, "%.3f");
-                        ImGui::SliderFloat("Damping", &state.params.damping, 0.0f, 0.5f, "%.4f");
-                        ImGui::TreePop();
-                    }
-                }
-
+                s_default_setup_tab = false;
                 if (state.show_smpl && ImGui::CollapsingHeader("SMPL", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     ImGui::Checkbox("Show character", &state.show_smpl_character);
@@ -125,6 +106,27 @@ namespace poseweaver
                     if (renderer.garment_to_smpl_mapping_valid())
                         ImGui::Checkbox("Color cloth by SMPL UV", &state.garment_color_by_smpl_uv);
 
+                    ImGui::Separator();
+
+                    ImGui::Checkbox("Merge cloth vertices", &state.garment_vertex_merge_enabled);
+                    ImGui::BeginDisabled(!state.garment_vertex_merge_enabled);
+                    {
+                        static bool s_merge_dist_init = false;
+                        static float s_merge_dist = 0.0025f;
+                        if (!s_merge_dist_init)
+                        {
+                            s_merge_dist = state.garment_vertex_merge_distance;
+                            s_merge_dist_init = true;
+                        }
+
+                        ImGui::SliderFloat("Merge distance", &s_merge_dist, 0.0f, 0.02f, "%.6f");
+                        if (ImGui::IsItemDeactivatedAfterEdit())
+                            state.garment_vertex_merge_distance = std::clamp(s_merge_dist, 0.0f, 0.05f);
+                        else if (!ImGui::IsItemActive() && !ImGui::IsItemEdited())
+                            s_merge_dist = state.garment_vertex_merge_distance;
+                    }
+                    ImGui::EndDisabled();
+
                     if (ImGui::TreeNodeEx("Garments##garment_selection", ImGuiTreeNodeFlags_DefaultOpen))
                     {
                         state.selection.garments = assets.garments();
@@ -194,27 +196,10 @@ namespace poseweaver
 
                 ImGui::EndTabItem();
             }
+            s_default_setup_tab = false;
 
             if (ImGui::BeginTabItem("Prefit"))
             {
-                if (state.show_simulation && ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen))
-                {
-                    if (ImGui::Button(state.controls.simulating ? "Stop" : "Simulate"))
-                        state.controls.simulating = !state.controls.simulating;
-
-                    ImGui::SameLine();
-                    if (ImGui::Button(state.controls.playing ? "Pause" : "Play"))
-                        state.controls.playing = !state.controls.playing;
-
-                    ImGui::SameLine();
-                    if (ImGui::Button("Step"))
-                        state.controls.current_frame = (state.controls.current_frame + 1) % std::max(1, state.controls.max_frames);
-
-                    ImGui::SameLine();
-                    if (ImGui::Button("Reset"))
-                        state.controls.current_frame = 0;
-                }
-
                 if (state.show_smpl && ImGui::CollapsingHeader("SMPL", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     if (ImGui::Button("UV image"))
@@ -254,6 +239,294 @@ namespace poseweaver
                     {
                         state.garment_relax_request_id++;
                         log_line(state, "[Garment] Mild relax requested");
+                    }
+                }
+
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Simulate"))
+            {
+                if (state.show_simulation && ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    const int frame_max = (state.controls.frame_count > 0) ? (state.controls.frame_count - 1) : 0;
+                    state.controls.current_frame = std::clamp(state.controls.current_frame, 0, std::max(0, frame_max));
+
+                    if (ImGui::TreeNodeEx("Parameters", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        ImGui::Checkbox("Smooth sequence", &state.controls.smooth_sequence);
+                        ImGui::BeginDisabled(!state.controls.smooth_sequence);
+                        {
+                            float pct = state.controls.smooth_sequence_length * 100.0f;
+                            if (ImGui::SliderFloat("Sequence length", &pct, 0.0f, 100.0f, "%.0f%%"))
+                                state.controls.smooth_sequence_length = std::clamp(pct / 100.0f, 0.0f, 1.0f);
+                        }
+                        ImGui::EndDisabled();
+
+                        ImGui::Separator();
+
+                        // Solver selection (kept in SimulationControls so playback UX stays identical).
+                        {
+                            int solver_i = (int)state.controls.solver;
+                            const char* solver_items[] = { "Projective Dynamics", "XPBD" };
+                            if (ImGui::Combo("Solver", &solver_i, solver_items, IM_ARRAYSIZE(solver_items)))
+                                state.controls.solver = (SimulationSolver)std::clamp(solver_i, 0, 1);
+                        }
+
+                        if (state.controls.solver == SimulationSolver::ProjectiveDynamics)
+                        {
+                            ImGui::InputFloat("dt", &state.params.dt, 0.001f, 0.01f, "%.6f");
+                            state.params.dt = std::max(state.params.dt, 1e-6f);
+
+                            ImGui::InputFloat("Simulation time (s)", &state.params.duration_seconds, 0.1f, 1.0f, "%.3f");
+                            state.params.duration_seconds = std::max(state.params.duration_seconds, 0.0f);
+
+                            ImGui::InputInt("Iterations", &state.params.solver_iterations);
+                            state.params.solver_iterations = std::max(state.params.solver_iterations, 1);
+
+                            ImGui::InputFloat("Gravity", &state.params.gravity, 0.5f, 5.0f, "%.3f");
+
+                            if (ImGui::TreeNodeEx("Constraints", ImGuiTreeNodeFlags_DefaultOpen))
+                            {
+                                ImGui::Checkbox("Stretch", &state.params.stretch_enabled);
+                                ImGui::BeginDisabled(!state.params.stretch_enabled);
+                                ImGui::InputFloat("Stretch stiffness", &state.params.stretch_stiffness, 0.1f, 1.0f, "%.6f");
+                                ImGui::EndDisabled();
+                                state.params.stretch_stiffness = std::max(state.params.stretch_stiffness, 0.0f);
+
+                                ImGui::BeginDisabled(!state.params.stretch_enabled);
+                                ImGui::SliderFloat("Base stretch mult", &state.params.base_stretch_mult, 0.0f, 2.0f, "%.3f");
+                                ImGui::EndDisabled();
+                                state.params.base_stretch_mult = std::clamp(state.params.base_stretch_mult, 0.0f, 2.0f);
+
+                                ImGui::Checkbox("Bend (dihedral)", &state.params.bend_enabled);
+                                ImGui::BeginDisabled(!state.params.bend_enabled);
+                                ImGui::InputFloat("Dihedral stiffness", &state.params.bend_stiffness, 0.1f, 1.0f, "%.6f");
+                                state.params.bend_stiffness = std::max(state.params.bend_stiffness, 0.0f);
+
+                                ImGui::Checkbox("Iso bend", &state.params.iso_bend_enabled);
+                                ImGui::BeginDisabled(!state.params.iso_bend_enabled);
+                                ImGui::InputFloat("Iso bend stiffness", &state.params.iso_bend_stiffness, 0.1f, 1.0f, "%.6f");
+                                ImGui::EndDisabled();
+                                state.params.iso_bend_stiffness = std::max(state.params.iso_bend_stiffness, 0.0f);
+                                ImGui::EndDisabled();
+
+                                ImGui::Checkbox("Collision", &state.params.collision_enabled);
+                                ImGui::BeginDisabled(!state.params.collision_enabled);
+                                ImGui::InputFloat("Collision stiffness", &state.params.collision_stiffness, 0.1f, 1.0f, "%.6f");
+                                ImGui::InputFloat("Thickness", &state.params.collision_thickness, 0.0005f, 0.002f, "%.6f");
+                                ImGui::EndDisabled();
+                                state.params.collision_stiffness = std::max(state.params.collision_stiffness, 0.0f);
+                                state.params.collision_thickness = std::max(state.params.collision_thickness, 0.0f);
+
+                                ImGui::TreePop();
+                            }
+
+                            if (ImGui::TreeNodeEx("Wind", ImGuiTreeNodeFlags_DefaultOpen))
+                            {
+                                ImGui::InputFloat("Wind force", &state.params.wind_force, 0.1f, 1.0f, "%.6f");
+                                state.params.wind_force = std::max(state.params.wind_force, 0.0f);
+
+                                ImGui::InputFloat("Wind yaw (deg)", &state.params.wind_yaw_deg, 1.0f, 5.0f, "%.3f");
+                                ImGui::InputFloat("Wind pitch (deg)", &state.params.wind_pitch_deg, 1.0f, 5.0f, "%.3f");
+
+                                ImGui::InputFloat("Random space", &state.params.wind_random_space, 0.05f, 0.25f, "%.6f");
+                                ImGui::InputFloat("Random time", &state.params.wind_random_time, 0.05f, 0.25f, "%.6f");
+                                state.params.wind_random_space = std::max(state.params.wind_random_space, 0.0f);
+                                state.params.wind_random_time = std::max(state.params.wind_random_time, 0.0f);
+
+                                ImGui::TreePop();
+                            }
+
+                            ImGui::Checkbox("Friction", &state.params.enable_friction);
+                            if (state.params.enable_friction)
+                            {
+                                ImGui::InputFloat("mu", &state.params.friction_mu, 0.01f, 0.1f, "%.6f");
+                                state.params.friction_mu = std::max(state.params.friction_mu, 0.0f);
+                            }
+
+                            ImGui::InputFloat("Damping", &state.params.damping, 0.001f, 0.01f, "%.6f");
+                            state.params.damping = std::clamp(state.params.damping, 0.0f, 0.99f);
+                        }
+                        else
+                        {
+                            auto& p = state.xpbd_params;
+
+                            ImGui::InputFloat("dt", &p.dt, 0.001f, 0.01f, "%.6f");
+                            p.dt = std::max(p.dt, 1e-6f);
+
+                            ImGui::InputFloat("Simulation time (s)", &p.duration_seconds, 0.1f, 1.0f, "%.3f");
+                            p.duration_seconds = std::max(p.duration_seconds, 0.0f);
+
+                            ImGui::InputInt("Iterations", &p.solver_iterations);
+                            p.solver_iterations = std::max(p.solver_iterations, 1);
+
+                            ImGui::InputInt("Substeps", &p.substeps);
+                            p.substeps = std::clamp(p.substeps, 1, 16);
+
+                            ImGui::InputFloat("Gravity", &p.gravity, 0.5f, 5.0f, "%.3f");
+
+                            if (ImGui::TreeNodeEx("Constraints", ImGuiTreeNodeFlags_DefaultOpen))
+                            {
+                                ImGui::Checkbox("Stretch", &p.stretch_enabled);
+                                ImGui::BeginDisabled(!p.stretch_enabled);
+                                ImGui::InputFloat("Stretch compliance", &p.stretch_compliance, 1e-7f, 1e-6f, "%.8f");
+                                ImGui::EndDisabled();
+                                p.stretch_compliance = std::max(p.stretch_compliance, 0.0f);
+
+                                ImGui::BeginDisabled(!p.stretch_enabled);
+                                ImGui::SliderFloat("Base stretch mult", &p.base_stretch_mult, 0.0f, 2.0f, "%.3f");
+                                ImGui::EndDisabled();
+                                p.base_stretch_mult = std::clamp(p.base_stretch_mult, 0.0f, 2.0f);
+
+                                ImGui::Checkbox("Bend", &p.bend_enabled);
+                                ImGui::BeginDisabled(!p.bend_enabled);
+                                ImGui::InputFloat("Bend compliance", &p.bend_compliance, 1e-7f, 1e-6f, "%.8f");
+                                ImGui::EndDisabled();
+                                p.bend_compliance = std::max(p.bend_compliance, 0.0f);
+
+                                ImGui::Checkbox("Collision", &p.collision_enabled);
+                                ImGui::BeginDisabled(!p.collision_enabled);
+                                ImGui::InputFloat("Collision compliance", &p.collision_compliance, 1e-7f, 1e-6f, "%.8f");
+                                ImGui::InputFloat("Thickness", &p.collision_thickness, 0.0005f, 0.002f, "%.6f");
+                                ImGui::EndDisabled();
+                                p.collision_compliance = std::max(p.collision_compliance, 0.0f);
+                                p.collision_thickness = std::max(p.collision_thickness, 0.0f);
+
+                                ImGui::Checkbox("Self collision", &p.self_collision_enabled);
+                                ImGui::BeginDisabled(!p.self_collision_enabled);
+                                ImGui::InputFloat("Self collision compliance", &p.self_collision_compliance, 1e-7f, 1e-6f, "%.8f");
+                                ImGui::InputFloat("Self collision thickness", &p.self_collision_thickness, 0.0005f, 0.002f, "%.6f");
+                                ImGui::EndDisabled();
+                                p.self_collision_compliance = std::max(p.self_collision_compliance, 0.0f);
+                                p.self_collision_thickness = std::max(p.self_collision_thickness, 0.0f);
+
+                                ImGui::TreePop();
+                            }
+
+                            if (ImGui::TreeNodeEx("Wind", ImGuiTreeNodeFlags_DefaultOpen))
+                            {
+                                ImGui::InputFloat("Wind force", &p.wind_force, 0.1f, 1.0f, "%.6f");
+                                p.wind_force = std::max(p.wind_force, 0.0f);
+
+                                ImGui::InputFloat("Wind yaw (deg)", &p.wind_yaw_deg, 1.0f, 5.0f, "%.3f");
+                                ImGui::InputFloat("Wind pitch (deg)", &p.wind_pitch_deg, 1.0f, 5.0f, "%.3f");
+
+                                ImGui::InputFloat("Random space", &p.wind_random_space, 0.05f, 0.25f, "%.6f");
+                                ImGui::InputFloat("Random time", &p.wind_random_time, 0.05f, 0.25f, "%.6f");
+                                p.wind_random_space = std::max(p.wind_random_space, 0.0f);
+                                p.wind_random_time = std::max(p.wind_random_time, 0.0f);
+
+                                ImGui::TreePop();
+                            }
+
+                            ImGui::Checkbox("Friction", &p.enable_friction);
+                            if (p.enable_friction)
+                            {
+                                ImGui::InputFloat("mu", &p.friction_mu, 0.01f, 0.1f, "%.6f");
+                                p.friction_mu = std::max(p.friction_mu, 0.0f);
+                            }
+
+                            ImGui::InputFloat("Damping", &p.damping, 0.001f, 0.01f, "%.6f");
+                            p.damping = std::clamp(p.damping, 0.0f, 0.99f);
+                        }
+
+                        ImGui::InputInt("Max Frames (cap)", &state.controls.max_frames);
+                        state.controls.max_frames = std::clamp(state.controls.max_frames, 1, 1000000);
+                        ImGui::TreePop();
+                    }
+
+                    ImGui::Separator();
+
+                    ImGui::Checkbox("Preview", &state.controls.preview);
+                    if (!state.controls.simulating)
+                    {
+                        const bool start_button = ImGui::Button("Start");
+                        const bool start_enter =
+                            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
+                            && !ImGui::GetIO().WantTextInput
+                            && !ImGui::IsAnyItemActive()
+                            && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeyPadEnter));
+
+                        if (start_button || start_enter)
+                        {
+                            state.cloth_simulate_request_id++;
+                            state.controls.simulating = true;
+                            state.controls.playing = false;
+                            state.controls.current_frame = 0;
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextUnformatted("Simulating...");
+                        const int done = std::max(0, state.controls.sim_steps_done);
+                        const int total = std::max(0, state.controls.sim_steps_total);
+                        const float frac = (total > 0) ? (float)done / (float)total : 0.0f;
+
+                        const ImGuiStyle& style = ImGui::GetStyle();
+                        const float stop_w = ImGui::CalcTextSize("Stop").x + 2.0f * style.FramePadding.x;
+                        const float avail_w = ImGui::GetContentRegionAvail().x;
+                        const float bar_w = std::max(0.0f, avail_w - stop_w - style.ItemSpacing.x);
+                        ImGui::ProgressBar(std::clamp(frac, 0.0f, 1.0f), ImVec2(bar_w, 0.0f));
+                        ImGui::SameLine();
+                        if (ImGui::Button("Stop"))
+                        {
+                            state.cloth_cancel_simulation_request_id++;
+                        }
+                        if (total > 0)
+                            ImGui::Text("%d / %d steps", done, total);
+                    }
+
+                    ImGui::Separator();
+
+                    ImGui::Text("Status: %s", state.controls.simulating ? "Simulating" : (state.controls.frame_count > 0 ? "Ready" : "No simulation"));
+                    if (state.controls.frame_count > 0)
+                        ImGui::Text("Frames: %d", state.controls.frame_count);
+
+                    const bool have_frames = (state.controls.frame_count > 0);
+                    if (have_frames)
+                    {
+                        const bool frame_changed = ImGui::SliderInt("Frame", &state.controls.current_frame, 0, std::max(0, frame_max));
+                        state.controls.current_frame = std::clamp(state.controls.current_frame, 0, std::max(0, frame_max));
+                        if (frame_changed)
+                            state.controls.playing = false;
+
+                        ImGui::InputFloat("FPS", &state.controls.fps, 1.0f, 10.0f, "%.3f");
+                        state.controls.fps = std::clamp(state.controls.fps, 0.1f, 10000.0f);
+
+                        ImGui::BeginDisabled(state.controls.simulating);
+
+                        if (ImGui::Button("<<"))
+                        {
+                            state.controls.playing = false;
+                            state.controls.current_frame = 0;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("<"))
+                        {
+                            state.controls.playing = false;
+                            state.controls.current_frame = std::max(0, state.controls.current_frame - 1);
+                        }
+                        ImGui::SameLine();
+
+                        const char* play_label = state.controls.playing ? "II##playpause" : u8"▶##playpause";
+                        if (ImGui::Button(play_label))
+                            state.controls.playing = !state.controls.playing;
+
+                        ImGui::SameLine();
+                        if (ImGui::Button(">"))
+                        {
+                            state.controls.playing = false;
+                            state.controls.current_frame = std::min(std::max(0, frame_max), state.controls.current_frame + 1);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button(">>"))
+                        {
+                            state.controls.playing = false;
+                            state.controls.current_frame = std::max(0, frame_max);
+                        }
+
+                        ImGui::EndDisabled();
                     }
                 }
 

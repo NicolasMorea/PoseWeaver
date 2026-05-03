@@ -10,6 +10,11 @@ namespace poseweaver
 {
     void Ui::draw(AppState& state, const AssetIndex& assets, Renderer& renderer, const UiFrameInfo& frame)
     {
+        ImGui::GetIO().MouseDrawCursor = false;
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+
+        state.canva_tab_active = false;
+
         draw_main_menu(state, assets);
 
         const ImGuiViewport* vp = ImGui::GetMainViewport();
