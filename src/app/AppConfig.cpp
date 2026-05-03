@@ -287,6 +287,20 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.collision_thickness = std::clamp(v, 0.0f, 10.0f);
         }
+        if (std::sscanf(line, "XpbdSelfCollisionEnabled=%d", &iv) == 1)
+        {
+            state->xpbd_params.self_collision_enabled = (iv != 0);
+        }
+        if (std::sscanf(line, "XpbdSelfCollisionCompliance=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.self_collision_compliance = std::clamp(v, 0.0f, 1000.0f);
+        }
+        if (std::sscanf(line, "XpbdSelfCollisionThickness=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.self_collision_thickness = std::clamp(v, 0.0f, 10.0f);
+        }
 
         if (std::sscanf(line, "XpbdFrictionEnabled=%d", &iv) == 1)
         {
@@ -400,6 +414,9 @@ namespace
         buf->appendf("XpbdCollisionEnabled=%d\n", state->xpbd_params.collision_enabled ? 1 : 0);
         buf->appendf("XpbdCollisionCompliance=%.9f\n", state->xpbd_params.collision_compliance);
         buf->appendf("XpbdCollisionThickness=%.9f\n", state->xpbd_params.collision_thickness);
+        buf->appendf("XpbdSelfCollisionEnabled=%d\n", state->xpbd_params.self_collision_enabled ? 1 : 0);
+        buf->appendf("XpbdSelfCollisionCompliance=%.9f\n", state->xpbd_params.self_collision_compliance);
+        buf->appendf("XpbdSelfCollisionThickness=%.9f\n", state->xpbd_params.self_collision_thickness);
 
         buf->appendf("XpbdFrictionEnabled=%d\n", state->xpbd_params.enable_friction ? 1 : 0);
         buf->appendf("XpbdFrictionMu=%.9f\n", state->xpbd_params.friction_mu);

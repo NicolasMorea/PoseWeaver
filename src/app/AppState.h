@@ -101,6 +101,10 @@ namespace poseweaver
         float collision_compliance = 0.0f;
         float collision_thickness = 0.005f;
 
+        bool self_collision_enabled = false;
+        float self_collision_compliance = 0.0f;
+        float self_collision_thickness = 0.005f;
+
         bool enable_friction = false;
         float friction_mu = 0.30f;
         float damping = 0.005f;
