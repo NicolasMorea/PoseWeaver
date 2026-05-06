@@ -1,3 +1,4 @@
+#include "app/AppConfig.h"
 #include "app/AppState.h"
 #include "core/Assets.h"
 #include "core/Paths.h"
@@ -7,10 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <string>
 #include <imgui.h>
-#include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #include <glad/glad.h>
 #include <backends/imgui_impl_opengl3.h>
@@ -18,43 +17,6 @@
 
 namespace
 {
-    static void* pw_imgui_settings_read_open(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name)
-    {
-        if (!handler || !name)
-            return nullptr;
-        // We only store a single block: [PoseWeaver][State]
-        if (std::strcmp(name, "State") != 0)
-            return nullptr;
-        return handler->UserData;
-    }
-
-    static void pw_imgui_settings_read_line(ImGuiContext*, ImGuiSettingsHandler* handler, void*, const char* line)
-    {
-        if (!handler || !handler->UserData || !line)
-            return;
-
-        auto* state = static_cast<poseweaver::AppState*>(handler->UserData);
-
-        float v = 0.0f;
-        if (std::sscanf(line, "GarmentMinClothSkinDistance=%f", &v) == 1)
-        {
-            if (std::isfinite(v))
-                state->garment_min_cloth_skin_distance = std::clamp(v, 0.0f, 0.02f);
-        }
-    }
-
-    static void pw_imgui_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
-    {
-        if (!handler || !handler->UserData || !buf)
-            return;
-
-        auto* state = static_cast<poseweaver::AppState*>(handler->UserData);
-
-        buf->appendf("[PoseWeaver][State]\n");
-        buf->appendf("GarmentMinClothSkinDistance=%.6f\n", state->garment_min_cloth_skin_distance);
-        buf->appendf("\n");
-    }
-
     struct GlfwAppContext
     {
         poseweaver::Renderer* renderer = nullptr;
@@ -99,6 +61,9 @@ namespace
         if (!app || !app->renderer || !app->state)
             return;
 
+        if (app->state->scene_view_gizmo_using)
+            return;
+
         if (g_forward_viewer_mouse || cursor_in_cloth_view(window, app->state->cloth_view, x, y))
             app->renderer->on_cursor_pos(x, y);
     }
@@ -115,7 +80,24 @@ namespace
         glfwGetCursorPos(window, &x, &y);
         const bool in_view = cursor_in_cloth_view(window, app->state->cloth_view, x, y);
 
-        if (action == GLFW_PRESS && in_view)
+        const auto dist2_to = [&](const std::array<float, 2>& p)
+        {
+            const double dx = x - (double)p[0];
+            const double dy = y - (double)p[1];
+            return dx * dx + dy * dy;
+        };
+
+        constexpr double kPickRadiusPx = 90.0;
+        const double pick_r2 = kPickRadiusPx * kPickRadiusPx;
+        const bool near_light = app->state->scene_view_light_marker_valid
+            && (dist2_to(app->state->scene_view_light_marker_screen) < pick_r2);
+        const bool near_wind = app->state->scene_view_wind_marker_valid
+            && (dist2_to(app->state->scene_view_wind_marker_screen) < pick_r2);
+
+        const bool block_viewer = (app->state->scene_view_gizmo_over || app->state->scene_view_gizmo_using
+            || near_light || near_wind);
+
+        if (action == GLFW_PRESS && in_view && !block_viewer)
             g_forward_viewer_mouse = true;
 
         if (g_forward_viewer_mouse)
@@ -135,7 +117,22 @@ namespace
 
         double x = 0.0, y = 0.0;
         glfwGetCursorPos(window, &x, &y);
-        if (cursor_in_cloth_view(window, app->state->cloth_view, x, y))
+
+        const auto dist2_to = [&](const std::array<float, 2>& p)
+        {
+            const double dx = x - (double)p[0];
+            const double dy = y - (double)p[1];
+            return dx * dx + dy * dy;
+        };
+        constexpr double kPickRadiusPx = 90.0;
+        const double pick_r2 = kPickRadiusPx * kPickRadiusPx;
+        const bool near_light = app->state->scene_view_light_marker_valid
+            && (dist2_to(app->state->scene_view_light_marker_screen) < pick_r2);
+        const bool near_wind = app->state->scene_view_wind_marker_valid
+            && (dist2_to(app->state->scene_view_wind_marker_screen) < pick_r2);
+
+        if (cursor_in_cloth_view(window, app->state->cloth_view, x, y)
+            && !(app->state->scene_view_gizmo_over || app->state->scene_view_gizmo_using || near_light || near_wind))
             app->renderer->on_scroll(xoffset, yoffset);
     }
 
@@ -146,16 +143,100 @@ namespace
 
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
 
+        // Simulation shortcuts work even when ImGui wants the keyboard, except when typing.
+        if (auto* app = app_from(window); app && app->state)
+        {
+            auto& state = *app->state;
+            if (action == GLFW_PRESS && !ImGui::GetIO().WantTextInput)
+            {
+                // Canva shortcuts: handle in GLFW callback for reliability.
+                if (state.canva_tab_active && (mods & GLFW_MOD_CONTROL) && key == GLFW_KEY_Z)
+                {
+                    state.canva_undo_request_id++;
+                    poseweaver::console_add_line(state, "Canva: Ctrl+Z detected (GLFW)");
+                    return;
+                }
+
+                if (key == GLFW_KEY_SPACE && state.controls.simulating)
+                {
+                    state.cloth_cancel_simulation_request_id++;
+                    state.controls.playing = false;
+                    return;
+                }
+
+                if ((key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) && !ImGui::IsAnyItemActive())
+                {
+                    state.cloth_simulate_request_id++;
+                    state.controls.simulating = true;
+                    state.controls.playing = false;
+                    state.controls.current_frame = 0;
+                    return;
+                }
+            }
+        }
+
         if (ImGui::GetIO().WantCaptureKeyboard)
             return;
+
+        if (auto* app = app_from(window); app && app->state)
+        {
+            auto& state = *app->state;
+
+            if (key == GLFW_KEY_B && action == GLFW_PRESS)
+            {
+                state.show_smpl_character = !state.show_smpl_character;
+                return;
+            }
+
+            const bool have_frames = (state.controls.frame_count > 0);
+            const bool can_control_playback = have_frames && !state.controls.simulating;
+            const int frame_max = have_frames ? (state.controls.frame_count - 1) : 0;
+
+            if (can_control_playback && (action == GLFW_PRESS || action == GLFW_REPEAT))
+            {
+                if (key == GLFW_KEY_SPACE)
+                {
+                    state.controls.playing = !state.controls.playing;
+                    return;
+                }
+                if (key == GLFW_KEY_LEFT)
+                {
+                    state.controls.playing = false;
+                    if (mods & GLFW_MOD_CONTROL)
+                        state.controls.current_frame = 0;
+                    else
+                        state.controls.current_frame = std::max(0, state.controls.current_frame - 1);
+                    return;
+                }
+                if (key == GLFW_KEY_RIGHT)
+                {
+                    state.controls.playing = false;
+                    if (mods & GLFW_MOD_CONTROL)
+                        state.controls.current_frame = std::max(0, frame_max);
+                    else
+                        state.controls.current_frame = std::min(std::max(0, frame_max), state.controls.current_frame + 1);
+                    return;
+                }
+            }
+        }
 
         if (auto* app = app_from(window); app && app->renderer)
             app->renderer->on_key(key, scancode, action, mods);
     }
 
-    static void pw_glfw_char_callback(GLFWwindow* window, unsigned int codepoint)
+    static void pw_glfw_char_mods_callback(GLFWwindow* window, unsigned int codepoint, int mods)
     {
         ImGui_ImplGlfw_CharCallback(window, codepoint);
+
+        // libigl's default shortcuts are fed via the GLFW character callback.
+        if (ImGui::GetIO().WantCaptureKeyboard)
+            return;
+
+        // Reserve 'B' for toggling SMPL visibility in the key callback.
+        if (codepoint == (unsigned int)'b' || codepoint == (unsigned int)'B')
+            return;
+        if (auto* app = app_from(window); app && app->renderer)
+            app->renderer->on_char(codepoint, mods);
     }
 }
 
@@ -182,7 +263,6 @@ int main(int, char**)
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
         return 1;
 
-    // Init ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
@@ -197,22 +277,7 @@ int main(int, char**)
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
 
-    // Serialize some states into imgui.ini.
-    {
-        ImGuiSettingsHandler handler;
-        handler.TypeName = "PoseWeaver";
-        handler.TypeHash = ImHashStr("PoseWeaver");
-        handler.UserData = &state;
-        handler.ReadOpenFn = pw_imgui_settings_read_open;
-        handler.ReadLineFn = pw_imgui_settings_read_line;
-        handler.WriteAllFn = pw_imgui_settings_write_all;
-
-        if (ImGuiContext* ctx = ImGui::GetCurrentContext())
-            ctx->SettingsHandlers.push_back(handler);
-
-        if (const char* ini = ImGui::GetIO().IniFilename)
-            ImGui::LoadIniSettingsFromDisk(ini);
-    }
+    poseweaver::install_imgui_state_settings_handler(state);
 
     GlfwAppContext app;
     app.renderer = &renderer;
@@ -225,9 +290,8 @@ int main(int, char**)
     glfwSetMouseButtonCallback(window, pw_glfw_mouse_button_callback);
     glfwSetScrollCallback(window, pw_glfw_scroll_callback);
     glfwSetKeyCallback(window, pw_glfw_key_callback);
-    glfwSetCharCallback(window, pw_glfw_char_callback);
+    glfwSetCharModsCallback(window, pw_glfw_char_mods_callback);
 
-    // debug info
     if (const char* version = (const char*)glGetString(GL_VERSION))
         poseweaver::console_add_line(state, std::string("GL_VERSION: ") + version);
     if (const char* renderer_str = (const char*)glGetString(GL_RENDERER))
@@ -248,7 +312,6 @@ int main(int, char**)
 
         renderer.on_framebuffer_resize(fb_w, fb_h);
 
-        // time stepping for the simulation (if playing)
         const double now = glfwGetTime();
         const double dt = now - last_time;
         last_time = now;
@@ -257,10 +320,11 @@ int main(int, char**)
         {
             play_accum += dt;
             const double frame_dt = 1.0 / std::max(1.0f, state.controls.fps);
+            const int frame_count = (state.controls.frame_count > 0) ? state.controls.frame_count : state.controls.max_frames;
             while (play_accum >= frame_dt)
             {
                 play_accum -= frame_dt;
-                state.controls.current_frame = (state.controls.current_frame + 1) % std::max(1, state.controls.max_frames);
+                state.controls.current_frame = (state.controls.current_frame + 1) % std::max(1, frame_count);
             }
         }
         else
@@ -278,7 +342,6 @@ int main(int, char**)
 
         renderer.render(state, fb_w, fb_h);
 
-        // Render ImGui on top
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
@@ -286,9 +349,7 @@ int main(int, char**)
 
     renderer.shutdown();
 
-    // Ensure custom settings are written out on exit.
-    if (const char* ini = ImGui::GetIO().IniFilename)
-        ImGui::SaveIniSettingsToDisk(ini);
+    poseweaver::save_imgui_settings_to_disk();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
