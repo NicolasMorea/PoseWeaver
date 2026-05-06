@@ -36,7 +36,6 @@ namespace poseweaver
 
         static inline double wrap_angle_pi(const double a)
         {
-            // Wrap to [-pi, pi]
             constexpr double kPi = 3.14159265358979323846264338327950288;
             double x = std::fmod(a + kPi, 2.0 * kPi);
             if (x < 0.0)
@@ -107,7 +106,10 @@ namespace poseweaver
 
         const Eigen::RowVector3d body_centroid = body_V.colwise().mean();
 
-        // Build 1-ring adjacency once (for smoothing neighbor pushes).
+        constexpr int kSmoothIterations = 6;
+        constexpr double kNeighborTotalFrac = 0.35;
+        constexpr double kSmoothAlpha = 0.65;
+
         std::vector<std::vector<int>> adj;
         adj.resize((size_t)P.rows());
         if (cloth_F.rows() > 0 && cloth_F.cols() == 3)
@@ -136,8 +138,11 @@ namespace poseweaver
             }
         }
 
-        Eigen::MatrixXd V_out = P;
         Eigen::MatrixXd moved_delta = Eigen::MatrixXd::Zero(P.rows(), 3);
+        Eigen::VectorXd push_amount = Eigen::VectorXd::Zero(P.rows());
+        std::vector<unsigned char> is_source((size_t)P.rows(), 0);
+
+        Eigen::MatrixXd out_dir = Eigen::MatrixXd::Zero(P.rows(), 3);
 
         int moved = 0;
         for (int vi = 0; vi < P.rows(); ++vi)
@@ -146,22 +151,16 @@ namespace poseweaver
             if (!std::isfinite(sd))
                 continue;
 
-            // Enforce minimum separation: push whenever sd < surface_offset.
-            if (!(sd < surface_offset))
-                continue;
-
             Eigen::RowVector3d dir;
             double n = 0.0;
 
             if (sd >= 0.0)
             {
-                // Outside but too close: push away from the closest point.
                 dir = (P.row(vi) - C.row(vi));
                 n = dir.norm();
             }
             else
             {
-                // Inside: push toward closest point on surface.
                 dir = (C.row(vi) - P.row(vi));
                 n = dir.norm();
             }
@@ -175,41 +174,109 @@ namespace poseweaver
             }
             dir /= n;
 
-            const double delta = std::max(0.0, surface_offset - sd);
-            const Eigen::RowVector3d new_p = P.row(vi) + delta * dir;
-            if (!new_p.allFinite())
+            out_dir.row(vi) = dir;
+
+            if (!(sd < surface_offset))
                 continue;
 
-            V_out.row(vi) = new_p;
-            moved_delta.row(vi) = new_p - P.row(vi);
+            const double delta = std::max(0.0, surface_offset - sd);
+            const Eigen::RowVector3d d = delta * dir;
+            if (!d.allFinite())
+                continue;
+
+            moved_delta.row(vi) = d;
+            push_amount[vi] = delta;
+            is_source[(size_t)vi] = 1;
             moved++;
         }
 
-        // Neighbor smoothing: distribute a small fraction of the push to 1-ring neighbors.
-        // This reduces sharp spikes when a single vertex is corrected.
-        constexpr double kNeighborPushFrac = 0.20;
-        Eigen::MatrixXd neighbor_delta = Eigen::MatrixXd::Zero(P.rows(), 3);
+        Eigen::MatrixXd V_out = P + moved_delta;
 
-        for (int vi = 0; vi < P.rows(); ++vi)
+        // Diffuse push-amount over the mesh graph to avoid contour-stacking artifacts.
+        if (kSmoothIterations > 0 && kNeighborTotalFrac > 0.0 && kSmoothAlpha > 0.0 && !adj.empty())
         {
-            const Eigen::RowVector3d d = moved_delta.row(vi);
-            if (!(d.squaredNorm() > 0.0) || !d.allFinite())
-                continue;
-
-            const auto& nb = adj[(size_t)vi];
-            if (nb.empty())
-                continue;
-
-            const double w = kNeighborPushFrac / (double)nb.size();
-            for (const int j : nb)
+            Eigen::VectorXd seed = Eigen::VectorXd::Zero(P.rows());
+            for (int vi = 0; vi < P.rows(); ++vi)
             {
-                if (j < 0 || j >= P.rows())
+                if (!is_source[(size_t)vi])
                     continue;
-                neighbor_delta.row(j) += w * d;
+                const double a = push_amount[vi];
+                if (!(a > 0.0) || !std::isfinite(a))
+                    continue;
+                seed[vi] = kNeighborTotalFrac * a;
+            }
+
+            Eigen::VectorXd g = seed;
+            Eigen::VectorXd g_next = g;
+
+            const int iters = std::clamp(kSmoothIterations, 1, 50);
+            const double alpha = std::clamp(kSmoothAlpha, 0.0, 1.0);
+
+            for (int it = 0; it < iters; ++it)
+            {
+                g_next = g;
+                for (int vi = 0; vi < P.rows(); ++vi)
+                {
+                    if (is_source[(size_t)vi])
+                        continue;
+
+                    const auto& nb = adj[(size_t)vi];
+                    if (nb.empty())
+                    {
+                        g_next[vi] = 0.0;
+                        continue;
+                    }
+
+                    double sum = 0.0;
+                    int cnt = 0;
+                    for (const int j : nb)
+                    {
+                        if (j < 0 || j >= P.rows())
+                            continue;
+                        const double v = g[j];
+                        if (!std::isfinite(v))
+                            continue;
+                        sum += v;
+                        cnt++;
+                    }
+
+                    if (cnt <= 0)
+                    {
+                        g_next[vi] = 0.0;
+                        continue;
+                    }
+
+                    const double avg = sum / (double)cnt;
+                    g_next[vi] = alpha * avg;
+                }
+
+                for (int vi = 0; vi < P.rows(); ++vi)
+                {
+                    if (is_source[(size_t)vi])
+                        g_next[vi] = seed[vi];
+                }
+
+                g.swap(g_next);
+            }
+
+            for (int vi = 0; vi < P.rows(); ++vi)
+            {
+                if (is_source[(size_t)vi])
+                    continue;
+                const double a = g[vi];
+                if (!(a > 0.0) || !std::isfinite(a))
+                    continue;
+                const Eigen::RowVector3d dir = out_dir.row(vi);
+                if (!(dir.squaredNorm() > 0.0) || !dir.allFinite())
+                    continue;
+
+                const Eigen::RowVector3d d = a * dir;
+                if (!d.allFinite())
+                    continue;
+                V_out.row(vi) += d;
             }
         }
 
-        V_out += neighbor_delta;
         cloth_V = std::move(V_out);
 
         if (result)
@@ -321,7 +388,6 @@ namespace poseweaver
             }
         }
 
-        // 1) Stretch springs on edges.
         Eigen::MatrixXd delta = Eigen::MatrixXd::Zero(cloth_V.rows(), 3);
         int affected_edges = 0;
 
@@ -346,22 +412,18 @@ namespace poseweaver
             if (!std::isfinite(diff))
                 continue;
 
-            // Correction vector from i->j.
             const Eigen::RowVector3d corr = (diff / len) * d;
             if (!corr.allFinite())
                 continue;
 
-            // Symmetric position-based correction.
             delta.row(i) += 0.5 * corr;
             delta.row(j) -= 0.5 * corr;
             affected_edges++;
         }
 
-        // Apply stretch step.
         constexpr double kStretch = 1.0;
         Eigen::MatrixXd V_new = cloth_V + (step * kStretch) * delta;
 
-        // 2) Bending: for each interior edge, rotate opposite vertices around the edge axis toward rest dihedral angle.
         int affected_bend = 0;
         constexpr double kBend = 0.5;
 
@@ -441,7 +503,6 @@ namespace poseweaver
             if (std::abs(dtheta) < 1e-12)
                 continue;
 
-            // Rotate opposite vertices around edge axis in opposite directions.
             const Eigen::RowVector3d pk0 = V_new.row(k0);
             const Eigen::RowVector3d pk1 = V_new.row(k1);
 
@@ -455,7 +516,6 @@ namespace poseweaver
             affected_bend++;
         }
 
-        // Compute max displacement and commit.
         double max_disp = 0.0;
         for (int vi = 0; vi < cloth_V.rows(); ++vi)
         {
@@ -534,7 +594,6 @@ namespace poseweaver
             double rest_len = 0.0;
         };
 
-        // Build unique edges + 1-ring adjacency.
         std::vector<Edge> edges;
         edges.reserve((size_t)cloth_F.rows() * 2u);
 
@@ -622,7 +681,6 @@ namespace poseweaver
                     if (!(len > kEps) || !(rest > kEps) || !std::isfinite(len) || !std::isfinite(rest))
                         continue;
 
-                    // Symmetric correction along the edge direction.
                     const Eigen::RowVector3d corr = (0.5 * alpha * (len - rest) / len) * d;
                     if (!corr.allFinite())
                         continue;
@@ -643,10 +701,8 @@ namespace poseweaver
                 }
             };
 
-            // 1) Preserve stretch (main).
             apply_edge_pass(edge_alpha);
 
-            // 2) Weak Laplacian smoothing (tiny lambda).
             if (smooth_lambda > 0.0)
             {
                 Eigen::MatrixXd V_new = cloth_V;
@@ -666,8 +722,7 @@ namespace poseweaver
                 cloth_V = std::move(V_new);
             }
 
-            // 3) Edge pass again to counteract shrinkage a bit.
-            apply_edge_pass(0.5 * edge_alpha);
+            apply_edge_pass(0.5 * edge_alpha); // counteracts smoothing shrinkage
         }
 
         double max_disp = 0.0;

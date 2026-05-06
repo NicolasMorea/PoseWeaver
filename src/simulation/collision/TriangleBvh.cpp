@@ -186,7 +186,8 @@ namespace poseweaver::collision
         int& out_face,
         Eigen::Vector3d& out_closest,
         double& out_dist2,
-        double max_dist2) const
+        double max_dist2,
+        int ignored_vertex) const
     {
         out_face = -1;
         out_closest.setZero();
@@ -227,6 +228,8 @@ namespace poseweaver::collision
                     if (i0 < 0 || i1 < 0 || i2 < 0)
                         continue;
                     if (i0 >= V.rows() || i1 >= V.rows() || i2 >= V.rows())
+                        continue;
+                    if (ignored_vertex >= 0 && (i0 == ignored_vertex || i1 == ignored_vertex || i2 == ignored_vertex))
                         continue;
 
                     const Eigen::Vector3d a = V.row(i0);

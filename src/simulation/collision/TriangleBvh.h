@@ -27,7 +27,8 @@ namespace poseweaver::collision
             int& out_face,
             Eigen::Vector3d& out_closest,
             double& out_dist2,
-            double max_dist2 = std::numeric_limits<double>::infinity()) const;
+            double max_dist2 = std::numeric_limits<double>::infinity(),
+            int ignored_vertex = -1) const;
 
     private:
         struct Node
