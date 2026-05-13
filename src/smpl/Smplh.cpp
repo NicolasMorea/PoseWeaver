@@ -517,9 +517,26 @@ namespace poseweaver
 		if (!copy_pose_array_to_axis_angle(poses, pose_axis_angle_out, error_message))
 			return false;
 
-		// The poses (AMASS) are rotated such that the body points along +Z (blue axis)
-		// So we rotate the global/root joint by -90 degrees about +X (red axis) so +Z maps to +Y
-		if (pose_axis_angle_out.size() >= 3)
+		bool apply_amass_root_fix = true;
+		try
+		{
+			cnpy::NpyArray flag = cnpy::npz_load(pose_npz_path.string(), "poseweaver_no_root_fix");
+			if (flag.shape.size() == 1 && flag.shape[0] >= 1)
+			{
+				if (flag.word_size == sizeof(int))
+					apply_amass_root_fix = (flag.data<int>()[0] == 0);
+				else if (flag.word_size == sizeof(long long))
+					apply_amass_root_fix = (flag.data<long long>()[0] == 0);
+			}
+		}
+		catch (const std::exception&)
+		{
+			apply_amass_root_fix = true;
+		}
+
+		// The bundled AMASS poses are rotated such that the body points along +Z (blue axis).
+		// Generated PoseWeaver sketch poses are already in the app's SMPL axis-angle convention.
+		if (apply_amass_root_fix && pose_axis_angle_out.size() >= 3)
 		{
 			const Eigen::Vector3d aa_root = pose_axis_angle_out.head<3>();
 			const Eigen::Matrix3d R_root = rodrigues(aa_root);
@@ -548,6 +565,75 @@ namespace poseweaver
 			catch (const std::exception&)
 			{
 				*betas_out = std::nullopt;
+			}
+		}
+
+		return true;
+	}
+
+	bool smplh_load_pose_npz_metadata(
+		const std::filesystem::path& pose_npz_path,
+		std::optional<Eigen::VectorXd>* betas_out,
+		std::optional<std::string>* gender_out,
+		std::string* error_message)
+	{
+		if (betas_out)
+		{
+			try
+			{
+				cnpy::NpyArray b = cnpy::npz_load(pose_npz_path.string(), "betas");
+				if (b.word_size != sizeof(double) || b.shape.size() != 1)
+				{
+					set_error(error_message, "Pose npz array 'betas' must be 1D float64");
+					return false;
+				}
+				Eigen::VectorXd betas((int)b.shape[0]);
+				std::copy(b.data<double>(), b.data<double>() + b.shape[0], betas.data());
+				*betas_out = std::move(betas);
+			}
+			catch (const std::exception&)
+			{
+				*betas_out = std::nullopt;
+			}
+		}
+
+		if (gender_out)
+		{
+			*gender_out = std::nullopt;
+			try
+			{
+				cnpy::NpyArray g = cnpy::npz_load(pose_npz_path.string(), "gender");
+				if (g.word_size == sizeof(unsigned char) || g.word_size == sizeof(char))
+				{
+					const char* data = g.data<char>();
+					std::string gender(data, data + g.num_vals);
+					if (gender == "male" || gender == "female" || gender == "neutral")
+						*gender_out = gender;
+				}
+			}
+			catch (const std::exception&)
+			{
+				try
+				{
+					cnpy::NpyArray gi = cnpy::npz_load(pose_npz_path.string(), "gender_index");
+					if (gi.shape.size() == 1 && gi.shape[0] >= 1)
+					{
+						int value = 2;
+						if (gi.word_size == sizeof(int))
+							value = gi.data<int>()[0];
+						else if (gi.word_size == sizeof(long long))
+							value = (int)gi.data<long long>()[0];
+						if (value == 0)
+							*gender_out = std::string("male");
+						else if (value == 1)
+							*gender_out = std::string("female");
+						else if (value == 2)
+							*gender_out = std::string("neutral");
+					}
+				}
+				catch (const std::exception&)
+				{
+				}
 			}
 		}
 

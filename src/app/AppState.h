@@ -7,6 +7,8 @@
 
 namespace poseweaver
 {
+    class Sketch2RigService;
+
     enum class SimulationSolver
     {
         ProjectiveDynamics = 0,
@@ -159,6 +161,28 @@ namespace poseweaver
         std::array<float, 16> betas{};
     };
 
+    enum class Sketch2RigStatus
+    {
+        NotStarted = 0,
+        Loading,
+        Ready,
+        Busy,
+        Error,
+        Stopped,
+    };
+
+    struct Sketch2RigUiState
+    {
+        Sketch2RigService* service = nullptr;
+        Sketch2RigStatus status = Sketch2RigStatus::NotStarted;
+        std::string message = "Model not started";
+        std::string last_sketch_path;
+        std::string last_output_path;
+        std::uint64_t next_request_id = 1;
+        std::uint64_t active_request_id = 0;
+        std::uint64_t completed_request_id = 0;
+    };
+
     struct AppState
     {
         SimulationControls controls;
@@ -209,6 +233,12 @@ namespace poseweaver
 
         bool canva_tab_active = false;
         std::uint64_t canva_undo_request_id = 0;
+
+        std::uint64_t asset_refresh_request_id = 0;
+        std::string pending_pose_selection;
+
+        Sketch2RigUiState sketch2rig;
+        Sketch2RigUiState sketch2betas;
 
         SmplShapeState smpl_shape;
         UiLayoutState layout;

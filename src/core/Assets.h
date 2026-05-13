@@ -24,6 +24,7 @@ namespace poseweaver
         std::vector<std::string> m_meshes;
 
         static std::vector<std::string> list_entries(const std::filesystem::path& dir);
+        static std::vector<std::string> list_pose_files(const std::filesystem::path& dir);
         static std::vector<std::string> list_mesh_files(const std::filesystem::path& dir);
     };
 }

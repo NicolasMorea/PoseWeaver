@@ -28,6 +28,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(POSEWEAVER_BUILD_APP "Build PoseWeaver app" ON)
 
 include(FetchContent)
+find_package(Threads REQUIRED)
 
 # cnpy allows to read .npy files (to read SMPL models and poses)
 FetchContent_Declare(
@@ -135,6 +136,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/xpbd/ClothXpbd.h
 		src/simulation/ClothToSmplMapping.cpp
 		src/simulation/ClothToSmplMapping.h
+		src/sketch2rig/Sketch2RigService.cpp
+		src/sketch2rig/Sketch2RigService.h
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
@@ -153,6 +156,10 @@ if(POSEWEAVER_BUILD_APP)
 		src/ui/UiConsole.cpp
 		src/ui/UiMenu.cpp
 		src/ui/UiSceneView.cpp
+		src/ui/canva/CanvaPreprocess.cpp
+		src/ui/canva/CanvaPreprocess.h
+		src/ui/canva/SketchPose.cpp
+		src/ui/canva/SketchPose.h
 		src/ui/canva/CanvaPanel.cpp
 		src/ui/canva/CanvaPanel.h
 		src/ui/UiInternal.h
@@ -164,9 +171,11 @@ if(POSEWEAVER_BUILD_APP)
 		GLFW_INCLUDE_NONE
 		IMGUI_IMPL_OPENGL_LOADER_GLAD
 		POSEWEAVER_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
+		POSEWEAVER_SKETCH2RIG_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2rig/inference_worker.py"
+		POSEWEAVER_SKETCH2BETAS_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2betas/inference_worker.py"
 	)
 
-	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs)
+	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs Threads::Threads)
 
 	if(MSVC)
 		target_compile_options(poseweaver PRIVATE /W4)

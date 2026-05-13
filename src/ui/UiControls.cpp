@@ -1,16 +1,57 @@
 #include "ui/Ui.h"
 
+#include "core/Paths.h"
 #include "render/Renderer.h"
+#include "smpl/Smplh.h"
 #include "ui/UiInternal.h"
 
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <imgui.h>
+#include <optional>
 #include <string>
 
 namespace poseweaver
 {
+    namespace
+    {
+        static void apply_pose_npz_metadata(AppState& state, const std::string& pose_name)
+        {
+            if (pose_name.empty())
+                return;
+
+            std::optional<Eigen::VectorXd> betas;
+            std::optional<std::string> gender;
+            std::string err;
+            if (!smplh_load_pose_npz_metadata(assets_dir() / "poses" / pose_name, &betas, &gender, &err))
+            {
+                if (!err.empty())
+                    console_add_line(state, "Pose metadata ignored: " + err);
+                return;
+            }
+
+            if (gender)
+            {
+                if (*gender == "male")
+                    state.selection.gender = SmplType::Male;
+                else if (*gender == "female")
+                    state.selection.gender = SmplType::Female;
+                else if (*gender == "neutral")
+                    state.selection.gender = SmplType::Neutral;
+            }
+
+            if (betas)
+            {
+                const int n = std::min<int>((int)state.smpl_shape.betas.size(), (int)betas->size());
+                for (int i = 0; i < n; ++i)
+                    state.smpl_shape.betas[(size_t)i] = (float)(*betas)[i];
+                for (int i = n; i < (int)state.smpl_shape.betas.size(); ++i)
+                    state.smpl_shape.betas[(size_t)i] = 0.0f;
+            }
+        }
+    }
+
     static void log_line(AppState& state, const char* fmt, ...)
     {
         char buf[2048];
@@ -39,13 +80,20 @@ namespace poseweaver
 
                     if (ImGui::TreeNode("Gender"))
                     {
-                        int gender = (state.selection.gender == SmplType::Male) ? 0 : 1;
+                        int gender = (state.selection.gender == SmplType::Male)
+                            ? 0
+                            : (state.selection.gender == SmplType::Female) ? 1 : 2;
                         if (ImGui::RadioButton("Male", gender == 0))
                             gender = 0;
                         ImGui::SameLine();
                         if (ImGui::RadioButton("Female", gender == 1))
                             gender = 1;
-                        state.selection.gender = (gender == 0) ? SmplType::Male : SmplType::Female;
+                        ImGui::SameLine();
+                        if (ImGui::RadioButton("Neutral", gender == 2))
+                            gender = 2;
+                        state.selection.gender = (gender == 0)
+                            ? SmplType::Male
+                            : (gender == 1) ? SmplType::Female : SmplType::Neutral;
                         ImGui::TreePop();
                     }
 
@@ -75,7 +123,10 @@ namespace poseweaver
                                 {
                                     const bool selected = (i == state.selection.pose_index);
                                     if (ImGui::Selectable(state.selection.poses[i].c_str(), selected))
+                                    {
                                         state.selection.pose_index = i;
+                                        apply_pose_npz_metadata(state, state.selection.poses[(size_t)i]);
+                                    }
                                     if (selected)
                                         ImGui::SetItemDefaultFocus();
                                 }

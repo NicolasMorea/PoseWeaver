@@ -1,13 +1,19 @@
 #include "ui/canva/CanvaPanel.h"
 
+#include "ui/canva/CanvaPreprocess.h"
+#include "ui/canva/SketchPose.h"
+#include "sketch2rig/Sketch2RigService.h"
+#include "core/Paths.h"
+
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <ctime>
+#include <cerrno>
+#include <cstdlib>
+#include <cctype>
 #include <filesystem>
-#include <iomanip>
+#include <fstream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -102,6 +108,16 @@ namespace poseweaver::ui_canva
 
             // Routed from GLFW key callback via AppState.
             std::uint64_t last_undo_request_id = 0;
+            std::uint64_t last_sketch2rig_import_request_id = 0;
+            std::uint64_t last_sketch2betas_import_request_id = 0;
+
+            bool extract_pose_active = false;
+            bool extract_pose_rig_done = false;
+            bool extract_pose_betas_done = false;
+            std::uint64_t extract_pose_rig_request_id = 0;
+            std::uint64_t extract_pose_betas_request_id = 0;
+            std::filesystem::path extract_pose_rig_path;
+            std::filesystem::path extract_pose_betas_path;
 
             int active_layer = 0;
             int next_layer_number = 2;
@@ -113,6 +129,318 @@ namespace poseweaver::ui_canva
 
         static CanvaLayer canva_make_layer(int w, int h, int id, const std::string& name);
         static void canva_cancel_interactions(CanvaState& canva);
+        static void canva_stamp_circle(CanvaLayer& layer, int w, int h, float cx, float cy, float radius, const ImVec4& col);
+        static void canva_draw_segment(CanvaLayer& layer, int w, int h, ImVec2 a, ImVec2 b, float radius, const ImVec4& col);
+
+        struct Sketch2RigJoint2d
+        {
+            int index = -1;
+            int parent = -1;
+            float x = 0.0f;
+            float y = 0.0f;
+            bool valid = false;
+        };
+
+        struct CanvaPreprocessTransform
+        {
+            float scale = 1.0f;
+            ImVec2 src_center = ImVec2(0.0f, 0.0f);
+            ImVec2 dst_center = ImVec2(0.0f, 0.0f);
+            bool valid = false;
+        };
+
+        static const char* sketch2rig_status_text(Sketch2RigStatus status)
+        {
+            switch (status)
+            {
+            case Sketch2RigStatus::NotStarted: return "Not started";
+            case Sketch2RigStatus::Loading: return "Loading";
+            case Sketch2RigStatus::Ready: return "Loaded";
+            case Sketch2RigStatus::Busy: return "Processing";
+            case Sketch2RigStatus::Error: return "Error";
+            case Sketch2RigStatus::Stopped: return "Stopped";
+            }
+            return "Unknown";
+        }
+
+        static ImVec4 sketch2rig_status_color(Sketch2RigStatus status)
+        {
+            switch (status)
+            {
+            case Sketch2RigStatus::Ready: return ImVec4(0.20f, 0.85f, 0.38f, 1.0f);
+            case Sketch2RigStatus::Busy: return ImVec4(0.95f, 0.72f, 0.20f, 1.0f);
+            case Sketch2RigStatus::Loading: return ImVec4(0.30f, 0.62f, 1.0f, 1.0f);
+            case Sketch2RigStatus::Error: return ImVec4(1.0f, 0.32f, 0.28f, 1.0f);
+            case Sketch2RigStatus::Stopped: return ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
+            case Sketch2RigStatus::NotStarted: return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+            }
+            return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+        }
+
+        static bool canva_parse_number_array_field(
+            const std::string& text,
+            const char* key,
+            std::vector<float>* out_values,
+            std::string* out_error)
+        {
+            if (!out_values)
+                return false;
+            out_values->clear();
+
+            const std::string needle = std::string("\"") + key + "\"";
+            const size_t key_pos = text.find(needle);
+            if (key_pos == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = std::string("Missing JSON field: ") + key;
+                return false;
+            }
+
+            size_t i = text.find('[', key_pos + needle.size());
+            if (i == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = std::string("JSON field is not an array: ") + key;
+                return false;
+            }
+            ++i;
+
+            while (i < text.size())
+            {
+                while (i < text.size() && (std::isspace((unsigned char)text[i]) || text[i] == ','))
+                    ++i;
+                if (i >= text.size())
+                    break;
+                if (text[i] == ']')
+                    return !out_values->empty();
+
+                const char* start = text.c_str() + i;
+                char* end = nullptr;
+                errno = 0;
+                const float value = std::strtof(start, &end);
+                if (end == start || errno == ERANGE)
+                {
+                    if (out_error)
+                        *out_error = std::string("Failed to parse numeric JSON array field: ") + key;
+                    return false;
+                }
+                out_values->push_back(value);
+                i = (size_t)(end - text.c_str());
+            }
+
+            if (out_error)
+                *out_error = std::string("Unterminated JSON array field: ") + key;
+            return false;
+        }
+
+        static std::string canva_parse_string_field(const std::string& text, const char* key)
+        {
+            const std::string needle = std::string("\"") + key + "\"";
+            const size_t key_pos = text.find(needle);
+            if (key_pos == std::string::npos)
+                return {};
+
+            size_t start = text.find(':', key_pos + needle.size());
+            if (start == std::string::npos)
+                return {};
+            ++start;
+            while (start < text.size() && std::isspace((unsigned char)text[start]))
+                ++start;
+            if (start >= text.size() || text[start] != '"')
+                return {};
+            ++start;
+
+            std::string out;
+            bool escaped = false;
+            for (size_t i = start; i < text.size(); ++i)
+            {
+                const char c = text[i];
+                if (escaped)
+                {
+                    switch (c)
+                    {
+                    case 'n': out += '\n'; break;
+                    case 'r': out += '\r'; break;
+                    case 't': out += '\t'; break;
+                    case 'b': out += '\b'; break;
+                    case 'f': out += '\f'; break;
+                    default: out += c; break;
+                    }
+                    escaped = false;
+                    continue;
+                }
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+                if (c == '"')
+                    break;
+                out += c;
+            }
+            return out;
+        }
+
+        static bool canva_apply_sketch2betas_result(
+            AppState& state,
+            const std::string& json_path,
+            std::string* out_error)
+        {
+            std::ifstream in(json_path);
+            if (!in)
+            {
+                if (out_error)
+                    *out_error = "Failed to open result JSON";
+                return false;
+            }
+
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            const std::string text = ss.str();
+
+            std::vector<float> betas;
+            if (!canva_parse_number_array_field(text, "betas", &betas, out_error))
+                return false;
+
+            const int n = std::min<int>((int)state.smpl_shape.betas.size(), (int)betas.size());
+            for (int i = 0; i < n; ++i)
+                state.smpl_shape.betas[(size_t)i] = betas[(size_t)i];
+            for (int i = n; i < (int)state.smpl_shape.betas.size(); ++i)
+                state.smpl_shape.betas[(size_t)i] = 0.0f;
+
+            const std::string gender = canva_parse_string_field(text, "gender");
+            if (gender == "male")
+                state.selection.gender = SmplType::Male;
+            else if (gender == "female")
+                state.selection.gender = SmplType::Female;
+
+            return true;
+        }
+
+        static void canva_apply_sketch_pose_result(AppState& state, const SketchPoseBuildResult& result)
+        {
+            if (result.gender == "male")
+                state.selection.gender = SmplType::Male;
+            else if (result.gender == "female")
+                state.selection.gender = SmplType::Female;
+            else if (result.gender == "neutral")
+                state.selection.gender = SmplType::Neutral;
+
+            const int n = std::min<int>((int)state.smpl_shape.betas.size(), (int)result.betas.size());
+            for (int i = 0; i < n; ++i)
+                state.smpl_shape.betas[(size_t)i] = (float)result.betas[(size_t)i];
+            for (int i = n; i < (int)state.smpl_shape.betas.size(); ++i)
+                state.smpl_shape.betas[(size_t)i] = 0.0f;
+
+            state.pending_pose_selection = result.npz_path.filename().string();
+            state.asset_refresh_request_id++;
+        }
+
+        static bool canva_try_finish_extract_pose(AppState& state, CanvaState& canva)
+        {
+            if (!canva.extract_pose_active || !canva.extract_pose_rig_done || !canva.extract_pose_betas_done)
+                return false;
+
+            const std::filesystem::path out_npz = assets_dir() / "poses" / "sketch_pose.npz";
+            const std::filesystem::path out_json = assets_dir() / "poses" / "sketch_pose.json";
+
+            SketchPoseBuildResult result;
+            std::string err;
+            if (!save_sketch_pose_from_outputs(
+                    canva.extract_pose_rig_path,
+                    canva.extract_pose_betas_path,
+                    out_json,
+                    out_npz,
+                    &result,
+                    &err))
+            {
+                console_add_line(state, std::string("Canva: Extract Pose failed: ") + (err.empty() ? "(unknown error)" : err));
+                canva.extract_pose_active = false;
+                return false;
+            }
+
+            canva_apply_sketch_pose_result(state, result);
+            canva.extract_pose_active = false;
+            console_add_line(state, std::string("Canva: Saved sketch pose JSON: ") + result.json_path.string());
+            console_add_line(state, std::string("Canva: Saved sketch pose NPZ: ") + result.npz_path.string());
+            return true;
+        }
+
+        static bool canva_load_preprocess_transform(
+            const std::filesystem::path& model_input_path,
+            CanvaPreprocessTransform* out_transform,
+            std::string* out_error)
+        {
+            if (!out_transform)
+                return false;
+            *out_transform = CanvaPreprocessTransform{};
+
+            if (model_input_path.empty())
+            {
+                if (out_error)
+                    *out_error = "Missing Sketch2Rig model-input path";
+                return false;
+            }
+
+            const std::filesystem::path meta_path = model_input_path.string() + ".preprocess.json";
+            std::ifstream in(meta_path);
+            if (!in)
+            {
+                if (out_error)
+                    *out_error = "Missing preprocessing metadata: " + meta_path.string();
+                return false;
+            }
+
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            const std::string text = ss.str();
+
+            std::vector<float> src_center;
+            std::vector<float> dst_center;
+            if (!canva_parse_number_array_field(text, "src_center", &src_center, out_error)
+                || !canva_parse_number_array_field(text, "dst_center", &dst_center, out_error))
+                return false;
+            if (src_center.size() < 2 || dst_center.size() < 2)
+            {
+                if (out_error)
+                    *out_error = "Malformed preprocessing center metadata";
+                return false;
+            }
+
+            size_t scale_pos = text.find("\"scale\"");
+            if (scale_pos == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = "Missing preprocessing scale metadata";
+                return false;
+            }
+            scale_pos = text.find(':', scale_pos);
+            if (scale_pos == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = "Malformed preprocessing scale metadata";
+                return false;
+            }
+            ++scale_pos;
+
+            while (scale_pos < text.size() && std::isspace((unsigned char)text[scale_pos]))
+                ++scale_pos;
+            const char* begin = text.c_str() + scale_pos;
+            char* end = nullptr;
+            const float scale = std::strtof(begin, &end);
+            if (end == begin || scale <= 1e-6f)
+            {
+                if (out_error)
+                    *out_error = "Invalid preprocessing scale metadata";
+                return false;
+            }
+
+            out_transform->scale = scale;
+            out_transform->src_center = ImVec2(src_center[0], src_center[1]);
+            out_transform->dst_center = ImVec2(dst_center[0], dst_center[1]);
+            out_transform->valid = true;
+            return true;
+        }
 
         static std::string canva_basename(std::string path)
         {
@@ -304,6 +632,291 @@ namespace poseweaver::ui_canva
             return true;
         }
 
+        static bool canva_parse_json_number(const std::string& text, size_t* pos, double* out_value)
+        {
+            if (!pos || !out_value)
+                return false;
+
+            size_t i = *pos;
+            while (i < text.size() && std::isspace((unsigned char)text[i]))
+                ++i;
+
+            const char* begin = text.c_str() + i;
+            char* end = nullptr;
+            const double value = std::strtod(begin, &end);
+            if (end == begin)
+                return false;
+
+            *out_value = value;
+            *pos = (size_t)(end - text.c_str());
+            return true;
+        }
+
+        static bool canva_parse_json_int_field(const std::string& object, const char* key, int* out_value)
+        {
+            const std::string needle = std::string("\"") + key + "\":";
+            size_t pos = object.find(needle);
+            if (pos == std::string::npos)
+                return false;
+            pos += needle.size();
+
+            double value = 0.0;
+            if (!canva_parse_json_number(object, &pos, &value))
+                return false;
+
+            *out_value = (int)std::lround(value);
+            return true;
+        }
+
+        static bool canva_parse_json_position_field(const std::string& object, float* out_x, float* out_y)
+        {
+            const std::string needle = "\"position\":";
+            size_t pos = object.find(needle);
+            if (pos == std::string::npos)
+                return false;
+            pos += needle.size();
+
+            while (pos < object.size() && std::isspace((unsigned char)object[pos]))
+                ++pos;
+            if (pos >= object.size() || object[pos] != '[')
+                return false;
+            ++pos;
+
+            double x = 0.0;
+            double y = 0.0;
+            if (!canva_parse_json_number(object, &pos, &x))
+                return false;
+            while (pos < object.size() && (std::isspace((unsigned char)object[pos]) || object[pos] == ','))
+                ++pos;
+            if (!canva_parse_json_number(object, &pos, &y))
+                return false;
+
+            *out_x = (float)x;
+            *out_y = (float)y;
+            return true;
+        }
+
+        static bool canva_load_sketch2rig_joints(
+            const std::filesystem::path& json_path,
+            std::vector<Sketch2RigJoint2d>* out_joints,
+            std::string* out_error)
+        {
+            if (!out_joints)
+                return false;
+            out_joints->clear();
+
+            std::ifstream in(json_path);
+            if (!in)
+            {
+                if (out_error)
+                    *out_error = "Failed to open " + json_path.string();
+                return false;
+            }
+
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            const std::string text = ss.str();
+
+            const size_t joints_key = text.find("\"joints\"");
+            if (joints_key == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = "Missing joints array in " + json_path.string();
+                return false;
+            }
+
+            size_t array_pos = text.find('[', joints_key);
+            if (array_pos == std::string::npos)
+            {
+                if (out_error)
+                    *out_error = "Malformed joints array in " + json_path.string();
+                return false;
+            }
+
+            std::vector<Sketch2RigJoint2d> parsed;
+            size_t pos = array_pos + 1;
+            while (pos < text.size())
+            {
+                const size_t object_begin = text.find('{', pos);
+                const size_t array_end = text.find(']', pos);
+                if (array_end != std::string::npos && (object_begin == std::string::npos || array_end < object_begin))
+                    break;
+                if (object_begin == std::string::npos)
+                    break;
+
+                int depth = 0;
+                size_t object_end = std::string::npos;
+                for (size_t i = object_begin; i < text.size(); ++i)
+                {
+                    if (text[i] == '{')
+                        ++depth;
+                    else if (text[i] == '}')
+                    {
+                        --depth;
+                        if (depth == 0)
+                        {
+                            object_end = i;
+                            break;
+                        }
+                    }
+                }
+                if (object_end == std::string::npos)
+                    break;
+
+                const std::string object = text.substr(object_begin, object_end - object_begin + 1);
+                Sketch2RigJoint2d joint;
+                if (canva_parse_json_int_field(object, "index", &joint.index)
+                    && canva_parse_json_int_field(object, "parent", &joint.parent)
+                    && canva_parse_json_position_field(object, &joint.x, &joint.y))
+                {
+                    joint.valid = true;
+                    parsed.push_back(joint);
+                }
+
+                pos = object_end + 1;
+            }
+
+            if (parsed.empty())
+            {
+                if (out_error)
+                    *out_error = "No valid joints in " + json_path.string();
+                return false;
+            }
+
+            int max_index = -1;
+            for (const auto& joint : parsed)
+                max_index = std::max(max_index, joint.index);
+            if (max_index < 0 || max_index > 4096)
+            {
+                if (out_error)
+                    *out_error = "Invalid joint indices in " + json_path.string();
+                return false;
+            }
+
+            out_joints->assign((size_t)max_index + 1u, Sketch2RigJoint2d{});
+            for (const auto& joint : parsed)
+            {
+                if (joint.index >= 0 && joint.index < (int)out_joints->size())
+                    (*out_joints)[(size_t)joint.index] = joint;
+            }
+
+            return true;
+        }
+
+        static void canva_project_sketch2rig_joints(std::vector<Sketch2RigJoint2d>& joints, int w, int h)
+        {
+            float min_x = std::numeric_limits<float>::max();
+            float min_y = std::numeric_limits<float>::max();
+            float max_x = -std::numeric_limits<float>::max();
+            float max_y = -std::numeric_limits<float>::max();
+
+            for (const auto& joint : joints)
+            {
+                if (!joint.valid)
+                    continue;
+                min_x = std::min(min_x, joint.x);
+                min_y = std::min(min_y, joint.y);
+                max_x = std::max(max_x, joint.x);
+                max_y = std::max(max_y, joint.y);
+            }
+
+            const bool looks_normalized =
+                min_x >= -0.25f && min_y >= -0.25f && max_x <= 1.25f && max_y <= 1.25f;
+
+            if (looks_normalized)
+            {
+                for (auto& joint : joints)
+                {
+                    if (!joint.valid)
+                        continue;
+                    joint.x = std::clamp(joint.x, 0.0f, 1.0f) * (float)(w - 1);
+                    joint.y = std::clamp(joint.y, 0.0f, 1.0f) * (float)(h - 1);
+                }
+                return;
+            }
+
+            const float dx = std::max(1e-6f, max_x - min_x);
+            const float dy = std::max(1e-6f, max_y - min_y);
+            const float margin = 0.10f * (float)std::min(w, h);
+            const float scale = std::min(((float)w - 2.0f * margin) / dx, ((float)h - 2.0f * margin) / dy);
+            const float used_w = dx * scale;
+            const float used_h = dy * scale;
+            const float ox = ((float)w - used_w) * 0.5f;
+            const float oy = ((float)h - used_h) * 0.5f;
+
+            for (auto& joint : joints)
+            {
+                if (!joint.valid)
+                    continue;
+                joint.x = ox + (joint.x - min_x) * scale;
+                joint.y = oy + (joint.y - min_y) * scale;
+            }
+        }
+
+        static bool canva_add_sketch2rig_layer(
+            CanvaState& canva,
+            const std::filesystem::path& json_path,
+            const std::filesystem::path& model_input_path,
+            std::string* out_error)
+        {
+            std::vector<Sketch2RigJoint2d> joints;
+            if (!canva_load_sketch2rig_joints(json_path, &joints, out_error))
+                return false;
+
+            canva_project_sketch2rig_joints(joints, canva.width, canva.height);
+
+            CanvaPreprocessTransform preprocess_transform;
+            std::string transform_error;
+            const bool have_preprocess_transform =
+                canva_load_preprocess_transform(model_input_path, &preprocess_transform, &transform_error);
+            if (!have_preprocess_transform)
+            {
+                if (out_error)
+                    *out_error = transform_error.empty() ? "Missing preprocessing transform" : transform_error;
+                return false;
+            }
+
+            CanvaLayer layer = canva_make_layer(
+                canva.width,
+                canva.height,
+                canva.next_layer_id++,
+                "Sketch2Rig rig");
+
+            const float inv_scale = 1.0f / std::max(1e-6f, preprocess_transform.scale);
+            layer.scale = inv_scale;
+            layer.offset = ImVec2(
+                preprocess_transform.src_center.x - preprocess_transform.dst_center.x * inv_scale,
+                preprocess_transform.src_center.y - preprocess_transform.dst_center.y * inv_scale);
+
+            const ImVec4 bone_col = ImVec4(0.05f, 0.30f, 1.00f, 0.92f);
+            const ImVec4 joint_col = ImVec4(1.00f, 0.20f, 0.10f, 0.96f);
+            const ImVec4 root_col = ImVec4(0.10f, 0.80f, 0.35f, 0.98f);
+
+            for (const auto& joint : joints)
+            {
+                if (!joint.valid || joint.parent < 0 || joint.parent >= (int)joints.size())
+                    continue;
+                const auto& parent = joints[(size_t)joint.parent];
+                if (!parent.valid)
+                    continue;
+                canva_draw_segment(layer, canva.width, canva.height,
+                    ImVec2(parent.x, parent.y), ImVec2(joint.x, joint.y), 2.5f, bone_col);
+            }
+
+            for (const auto& joint : joints)
+            {
+                if (!joint.valid)
+                    continue;
+                canva_stamp_circle(layer, canva.width, canva.height,
+                    joint.x, joint.y, joint.parent < 0 ? 6.5f : 5.0f, joint.parent < 0 ? root_col : joint_col);
+            }
+
+            canva.layers.insert(canva.layers.begin(), std::move(layer));
+            canva.active_layer = 0;
+            canva_cancel_interactions(canva);
+            return true;
+        }
+
         static void canva_sample_layer_bilinear_rgba(
             const CanvaLayer& layer,
             int w,
@@ -359,7 +972,10 @@ namespace poseweaver::ui_canva
             out_a = a0 + (a1 - a0) * ty;
         }
 
-        static bool canva_save_visible_layers_png(const CanvaState& canva, std::filesystem::path* out_path, std::string* out_error)
+        static bool canva_composite_visible_layers_rgba(
+            const CanvaState& canva,
+            std::vector<unsigned char>* out_rgba,
+            std::string* out_error)
         {
             const int w = canva.width;
             const int h = canva.height;
@@ -370,8 +986,9 @@ namespace poseweaver::ui_canva
                 return false;
             }
 
-            std::vector<unsigned char> out_rgba;
-            out_rgba.assign((size_t)w * (size_t)h * 4u, 255u); // opaque white background
+            if (!out_rgba)
+                return false;
+            out_rgba->assign((size_t)w * (size_t)h * 4u, 255u); // opaque white background
 
             // Composite bottom->top to match rendering order.
             for (int li = (int)canva.layers.size() - 1; li >= 0; --li)
@@ -414,49 +1031,69 @@ namespace poseweaver::ui_canva
                             continue;
 
                         const size_t idx = (((size_t)y * (size_t)w) + (size_t)x) * 4u;
-                        const float dr = (float)out_rgba[idx + 0u] / 255.0f;
-                        const float dg = (float)out_rgba[idx + 1u] / 255.0f;
-                        const float db = (float)out_rgba[idx + 2u] / 255.0f;
+                        const float dr = (float)(*out_rgba)[idx + 0u] / 255.0f;
+                        const float dg = (float)(*out_rgba)[idx + 1u] / 255.0f;
+                        const float db = (float)(*out_rgba)[idx + 2u] / 255.0f;
 
                         const float inv = 1.0f - sa;
                         const float or_ = sr * sa + dr * inv;
                         const float og_ = sg * sa + dg * inv;
                         const float ob_ = sb * sa + db * inv;
 
-                        out_rgba[idx + 0u] = (unsigned char)std::clamp<int>((int)(or_ * 255.0f + 0.5f), 0, 255);
-                        out_rgba[idx + 1u] = (unsigned char)std::clamp<int>((int)(og_ * 255.0f + 0.5f), 0, 255);
-                        out_rgba[idx + 2u] = (unsigned char)std::clamp<int>((int)(ob_ * 255.0f + 0.5f), 0, 255);
-                        out_rgba[idx + 3u] = 255u;
+                        (*out_rgba)[idx + 0u] = (unsigned char)std::clamp<int>((int)(or_ * 255.0f + 0.5f), 0, 255);
+                        (*out_rgba)[idx + 1u] = (unsigned char)std::clamp<int>((int)(og_ * 255.0f + 0.5f), 0, 255);
+                        (*out_rgba)[idx + 2u] = (unsigned char)std::clamp<int>((int)(ob_ * 255.0f + 0.5f), 0, 255);
+                        (*out_rgba)[idx + 3u] = 255u;
                     }
                 }
             }
+            return true;
+        }
 
+        static bool canva_next_render_path(
+            const char* tag_suffix,
+            const char* extension,
+            std::filesystem::path* out_path,
+            std::string* out_error)
+        {
             std::error_code ec;
             const std::filesystem::path renders_dir = std::filesystem::path("renders");
             std::filesystem::create_directories(renders_dir, ec);
-
-            const auto now = std::chrono::system_clock::now();
-            const std::time_t tt = std::chrono::system_clock::to_time_t(now);
-            std::tm tm{};
-        #if defined(_WIN32)
-            localtime_s(&tm, &tt);
-        #else
-            localtime_r(&tt, &tm);
-        #endif
-
-            std::ostringstream oss;
-            oss << "canva_" << std::put_time(&tm, "%Y%m%d_%H%M%S");
-            const std::string stem = oss.str();
-
-            std::filesystem::path out;
-            for (int i = 0; i < 1000; ++i)
+            if (ec)
             {
-                const std::string suffix = (i == 0) ? std::string() : ("_" + std::to_string(i));
-                out = renders_dir / (stem + suffix + ".png");
-                if (!std::filesystem::exists(out, ec))
-                    break;
+                if (out_error)
+                    *out_error = "Failed to create renders directory: " + ec.message();
+                return false;
             }
 
+            const std::string tag = (tag_suffix && tag_suffix[0] != '\0')
+                ? (std::string("_") + tag_suffix)
+                : std::string();
+            const std::filesystem::path out = renders_dir / ("canva" + tag + extension);
+
+            if (out.empty())
+            {
+                if (out_error)
+                    *out_error = "Failed to allocate render output path";
+                return false;
+            }
+            if (out_path)
+                *out_path = out;
+            return true;
+        }
+
+        static bool canva_save_visible_layers_png(const CanvaState& canva, std::filesystem::path* out_path, std::string* out_error)
+        {
+            std::vector<unsigned char> out_rgba;
+            if (!canva_composite_visible_layers_rgba(canva, &out_rgba, out_error))
+                return false;
+
+            std::filesystem::path out;
+            if (!canva_next_render_path("", ".png", &out, out_error))
+                return false;
+
+            const int w = canva.width;
+            const int h = canva.height;
             const int ok = stbi_write_png(out.string().c_str(), w, h, 4, out_rgba.data(), w * 4);
             if (ok == 0)
             {
@@ -468,6 +1105,21 @@ namespace poseweaver::ui_canva
             if (out_path)
                 *out_path = out;
             return true;
+        }
+
+        static bool canva_save_model_input_png(
+            const CanvaState& canva,
+            std::filesystem::path* out_path,
+            std::string* out_error)
+        {
+            const int w = canva.width;
+            const int h = canva.height;
+
+            std::vector<unsigned char> rgba;
+            if (!canva_composite_visible_layers_rgba(canva, &rgba, out_error))
+                return false;
+
+            return save_normalized_model_input_png(w, h, rgba, out_path, out_error);
         }
 
         static void canva_ensure_layer_texture(CanvaLayer& layer, int w, int h)
@@ -739,6 +1391,74 @@ namespace poseweaver::ui_canva
             console_add_line(state, ok ? "Canva: Undo applied" : "Canva: Undo stack empty");
         }
 
+        if (state.sketch2rig.completed_request_id > canva.last_sketch2rig_import_request_id)
+        {
+            canva.last_sketch2rig_import_request_id = state.sketch2rig.completed_request_id;
+            if (canva.extract_pose_active
+                && state.sketch2rig.completed_request_id == canva.extract_pose_rig_request_id)
+            {
+                canva.extract_pose_rig_done =
+                    state.sketch2rig.status == Sketch2RigStatus::Ready
+                    && !state.sketch2rig.last_output_path.empty();
+                if (!canva.extract_pose_rig_done)
+                {
+                    console_add_line(state, "Canva: Extract Pose cancelled because rig extraction failed");
+                    canva.extract_pose_active = false;
+                }
+            }
+            if (state.sketch2rig.status == Sketch2RigStatus::Ready && !state.sketch2rig.last_output_path.empty())
+            {
+                std::string err;
+                if (canva_add_sketch2rig_layer(
+                        canva,
+                        state.sketch2rig.last_output_path,
+                        state.sketch2rig.last_sketch_path,
+                        &err))
+                {
+                    console_add_line(state, std::string("Canva: Added Sketch2Rig rig layer from ")
+                        + state.sketch2rig.last_output_path);
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Failed to load Sketch2Rig rig: ")
+                        + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+        }
+
+        if (state.sketch2betas.completed_request_id > canva.last_sketch2betas_import_request_id)
+        {
+            canva.last_sketch2betas_import_request_id = state.sketch2betas.completed_request_id;
+            if (canva.extract_pose_active
+                && state.sketch2betas.completed_request_id == canva.extract_pose_betas_request_id)
+            {
+                canva.extract_pose_betas_done =
+                    state.sketch2betas.status == Sketch2RigStatus::Ready
+                    && !state.sketch2betas.last_output_path.empty();
+                if (!canva.extract_pose_betas_done)
+                {
+                    console_add_line(state, "Canva: Extract Pose cancelled because betas extraction failed");
+                    canva.extract_pose_active = false;
+                }
+            }
+            if (state.sketch2betas.status == Sketch2RigStatus::Ready && !state.sketch2betas.last_output_path.empty())
+            {
+                std::string err;
+                if (canva_apply_sketch2betas_result(state, state.sketch2betas.last_output_path, &err))
+                {
+                    console_add_line(state, std::string("Canva: Applied Sketch2Betas shape from ")
+                        + state.sketch2betas.last_output_path);
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Failed to apply Sketch2Betas result: ")
+                        + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+        }
+
+        (void)canva_try_finish_extract_pose(state, canva);
+
         // Global shortcuts for this tab (works even when hovering the controls).
         {
             ImGuiIO& io = ImGui::GetIO();
@@ -855,12 +1575,6 @@ namespace poseweaver::ui_canva
                 dl->PopClipRect();
 
                 dl->AddRect(p0, p1, IM_COL32(0, 0, 0, 140));
-
-                // Hide OS cursor and draw a custom cursor/preview when hovering the canvas.
-                if (hovered && in_canvas)
-                {
-                    ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-                }
 
                 // Transform tool: pick + drag active layer.
                 if (canva.tool == CanvaTool::Transform)
@@ -1179,9 +1893,17 @@ namespace poseweaver::ui_canva
                     "*.jpg", "*.JPG",
                     "*.jpeg", "*.JPEG"
                 };
+
+                std::error_code ec;
+                std::filesystem::path initial_dir = std::filesystem::path("assets") / "sketches";
+                if (!std::filesystem::exists(initial_dir, ec))
+                    initial_dir = std::filesystem::path("assets") / "sketch";
+                const std::string initial_dir_string =
+                    std::filesystem::exists(initial_dir, ec) ? initial_dir.string() : std::string();
+
                 const char* path = tinyfd_openFileDialog(
                     "Load image",
-                    "",
+                    initial_dir_string.c_str(),
                     (int)(sizeof(patterns) / sizeof(patterns[0])),
                     patterns,
                     "Image files (*.png, *.jpg, *.jpeg)",
@@ -1219,6 +1941,178 @@ namespace poseweaver::ui_canva
                     console_add_line(state, std::string("Canva: Save failed: ") + (err.empty() ? "(unknown error)" : err));
                 }
             }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Sketch2Rig");
+            ImGui::SameLine();
+            ImGui::TextColored(sketch2rig_status_color(state.sketch2rig.status), "%s",
+                sketch2rig_status_text(state.sketch2rig.status));
+
+            if (!state.sketch2rig.message.empty())
+                ImGui::TextWrapped("%s", state.sketch2rig.message.c_str());
+
+            const bool can_process =
+                state.sketch2rig.service != nullptr &&
+                state.sketch2rig.status == Sketch2RigStatus::Ready;
+            ImGui::BeginDisabled(!can_process);
+            if (ImGui::Button("Extract Rig"))
+            {
+                std::filesystem::path sketch_path;
+                std::string err;
+                if (canva_save_model_input_png(canva, &sketch_path, &err))
+                {
+                    const std::filesystem::path output_path =
+                        sketch_path.parent_path() / ("sketch_rig.json");
+                    const std::uint64_t request_id = state.sketch2rig.next_request_id++;
+
+                    state.sketch2rig.last_sketch_path = sketch_path.string();
+                    console_add_line(state, std::string("Canva: Saved normalized sketch for Sketch2Rig: ") + sketch_path.string());
+
+                    std::string request_err;
+                    if (state.sketch2rig.service->request_inference(request_id, sketch_path, output_path, &request_err))
+                    {
+                        state.sketch2rig.status = Sketch2RigStatus::Busy;
+                        state.sketch2rig.active_request_id = request_id;
+                        state.sketch2rig.message = "Processing sketch with Sketch2Rig...";
+                    }
+                    else
+                    {
+                        state.sketch2rig.status = Sketch2RigStatus::Error;
+                        state.sketch2rig.message = request_err.empty() ? "Failed to queue inference" : request_err;
+                        console_add_line(state, "Sketch2Rig: " + state.sketch2rig.message);
+                    }
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Process preprocessing failed: ") + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+            ImGui::EndDisabled();
+
+            if (!state.sketch2rig.last_output_path.empty())
+                ImGui::TextWrapped("Output: %s", state.sketch2rig.last_output_path.c_str());
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Sketch2Betas");
+            ImGui::SameLine();
+            ImGui::TextColored(sketch2rig_status_color(state.sketch2betas.status), "%s",
+                sketch2rig_status_text(state.sketch2betas.status));
+
+            if (!state.sketch2betas.message.empty())
+                ImGui::TextWrapped("%s", state.sketch2betas.message.c_str());
+
+            const bool can_extract_betas =
+                state.sketch2betas.service != nullptr &&
+                state.sketch2betas.status == Sketch2RigStatus::Ready;
+            ImGui::BeginDisabled(!can_extract_betas);
+            if (ImGui::Button("Extract betas"))
+            {
+                std::filesystem::path sketch_path;
+                std::string err;
+                if (canva_save_model_input_png(canva, &sketch_path, &err))
+                {
+                    const std::filesystem::path output_path =
+                        sketch_path.parent_path() / ("sketch_betas.json");
+                    const std::uint64_t request_id = state.sketch2betas.next_request_id++;
+
+                    state.sketch2betas.last_sketch_path = sketch_path.string();
+                    console_add_line(state, std::string("Canva: Saved normalized sketch for Sketch2Betas: ") + sketch_path.string());
+
+                    std::string request_err;
+                    if (state.sketch2betas.service->request_inference(request_id, sketch_path, output_path, &request_err))
+                    {
+                        state.sketch2betas.status = Sketch2RigStatus::Busy;
+                        state.sketch2betas.active_request_id = request_id;
+                        state.sketch2betas.message = "Processing sketch with Sketch2Betas...";
+                    }
+                    else
+                    {
+                        state.sketch2betas.status = Sketch2RigStatus::Error;
+                        state.sketch2betas.message = request_err.empty() ? "Failed to queue inference" : request_err;
+                        console_add_line(state, "Sketch2Betas: " + state.sketch2betas.message);
+                    }
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Extract betas preprocessing failed: ") + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+            ImGui::EndDisabled();
+
+            if (!state.sketch2betas.last_output_path.empty())
+                ImGui::TextWrapped("Output: %s", state.sketch2betas.last_output_path.c_str());
+
+            ImGui::Separator();
+            const bool can_extract_pose =
+                !canva.extract_pose_active &&
+                state.sketch2rig.service != nullptr &&
+                state.sketch2betas.service != nullptr &&
+                state.sketch2rig.status == Sketch2RigStatus::Ready &&
+                state.sketch2betas.status == Sketch2RigStatus::Ready;
+            ImGui::BeginDisabled(!can_extract_pose);
+            if (ImGui::Button("Extract Pose"))
+            {
+                std::filesystem::path sketch_path;
+                std::string err;
+                if (canva_save_model_input_png(canva, &sketch_path, &err))
+                {
+                    const std::filesystem::path rig_output_path =
+                        sketch_path.parent_path() / "sketch_rig.json";
+                    const std::filesystem::path betas_output_path =
+                        sketch_path.parent_path() / "sketch_betas.json";
+                    const std::uint64_t rig_request_id = state.sketch2rig.next_request_id++;
+                    const std::uint64_t betas_request_id = state.sketch2betas.next_request_id++;
+
+                    std::string rig_request_err;
+                    std::string betas_request_err;
+                    const bool rig_ok = state.sketch2rig.service->request_inference(
+                        rig_request_id,
+                        sketch_path,
+                        rig_output_path,
+                        &rig_request_err);
+                    const bool betas_ok = state.sketch2betas.service->request_inference(
+                        betas_request_id,
+                        sketch_path,
+                        betas_output_path,
+                        &betas_request_err);
+
+                    if (rig_ok && betas_ok)
+                    {
+                        state.sketch2rig.last_sketch_path = sketch_path.string();
+                        state.sketch2betas.last_sketch_path = sketch_path.string();
+                        state.sketch2rig.status = Sketch2RigStatus::Busy;
+                        state.sketch2rig.active_request_id = rig_request_id;
+                        state.sketch2rig.message = "Processing sketch with Sketch2Rig...";
+                        state.sketch2betas.status = Sketch2RigStatus::Busy;
+                        state.sketch2betas.active_request_id = betas_request_id;
+                        state.sketch2betas.message = "Processing sketch with Sketch2Betas...";
+
+                        canva.extract_pose_active = true;
+                        canva.extract_pose_rig_done = false;
+                        canva.extract_pose_betas_done = false;
+                        canva.extract_pose_rig_request_id = rig_request_id;
+                        canva.extract_pose_betas_request_id = betas_request_id;
+                        canva.extract_pose_rig_path = rig_output_path;
+                        canva.extract_pose_betas_path = betas_output_path;
+
+                        console_add_line(state, std::string("Canva: Extract Pose queued from sketch: ") + sketch_path.string());
+                    }
+                    else
+                    {
+                        console_add_line(state, std::string("Canva: Extract Pose failed to queue: ")
+                            + (!rig_ok ? (rig_request_err.empty() ? "rig request failed" : rig_request_err) : "")
+                            + (!rig_ok && !betas_ok ? "; " : "")
+                            + (!betas_ok ? (betas_request_err.empty() ? "betas request failed" : betas_request_err) : ""));
+                    }
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Extract Pose preprocessing failed: ") + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+            ImGui::EndDisabled();
+            if (canva.extract_pose_active)
+                ImGui::TextUnformatted("Extract Pose: waiting for rig and betas...");
 
             if (ImGui::Button("Add layer"))
             {

@@ -3,11 +3,13 @@
 #include "core/Assets.h"
 #include "core/Paths.h"
 #include "render/Renderer.h"
+#include "sketch2rig/Sketch2RigService.h"
 #include "ui/Ui.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -17,10 +19,94 @@
 
 namespace
 {
+    static void force_native_cursor_visible(GLFWwindow* window)
+    {
+        if (window)
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    }
+
+    static void show_cursor_on_launch(GLFWwindow* window)
+    {
+        if (!window)
+            return;
+
+        glfwSetCursor(window, nullptr);
+        force_native_cursor_visible(window);
+    }
+
+    struct NativeCursorGuard
+    {
+        GLFWwindow* window = nullptr;
+        GLFWcursor* cursors[ImGuiMouseCursor_COUNT] = {};
+
+        void init(GLFWwindow* w)
+        {
+            window = w;
+            cursors[ImGuiMouseCursor_Arrow] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
+            cursors[ImGuiMouseCursor_TextInput] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
+            cursors[ImGuiMouseCursor_ResizeNS] = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
+            cursors[ImGuiMouseCursor_ResizeEW] = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
+            cursors[ImGuiMouseCursor_Hand] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
+
+#ifdef GLFW_RESIZE_ALL_CURSOR
+            cursors[ImGuiMouseCursor_ResizeAll] = glfwCreateStandardCursor(GLFW_RESIZE_ALL_CURSOR);
+#endif
+#ifdef GLFW_RESIZE_NESW_CURSOR
+            cursors[ImGuiMouseCursor_ResizeNESW] = glfwCreateStandardCursor(GLFW_RESIZE_NESW_CURSOR);
+#endif
+#ifdef GLFW_RESIZE_NWSE_CURSOR
+            cursors[ImGuiMouseCursor_ResizeNWSE] = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
+#endif
+#ifdef GLFW_NOT_ALLOWED_CURSOR
+            cursors[ImGuiMouseCursor_NotAllowed] = glfwCreateStandardCursor(GLFW_NOT_ALLOWED_CURSOR);
+#endif
+
+            apply(ImGuiMouseCursor_Arrow);
+        }
+
+        void apply(ImGuiMouseCursor requested)
+        {
+            if (!window)
+                return;
+
+            if (requested == ImGuiMouseCursor_None || requested < 0 || requested >= ImGuiMouseCursor_COUNT)
+                requested = ImGuiMouseCursor_Arrow;
+
+            GLFWcursor* cursor = cursors[requested] ? cursors[requested] : cursors[ImGuiMouseCursor_Arrow];
+            glfwSetCursor(window, cursor);
+            force_native_cursor_visible(window);
+        }
+
+        void apply_imgui_cursor()
+        {
+            ImGui::GetIO().MouseDrawCursor = false;
+            apply(ImGui::GetMouseCursor());
+        }
+
+        void shutdown()
+        {
+            if (window)
+            {
+                glfwSetCursor(window, nullptr);
+                force_native_cursor_visible(window);
+            }
+            for (GLFWcursor*& cursor : cursors)
+            {
+                if (cursor)
+                {
+                    glfwDestroyCursor(cursor);
+                    cursor = nullptr;
+                }
+            }
+            window = nullptr;
+        }
+    };
+
     struct GlfwAppContext
     {
         poseweaver::Renderer* renderer = nullptr;
         poseweaver::AppState* state = nullptr;
+        NativeCursorGuard* cursor_guard = nullptr;
     };
 
     static void pw_glfw_error_callback(int error, const char* description)
@@ -54,6 +140,30 @@ namespace
     }
 
     static bool g_forward_viewer_mouse = false;
+
+    static void pw_glfw_window_focus_callback(GLFWwindow* window, int focused)
+    {
+        ImGui_ImplGlfw_WindowFocusCallback(window, focused);
+
+        if (!focused)
+            return;
+
+        force_native_cursor_visible(window);
+        if (auto* app = app_from(window); app && app->cursor_guard)
+            app->cursor_guard->apply(ImGuiMouseCursor_Arrow);
+    }
+
+    static void pw_glfw_cursor_enter_callback(GLFWwindow* window, int entered)
+    {
+        ImGui_ImplGlfw_CursorEnterCallback(window, entered);
+
+        if (!entered)
+            return;
+
+        force_native_cursor_visible(window);
+        if (auto* app = app_from(window); app && app->cursor_guard)
+            app->cursor_guard->apply_imgui_cursor();
+    }
 
     static void pw_glfw_cursor_pos_callback(GLFWwindow* window, double x, double y)
     {
@@ -257,6 +367,8 @@ int main(int, char**)
     if (window == nullptr)
         return 1;
 
+    show_cursor_on_launch(window);
+
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -266,6 +378,8 @@ int main(int, char**)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    ImGui::GetIO().MouseDrawCursor = false;
 
     ImGui_ImplGlfw_InitForOpenGL(window, false);
 
@@ -276,16 +390,26 @@ int main(int, char**)
     poseweaver::AssetIndex assets(poseweaver::assets_dir());
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
+    poseweaver::Sketch2RigService sketch2rig("Sketch2Rig");
+    poseweaver::Sketch2RigService sketch2betas("Sketch2Betas");
+    NativeCursorGuard cursor_guard;
+    cursor_guard.init(window);
+    state.sketch2rig.service = &sketch2rig;
+    state.sketch2betas.service = &sketch2betas;
 
     poseweaver::install_imgui_state_settings_handler(state);
 
     GlfwAppContext app;
     app.renderer = &renderer;
     app.state = &state;
+    app.cursor_guard = &cursor_guard;
 
     renderer.init(window);
+    cursor_guard.apply(ImGuiMouseCursor_Arrow);
     glfwSetWindowUserPointer(window, &app);
 
+    glfwSetWindowFocusCallback(window, pw_glfw_window_focus_callback);
+    glfwSetCursorEnterCallback(window, pw_glfw_cursor_enter_callback);
     glfwSetCursorPosCallback(window, pw_glfw_cursor_pos_callback);
     glfwSetMouseButtonCallback(window, pw_glfw_mouse_button_callback);
     glfwSetScrollCallback(window, pw_glfw_scroll_callback);
@@ -299,13 +423,21 @@ int main(int, char**)
     if (const char* vendor = (const char*)glGetString(GL_VENDOR))
         poseweaver::console_add_line(state, std::string("GL_VENDOR: ") + vendor);
     poseweaver::console_add_line(state, "PoseWeaver started");
+    sketch2rig.start(
+        poseweaver::assets_dir() / "Sketch2Rig",
+        std::filesystem::path(POSEWEAVER_SKETCH2RIG_WORKER));
+    sketch2betas.start(
+        poseweaver::assets_dir() / "Sketch2Betas",
+        std::filesystem::path(POSEWEAVER_SKETCH2BETAS_WORKER));
 
     double last_time = glfwGetTime();
     double play_accum = 0.0;
+    std::uint64_t last_asset_refresh_request_id = state.asset_refresh_request_id;
 
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
+        force_native_cursor_visible(window);
 
         int fb_w = 0, fb_h = 0;
         glfwGetFramebufferSize(window, &fb_w, &fb_h);
@@ -332,11 +464,33 @@ int main(int, char**)
             play_accum = 0.0;
         }
 
+        sketch2rig.drain_events(state, state.sketch2rig);
+        sketch2betas.drain_events(state, state.sketch2betas);
+
+        if (state.asset_refresh_request_id != last_asset_refresh_request_id)
+        {
+            assets.refresh();
+            state.selection.poses = assets.poses();
+            if (!state.pending_pose_selection.empty())
+            {
+                const auto it = std::find(
+                    state.selection.poses.begin(),
+                    state.selection.poses.end(),
+                    state.pending_pose_selection);
+                if (it != state.selection.poses.end())
+                    state.selection.pose_index = (int)std::distance(state.selection.poses.begin(), it);
+                state.pending_pose_selection.clear();
+            }
+            last_asset_refresh_request_id = state.asset_refresh_request_id;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        force_native_cursor_visible(window);
 
         ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
+        cursor_guard.apply_imgui_cursor();
 
         ImGui::Render();
 
@@ -348,13 +502,18 @@ int main(int, char**)
     }
 
     renderer.shutdown();
+    cursor_guard.apply(ImGuiMouseCursor_Arrow);
+    sketch2rig.stop();
+    sketch2betas.stop();
 
     poseweaver::save_imgui_settings_to_disk();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
+    cursor_guard.shutdown();
     ImGui::DestroyContext();
 
+    force_native_cursor_visible(window);
     glfwDestroyWindow(window);
     glfwTerminate();
 
