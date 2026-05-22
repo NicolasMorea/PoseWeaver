@@ -49,7 +49,8 @@ namespace poseweaver
 		const std::filesystem::path& pose_npz_path,
 		Eigen::VectorXd& pose_axis_angle_out,
 		std::optional<Eigen::VectorXd>* betas_out = nullptr,
-		std::string* error_message = nullptr);
+		std::string* error_message = nullptr,
+		bool* mirror_x_out = nullptr);
 
 	bool smplh_load_pose_npz_metadata(
 		const std::filesystem::path& pose_npz_path,

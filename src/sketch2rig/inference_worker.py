@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import traceback
 from pathlib import Path
@@ -119,16 +120,32 @@ def write_prediction_json(
     z_std = norm_stats.get("z_std")
     can_denormalize_z = isinstance(z_mean, (int, float)) and isinstance(z_std, (int, float))
 
+    angle_y_rad = 0.7348438501358032
+    angle_x_rad = angle_y_rad
+    cx = 0.5 * float(image_size - 1)
+    cy = 0.5 * float(image_size - 1)
+    fx = 0.5 * float(image_size - 1) / math.tan(0.5 * angle_x_rad)
+    fy = 0.5 * float(image_size - 1) / math.tan(0.5 * angle_y_rad)
+
     for i, xyz in enumerate(raw):
         position = [float(xyz[0]), float(xyz[1]), float(xyz[2])]
         if can_denormalize_z:
             position[2] = float(xyz[2]) * float(z_std) + float(z_mean)
+        u = position[0] * float(image_size - 1) if -0.25 <= position[0] <= 1.25 else position[0]
+        v = position[1] * float(image_size - 1) if -0.25 <= position[1] <= 1.25 else position[1]
+        z = position[2]
+        camera_position = [
+            (u - cx) / fx * z,
+            -(v - cy) / fy * z,
+            -z,
+        ]
         joint: dict[str, Any] = {
             "index": i,
             "name": JOINT_NAMES[i] if i < len(JOINT_NAMES) else f"joint_{i}",
             "parent": SMPL_PARENTS[i] if i < len(SMPL_PARENTS) else -1,
             "position": position,
             "normalized_position": [float(xyz[0]), float(xyz[1]), float(xyz[2])],
+            "camera_position": [float(v) for v in camera_position],
         }
         joints.append(joint)
 
@@ -151,6 +168,18 @@ def write_prediction_json(
         "image_size": image_size,
         "coordinate_space": "training_output_with_z_denormalized" if can_denormalize_z else "normalized_training_output",
         "norm_stats": norm_stats,
+        "extracted_view": {
+            "coordinate_space": "camera_scene_axes_from_uv_depth",
+            "position": [0.0, 0.0, 0.0],
+            "direction": [0.0, 0.0, -1.0],
+            "up": [0.0, 1.0, 0.0],
+            "angle_x_rad": angle_x_rad,
+            "angle_y_rad": angle_y_rad,
+            "fx": fx,
+            "fy": fy,
+            "cx": cx,
+            "cy": cy,
+        },
         "joints": joints,
         "bones": bones,
         "raw_prediction": raw,

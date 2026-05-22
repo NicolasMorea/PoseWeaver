@@ -267,6 +267,25 @@ namespace
                     return;
                 }
 
+                const bool plain_key = (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER)) == 0;
+                if (plain_key && key == GLFW_KEY_A)
+                {
+                    state.scene_view_snap_to_target_request_id++;
+                    return;
+                }
+
+                if (plain_key && key == GLFW_KEY_X)
+                {
+                    state.show_smpl_character = !state.show_smpl_character;
+                    return;
+                }
+
+                if (plain_key && key == GLFW_KEY_W)
+                {
+                    state.show_sketch2rig_rig = !state.show_sketch2rig_rig;
+                    return;
+                }
+
                 if (key == GLFW_KEY_SPACE && state.controls.simulating)
                 {
                     state.cloth_cancel_simulation_request_id++;
@@ -292,9 +311,9 @@ namespace
         {
             auto& state = *app->state;
 
-            if (key == GLFW_KEY_B && action == GLFW_PRESS)
+            if (key == GLFW_KEY_C && action == GLFW_PRESS)
             {
-                state.show_smpl_character = !state.show_smpl_character;
+                state.soft_cursor_enabled = !state.soft_cursor_enabled;
                 return;
             }
 
@@ -328,6 +347,7 @@ namespace
                     return;
                 }
             }
+
         }
 
         if (auto* app = app_from(window); app && app->renderer)
@@ -342,8 +362,10 @@ namespace
         if (ImGui::GetIO().WantCaptureKeyboard)
             return;
 
-        // Reserve 'B' for toggling SMPL visibility in the key callback.
-        if (codepoint == (unsigned int)'b' || codepoint == (unsigned int)'B')
+        // Reserve scene toolbar shortcuts handled in the key callback.
+        if (codepoint == (unsigned int)'a' || codepoint == (unsigned int)'A'
+            || codepoint == (unsigned int)'w' || codepoint == (unsigned int)'W'
+            || codepoint == (unsigned int)'x' || codepoint == (unsigned int)'X')
             return;
         if (auto* app = app_from(window); app && app->renderer)
             app->renderer->on_char(codepoint, mods);
@@ -491,6 +513,16 @@ int main(int, char**)
 
         ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
         cursor_guard.apply_imgui_cursor();
+
+        if (state.cursor_restore_request)
+        {
+            state.cursor_restore_request = false;
+            // Cycle HIDDEN→NORMAL to force GLFW to re-issue XDefineCursor/SetCursor
+            // even when it believes the mode is already NORMAL (no-op otherwise).
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+            cursor_guard.apply(ImGuiMouseCursor_Arrow);
+        }
 
         ImGui::Render();
 

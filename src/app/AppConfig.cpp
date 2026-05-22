@@ -342,6 +342,11 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.wind_random_time = std::clamp(v, 0.0f, 1000.0f);
         }
+        if (std::sscanf(line, "XpbdSmplGeometryPercent=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.smpl_geometry_percent = std::clamp(v, 1.0f, 100.0f);
+        }
     }
 
     static void pw_imgui_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
@@ -427,6 +432,7 @@ namespace
         buf->appendf("XpbdWindPitchDeg=%.6f\n", state->xpbd_params.wind_pitch_deg);
         buf->appendf("XpbdWindRandomSpace=%.6f\n", state->xpbd_params.wind_random_space);
         buf->appendf("XpbdWindRandomTime=%.6f\n", state->xpbd_params.wind_random_time);
+        buf->appendf("XpbdSmplGeometryPercent=%.6f\n", state->xpbd_params.smpl_geometry_percent);
 
         buf->appendf("\n");
     }

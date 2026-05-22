@@ -417,6 +417,9 @@ namespace poseweaver
 
                             ImGui::InputFloat("Gravity", &p.gravity, 0.5f, 5.0f, "%.3f");
 
+                            ImGui::SliderFloat("SMPL geometry kept", &p.smpl_geometry_percent, 1.0f, 100.0f, "%.0f%%");
+                            p.smpl_geometry_percent = std::clamp(p.smpl_geometry_percent, 1.0f, 100.0f);
+
                             if (ImGui::TreeNodeEx("Constraints", ImGuiTreeNodeFlags_DefaultOpen))
                             {
                                 ImGui::Checkbox("Stretch", &p.stretch_enabled);
@@ -526,6 +529,8 @@ namespace poseweaver
                         }
                         if (total > 0)
                             ImGui::Text("%d / %d steps", done, total);
+                        if (!state.controls.sim_stage.empty())
+                            ImGui::Text("Step: %s", state.controls.sim_stage.c_str());
                     }
 
                     ImGui::Separator();

@@ -1,5 +1,8 @@
 #include "render/Renderer.h"
 
+#include "core/Geometry.h"
+#include "simulation/ClothMeshProcessor.h"
+#include "simulation/SmplSimplifier.h"
 #include "simulation/pd/ClothProjectiveDynamics.h"
 #include "simulation/xpbd/ClothXpbd.h"
 
@@ -12,6 +15,7 @@
 #include <iomanip>
 #include <optional>
 #include <sstream>
+#include <utility>
 
 namespace poseweaver
 {
@@ -39,11 +43,14 @@ namespace poseweaver
         m_cloth_sim_preview_state.reset();
         m_cloth_sim_preview_enabled.reset();
         m_cloth_sim_preview_last_seq_applied = 0;
+        m_smplh_sim_preview_mesh_active = false;
+        m_smplh_mesh_name.clear();
         state.controls.frame_count = 0;
         state.controls.current_frame = 0;
         state.controls.playing = false;
         state.controls.sim_steps_done = 0;
         state.controls.sim_steps_total = 0;
+        state.controls.sim_stage.clear();
         console_add_line(state, "Cleared cloth simulation frames");
     }
 
@@ -52,12 +59,15 @@ namespace poseweaver
         if (m_cloth_sim_job_running && m_cloth_sim_cancel_flag)
         {
             m_cloth_sim_cancel_flag->store(true);
+            state.controls.sim_stage = "Stopping";
             console_add_line(state, "Cancel requested for cloth simulation");
         }
     }
 
     void Renderer::process_cloth_simulate(AppState& state)
     {
+        state.controls.sim_stage = "Preparing";
+
         if (m_cloth_sim_job_running)
         {
             m_cloth_sim_restart_pending = true;
@@ -71,6 +81,7 @@ namespace poseweaver
         if (m_garment_mesh_name.empty() || !state.show_garment_mesh)
         {
             state.controls.simulating = false;
+            state.controls.sim_stage.clear();
             console_add_line(state, "ERROR: Simulate requested but no garment is loaded/visible");
             return;
         }
@@ -79,6 +90,7 @@ namespace poseweaver
         if (garment.V.rows() == 0 || garment.F.rows() == 0)
         {
             state.controls.simulating = false;
+            state.controls.sim_stage.clear();
             console_add_line(state, "ERROR: Simulate requested but garment mesh is empty");
             return;
         }
@@ -87,33 +99,138 @@ namespace poseweaver
         if (!m_smplh_loaded || m_smplh_vertices.rows() == 0 || m_smplh_model.F.rows() == 0)
         {
             state.controls.simulating = false;
+            state.controls.sim_stage.clear();
             console_add_line(state, "ERROR: Simulate requested but SMPL body is not available");
             return;
         }
 
-        // Always restart from frame 0, not the currently displayed playback frame.
-        Eigen::MatrixXd cloth_V0;
-        if (!m_cloth_sim_frames.empty()
-            && (m_cloth_sim_pose_version == m_pose_version)
-            && (m_cloth_sim_garment_version == m_garment_version)
-            && (m_cloth_sim_frames.front().rows() == garment.V.rows()))
+        ensure_garment_to_smpl_mapping(state);
+        if (!m_garment_to_smpl.valid()
+            || m_garment_to_smpl.face_index.size() != m_garment_rest_vertices.rows())
         {
-            cloth_V0 = m_cloth_sim_frames.front();
+            state.controls.simulating = false;
+            state.controls.sim_stage.clear();
+            console_add_line(state, "ERROR: Simulate requested but cloth-to-SMPL mapping is not available");
+            return;
         }
-        else if (m_cloth_sim_reset_frame0_valid
-            && (m_cloth_sim_reset_pose_version == m_pose_version)
-            && (m_cloth_sim_reset_garment_version == m_garment_version)
-            && (m_cloth_sim_reset_frame0.rows() == garment.V.rows()))
-        {
-            cloth_V0 = m_cloth_sim_reset_frame0;
-        }
-        else
-        {
-            cloth_V0 = garment.V;
-        }
+
         Eigen::MatrixXi cloth_F = garment.F;
-        Eigen::MatrixXd body_V = m_smplh_vertices;
         Eigen::MatrixXi body_F = m_smplh_model.F;
+        if (m_smplh_loaded_pose_mirror_x && body_F.cols() >= 3)
+            body_F.col(1).swap(body_F.col(2));
+
+        SmplhParams tpose_params;
+        tpose_params.betas = m_smplh_params.betas;
+        tpose_params.pose_axis_angle = Eigen::VectorXd::Zero(3 * m_smplh_model.joint_count());
+
+        MatrixX3dRM body_tpose_rm;
+        std::string tpose_err;
+        if (!smplh_evaluate_lbs(m_smplh_model, tpose_params, body_tpose_rm, &tpose_err))
+        {
+            state.controls.simulating = false;
+            state.controls.sim_stage.clear();
+            console_add_line(state, "ERROR: Failed to build T-pose body for simulation: " + tpose_err);
+            return;
+        }
+
+        Eigen::MatrixXd body_tpose = body_tpose_rm;
+        Eigen::MatrixXd cloth_V0(m_garment_rest_vertices.rows(), 3);
+        const auto& F_body_map = m_smplh_model.F;
+        for (int vi = 0; vi < cloth_V0.rows(); ++vi)
+        {
+            const int fi = m_garment_to_smpl.face_index[vi];
+            if (fi < 0 || fi >= F_body_map.rows())
+            {
+                cloth_V0.row(vi) = m_garment_rest_vertices.row(vi);
+                continue;
+            }
+
+            const int ia = F_body_map(fi, 0);
+            const int ib = F_body_map(fi, 1);
+            const int ic = F_body_map(fi, 2);
+            if (ia < 0 || ib < 0 || ic < 0
+                || ia >= body_tpose.rows() || ib >= body_tpose.rows() || ic >= body_tpose.rows())
+            {
+                cloth_V0.row(vi) = m_garment_rest_vertices.row(vi);
+                continue;
+            }
+
+            const Eigen::RowVector3d bc = m_garment_to_smpl.barycentric.row(vi);
+            const Eigen::RowVector3d p_def =
+                bc[0] * body_tpose.row(ia) + bc[1] * body_tpose.row(ib) + bc[2] * body_tpose.row(ic);
+
+            Eigen::RowVector3d T_def, B_def, N_def;
+            if (!core::triangle_frame(body_tpose.row(ia), body_tpose.row(ib), body_tpose.row(ic), T_def, B_def, N_def))
+            {
+                if (!core::triangle_frame(
+                        m_smplh_model.v_template.row(ia),
+                        m_smplh_model.v_template.row(ib),
+                        m_smplh_model.v_template.row(ic),
+                        T_def,
+                        B_def,
+                        N_def))
+                {
+                    cloth_V0.row(vi) = m_garment_rest_vertices.row(vi);
+                    continue;
+                }
+            }
+
+            const Eigen::RowVector3d off_local = m_garment_to_smpl.offset_local.row(vi);
+            const Eigen::RowVector3d off_def = off_local[0] * T_def + off_local[1] * B_def + off_local[2] * N_def;
+            cloth_V0.row(vi) = p_def + off_def;
+        }
+
+        if (m_smplh_loaded_pose_mirror_x)
+        {
+            body_tpose.col(0) *= -1.0;
+            cloth_V0.col(0) *= -1.0;
+        }
+
+        if (state.scene_view_raw_rig_root_valid
+            && m_smplh_model.J_regressor.rows() > 0
+            && m_smplh_model.J_regressor.cols() == body_tpose.rows())
+        {
+            const Eigen::MatrixXd tpose_joints = m_smplh_model.J_regressor * body_tpose;
+            if (tpose_joints.rows() > 0 && tpose_joints.cols() == 3)
+            {
+                const Eigen::RowVector3d current_root = tpose_joints.row(0);
+                const Eigen::RowVector3d target_root(
+                    (double)state.scene_view_raw_rig_root[0],
+                    (double)state.scene_view_raw_rig_root[1],
+                    (double)state.scene_view_raw_rig_root[2]);
+                body_tpose.rowwise() -= current_root;
+                body_tpose.rowwise() += target_root;
+                cloth_V0.rowwise() -= current_root;
+                cloth_V0.rowwise() += target_root;
+            }
+        }
+
+        {
+            ClothPushOutResult push_res;
+            std::string push_err;
+            const double offset = std::max(0.0, (double)state.garment_min_cloth_skin_distance);
+            const bool push_ok = push_cloth_vertices_outside_body(
+                cloth_V0,
+                cloth_F,
+                body_tpose,
+                body_F,
+                offset,
+                &push_res,
+                &push_err);
+            if (!push_ok)
+            {
+                state.controls.simulating = false;
+                state.controls.sim_stage.clear();
+                console_add_line(state, "ERROR: Simulation T-pose cloth push-out failed: "
+                    + (push_err.empty() ? std::string("(unknown error)") : push_err));
+                return;
+            }
+            console_add_line(state,
+                std::string("Simulation starts from T-pose cloth with betas; push-out moved ")
+                    + std::to_string(push_res.moved_vertices) + " vertices");
+        }
+
+        Eigen::MatrixXd body_V = m_smplh_vertices;
 
         const SimulationSolver solver = state.controls.solver;
 
@@ -229,28 +346,31 @@ namespace poseweaver
 
             const Eigen::Quaterniond q_root_target = aa_to_quat(target_aa.segment<3>(0));
 
-            // Rotate around the root joint, not the world origin, to avoid a translation offset.
-            Eigen::Vector3d root_pivot = Eigen::Vector3d::Zero();
+            const bool mirror_display_x = m_smplh_loaded_pose_mirror_x;
+            const bool align_display_root =
+                state.scene_view_raw_rig_root_valid
+                && m_smplh_model.J_regressor.rows() > 0
+                && m_smplh_model.J_regressor.cols() == m_smplh_model.vertex_count();
+            const Eigen::RowVector3d display_root_target(
+                (double)state.scene_view_raw_rig_root[0],
+                (double)state.scene_view_raw_rig_root[1],
+                (double)state.scene_view_raw_rig_root[2]);
+
+            const auto to_display_space_body = [&](Eigen::MatrixXd& V_body)
             {
-                const int V = m_smplh_model.vertex_count();
-                const int B = m_smplh_model.beta_count();
-                if (V > 0)
+                if (mirror_display_x && V_body.cols() >= 1)
+                    V_body.col(0) *= -1.0;
+                if (align_display_root)
                 {
-                    Eigen::VectorXd betas = (m_smplh_params.betas.size() == B) ? m_smplh_params.betas : Eigen::VectorXd::Zero(std::max(0, B));
-                    Eigen::Map<const Eigen::VectorXd> v_template_flat(m_smplh_model.v_template.data(), (size_t)V * 3);
-                    Eigen::VectorXd v_shaped_flat = v_template_flat;
-                    if (B > 0)
-                        v_shaped_flat.noalias() += m_smplh_model.shapedirs * betas;
-                    Eigen::Map<const MatrixX3dRM> v_shaped(v_shaped_flat.data(), V, 3);
-                    const Eigen::MatrixXd joints = m_smplh_model.J_regressor * v_shaped;
+                    const Eigen::MatrixXd joints = m_smplh_model.J_regressor * V_body;
                     if (joints.rows() > 0 && joints.cols() == 3)
                     {
-                        root_pivot = joints.row(0).transpose();
-                        if (!root_pivot.allFinite())
-                            root_pivot.setZero();
+                        const Eigen::RowVector3d current_root = joints.row(0);
+                        V_body.rowwise() -= current_root;
+                        V_body.rowwise() += display_root_target;
                     }
                 }
-            }
+            };
 
             const float seq_frac = std::clamp(state.controls.smooth_sequence_length, 0.0f, 1.0f);
             const int seq_steps = static_cast<int>(std::round(seq_frac * static_cast<float>(steps)));
@@ -293,16 +413,14 @@ namespace poseweaver
                         seq_ok = false;
                         break;
                     }
-                    body_seq.push_back(Eigen::MatrixXd(V_skinned)); // row-major → column-major for solver
+                    Eigen::MatrixXd body_frame = V_skinned;
+                    to_display_space_body(body_frame);
+                    body_seq.push_back(std::move(body_frame));
                 }
 
                 if (seq_ok)
                 {
-                    // Rotate rest cloth to match root orientation so the body doesn't spin during interpolation.
-                    const Eigen::Matrix3d R = q_root_target.toRotationMatrix();
-                    cloth_V0 = (m_garment_rest_vertices.rowwise() - root_pivot.transpose()) * R.transpose();
-                    cloth_V0.rowwise() += root_pivot.transpose();
-                    console_add_line(state, "Smooth sequence ready; cloth starts from torso-aligned T-pose.");
+                    console_add_line(state, "Smooth sequence ready; cloth starts from pushed-out betas T-pose.");
                 }
                 else
                 {
@@ -312,11 +430,72 @@ namespace poseweaver
             else
             {
                 // seq_steps == 0: toggle is on but length is 0% — start cloth from T-pose with static target body.
-                const Eigen::Matrix3d R = q_root_target.toRotationMatrix();
-                cloth_V0 = (m_garment_rest_vertices.rowwise() - root_pivot.transpose()) * R.transpose();
-                cloth_V0.rowwise() += root_pivot.transpose();
             }
         }
+        if (xpbd_params.has_value())
+        {
+            const double keep_percent = std::clamp((double)state.xpbd_params.smpl_geometry_percent, 1.0, 100.0);
+            if (keep_percent < 99.5)
+            {
+                state.controls.sim_stage = "Simplifying SMPL";
+                const auto t0 = std::chrono::steady_clock::now();
+
+                SmplSimplification simplification;
+                std::string simpl_err;
+                Eigen::MatrixXd simplified_body_V;
+                bool simpl_ok = build_smpl_simplification(
+                    body_tpose,
+                    body_F,
+                    m_smplh_model.weights,
+                    keep_percent,
+                    simplification,
+                    &simpl_err)
+                    && apply_smpl_simplification(body_V, simplification, simplified_body_V, &simpl_err);
+
+                std::vector<Eigen::MatrixXd> simplified_body_sequence;
+                if (simpl_ok && !xpbd_params->body_sequence.empty())
+                {
+                    simplified_body_sequence.reserve(xpbd_params->body_sequence.size());
+                    for (const Eigen::MatrixXd& frame : xpbd_params->body_sequence)
+                    {
+                        Eigen::MatrixXd simplified_frame;
+                        if (!apply_smpl_simplification(frame, simplification, simplified_frame, &simpl_err))
+                        {
+                            simpl_ok = false;
+                            break;
+                        }
+                        simplified_body_sequence.push_back(std::move(simplified_frame));
+                    }
+                }
+
+                if (simpl_ok)
+                {
+                    const int raw_vertices = (int)body_V.rows();
+                    const int raw_faces = (int)body_F.rows();
+                    body_V = std::move(simplified_body_V);
+                    body_F = simplification.F;
+                    if (!xpbd_params->body_sequence.empty())
+                        xpbd_params->body_sequence = std::move(simplified_body_sequence);
+
+                    const auto elapsed = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    std::ostringstream oss;
+                    oss << std::fixed << std::setprecision(2)
+                        << "XPBD SMPL simplification: kept "
+                        << body_V.rows() << "/" << raw_vertices << " vertices, "
+                        << body_F.rows() << "/" << raw_faces << " faces"
+                        << " (requested " << keep_percent << "%, " << elapsed << " ms)";
+                    console_add_line(state, oss.str());
+                }
+                else
+                {
+                    console_add_line(state,
+                        std::string("WARNING: XPBD SMPL simplification skipped: ")
+                            + (simpl_err.empty() ? std::string("(unknown error)") : simpl_err));
+                }
+            }
+        }
+
         m_cloth_sim_progress_steps_total = steps;
         state.controls.sim_steps_total = steps;
         state.controls.sim_steps_done = 0;
@@ -349,6 +528,7 @@ namespace poseweaver
 
         m_cloth_sim_job_running = true;
         state.controls.simulating = true;
+        state.controls.sim_stage = (solver == SimulationSolver::ProjectiveDynamics) ? "Simulating PD" : "Simulating XPBD";
         console_add_line(state,
             (solver == SimulationSolver::ProjectiveDynamics)
                 ? "Starting cloth simulation (Projective Dynamics)…"
@@ -375,6 +555,7 @@ namespace poseweaver
                 {
                     std::shared_ptr<ClothSimPreviewState> state;
                     std::shared_ptr<std::atomic_bool> enabled;
+                    Eigen::MatrixXi body_F;
                     std::chrono::steady_clock::time_point last;
                     std::chrono::milliseconds min_interval{ 100 }; // low-FPS preview
                 };
@@ -420,11 +601,14 @@ namespace poseweaver
                         if (body_V)
                         {
                             pcb->state->body_V = *body_V;
+                            pcb->state->body_F = pcb->body_F;
                             pcb->state->body_valid = true;
+                            pcb->state->body_topology_valid = (pcb->body_F.rows() > 0 && pcb->body_F.cols() == 3);
                         }
                         else
                         {
                             pcb->state->body_valid = false;
+                            pcb->state->body_topology_valid = false;
                         }
                         pcb->state->seq.fetch_add(1, std::memory_order_release);
                     }
@@ -433,6 +617,7 @@ namespace poseweaver
                 PreviewCb preview_cb;
                 preview_cb.state = preview_state;
                 preview_cb.enabled = preview_enabled;
+                preview_cb.body_F = body_F;
 
                 bool ok = false;
                 if (pd_params.has_value())
@@ -563,6 +748,7 @@ namespace poseweaver
 
         if (!jr.ok)
         {
+            state.controls.sim_stage.clear();
             m_cloth_sim_last_error = jr.error;
             console_add_line(state, std::string("ERROR: Cloth simulation failed: ") + (jr.error.empty() ? "(unknown error)" : jr.error));
             return;
@@ -587,6 +773,7 @@ namespace poseweaver
             console_add_line(state, "Cloth simulation finished, but selection changed; result discarded");
             m_cloth_sim_frames.clear();
             state.controls.frame_count = 0;
+            state.controls.sim_stage.clear();
             return;
         }
 
@@ -607,6 +794,7 @@ namespace poseweaver
         console_add_line(state,
             std::string(was_cancelled ? "Cloth simulation stopped: " : "Cloth simulation ready: ")
                 + std::to_string(state.controls.frame_count) + " frames");
+        state.controls.sim_stage = was_cancelled ? "Stopped" : "Ready";
 
         if (!jr.timing_report.empty())
         {
@@ -642,6 +830,8 @@ namespace poseweaver
             Eigen::MatrixXd garment_V;
             bool want_body_update = false;
             Eigen::MatrixXd body_V;
+            Eigen::MatrixXi body_F;
+            bool body_topology_valid = false;
             {
                 std::lock_guard<std::mutex> lk(m_cloth_sim_preview_state->mutex);
                 if (!m_cloth_sim_preview_state->valid)
@@ -650,12 +840,13 @@ namespace poseweaver
                     return;
                 garment_V = m_cloth_sim_preview_state->V;
 
-                if (state.controls.smooth_sequence
-                    && m_cloth_sim_preview_state->body_valid
-                    && body.V.rows() == m_cloth_sim_preview_state->body_V.rows())
+                if (m_cloth_sim_preview_state->body_valid)
                 {
                     want_body_update = true;
                     body_V = m_cloth_sim_preview_state->body_V;
+                    body_topology_valid = m_cloth_sim_preview_state->body_topology_valid;
+                    if (body_topology_valid)
+                        body_F = m_cloth_sim_preview_state->body_F;
                 }
                 m_cloth_sim_preview_last_seq_applied = seq;
             }
@@ -664,7 +855,23 @@ namespace poseweaver
 
             if (want_body_update)
             {
-                body.set_vertices(body_V);
+                if (body_topology_valid
+                    && (!m_smplh_sim_preview_mesh_active
+                        || body.V.rows() != body_V.rows()
+                        || body.F.rows() != body_F.rows()))
+                {
+                    body.clear();
+                    body.set_mesh(body_V, body_F);
+                    body.show_faces = 1;
+                    body.show_lines = 0;
+                    body.show_overlay = 0;
+                    body.set_colors(Eigen::RowVector3d(0.85, 0.86, 0.88));
+                    m_smplh_sim_preview_mesh_active = true;
+                }
+                else if (body.V.rows() == body_V.rows())
+                {
+                    body.set_vertices(body_V);
+                }
                 body.compute_normals();
                 body.set_visible(true);
             }

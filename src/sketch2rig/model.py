@@ -10,6 +10,36 @@ NUM_JOINTS = 22
 SMPL_PARENTS: list[int] = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
 
 
+def create_backbone(backbone_name: str, pretrained: bool) -> nn.Module:
+    candidates = [
+        backbone_name,
+        "convnext_small.in12k_ft_in1k",
+        "convnext_small.fb_in22k_ft_in1k",
+        "convnext_small.in22k_ft_in1k",
+        "convnext_small_384_in22ft1k",
+        "convnext_small_in22ft1k",
+        "convnext_small",
+    ]
+    seen: set[str] = set()
+    last_error: Exception | None = None
+    for name in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
+        try:
+            model = timm.create_model(
+                name,
+                pretrained=pretrained,
+                num_classes=0,
+                global_pool="",
+            )
+            model.sketch2rig_backbone_name = name
+            return model
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Could not create any ConvNeXt backbone. Last error: {last_error}")
+
+
 class LearnedPositionalEncoding(nn.Module):
     """Learnable 2-D positional encoding for a flattened spatial feature map."""
 
@@ -100,12 +130,8 @@ class Sketch3DPoseNet(nn.Module):
         super().__init__()
 
         # No global pooling — we want the spatial feature map
-        self.backbone = timm.create_model(
-            backbone_name,
-            pretrained=pretrained,
-            num_classes=0,
-            global_pool="",
-        )
+        self.backbone = create_backbone(backbone_name, pretrained)
+        self.backbone_name = getattr(self.backbone, "sketch2rig_backbone_name", backbone_name)
 
         # Probe output channels with a dummy pass (works for any timm backbone)
         with torch.no_grad():

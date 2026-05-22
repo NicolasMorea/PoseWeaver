@@ -119,6 +119,22 @@ namespace poseweaver
             return (a - b).cwiseAbs().maxCoeff();
         }
 
+        static bool scene_toolbar_toggle(const char* label, bool active)
+        {
+            if (active)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+            }
+
+            const bool pressed = ImGui::Button(label);
+
+            if (active)
+                ImGui::PopStyleColor(2);
+
+            return pressed;
+        }
+
     }
 
     void Ui::draw_cloth_view(AppState& state, Renderer& renderer, const UiFrameInfo& frame)
@@ -144,6 +160,18 @@ namespace poseweaver
 
         if (ImGui::BeginTabItem("Scene View"))
         {
+            ImGui::PushID("scene_toolbar");
+            if (scene_toolbar_toggle("SMPL (X)", state.show_smpl_character))
+                state.show_smpl_character = !state.show_smpl_character;
+            ImGui::SameLine();
+            if (scene_toolbar_toggle("Rig (W)", state.show_sketch2rig_rig))
+                state.show_sketch2rig_rig = !state.show_sketch2rig_rig;
+            ImGui::SameLine();
+            if (ImGui::Button("Snap to Target (A)"))
+                state.scene_view_snap_to_target_request_id++;
+            ImGui::PopID();
+            ImGui::Separator();
+
             const ImVec2 top_left = ImGui::GetCursorScreenPos();
             const ImVec2 avail = ImGui::GetContentRegionAvail();
 

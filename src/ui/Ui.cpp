@@ -147,5 +147,13 @@ namespace poseweaver
             ImGui::SetNextWindowSize(console_size, ImGuiCond_Always);
             draw_console(state);
         }
+
+        if (state.soft_cursor_enabled)
+        {
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddCircleFilled(mouse, 4.0f, IM_COL32(255, 255, 255, 230));
+            fg->AddCircle(mouse, 4.5f, IM_COL32(0, 0, 0, 180), 0, 1.2f);
+        }
     }
 }

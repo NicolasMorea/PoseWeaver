@@ -38,6 +38,7 @@ namespace poseweaver
         bool simulating = false;
         bool playing = false;
         bool preview = true;
+        std::string sim_stage;
         int current_frame = 0;
         int max_frames = 300; // cap for recorded frames
         int frame_count = 0;  // actual recorded frames (0 when none)
@@ -117,6 +118,8 @@ namespace poseweaver
 
         float wind_random_space = 0.0f;
         float wind_random_time = 0.0f;
+
+        float smpl_geometry_percent = 100.0f;
     };
 
     struct SelectionState
@@ -207,6 +210,20 @@ namespace poseweaver
         std::array<float, 2> scene_view_wind_marker_screen{ 0.0f, 0.0f };
         bool scene_view_wind_marker_valid = false;
 
+        std::uint64_t scene_view_snap_to_target_request_id = 0;
+        bool scene_view_target_valid = false;
+        std::array<float, 3> scene_view_target_eye{ 0.0f, 0.0f, 0.0f };
+        std::array<float, 3> scene_view_target_direction{ 0.0f, 0.0f, -1.0f };
+        std::array<float, 3> scene_view_target_up{ 0.0f, 1.0f, 0.0f };
+        bool scene_view_raw_rig_root_valid = false;
+        std::array<float, 3> scene_view_raw_rig_root{ 0.0f, 0.0f, 0.0f };
+        bool scene_view_raw_rig_height_valid = false;
+        float scene_view_raw_rig_height = 0.0f;
+        std::uint64_t scene_view_snapshot_request_id = 0;
+        std::uint64_t scene_view_snapshot_completed_id = 0;
+        std::string scene_view_snapshot_pose_name;
+        std::string scene_view_snapshot_path;
+
         std::uint64_t garment_pushout_request_id = 0;
         std::uint64_t garment_ease_request_id = 0;
         std::uint64_t garment_prefit_request_id = 0;
@@ -216,6 +233,9 @@ namespace poseweaver
         std::uint64_t cloth_simulate_request_id = 0;
         std::uint64_t cloth_clear_simulation_request_id = 0;
         std::uint64_t cloth_cancel_simulation_request_id = 0;
+        std::uint64_t cloth_render_request_id = 0;
+        std::uint64_t cloth_render_completed_id = 0;
+        std::string cloth_render_path;
 
         float garment_min_cloth_skin_distance = 0.001f;
         float garment_ease_amount = 0.20f;
@@ -233,8 +253,11 @@ namespace poseweaver
 
         bool canva_tab_active = false;
         std::uint64_t canva_undo_request_id = 0;
+        bool cursor_restore_request = false;
+        bool soft_cursor_enabled = false;
 
         std::uint64_t asset_refresh_request_id = 0;
+        std::uint64_t pose_asset_reload_request_id = 0;
         std::string pending_pose_selection;
 
         Sketch2RigUiState sketch2rig;
@@ -249,6 +272,7 @@ namespace poseweaver
         bool show_simulation = true;
         bool show_smpl = true;
         bool show_smpl_character = true;
+        bool show_sketch2rig_rig = true;
         bool smpl_color_by_uv = false;
         bool show_garments = true;
         bool show_object_mesh = false;

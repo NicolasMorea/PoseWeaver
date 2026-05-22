@@ -89,6 +89,7 @@ namespace poseweaver
         void ensure_object_mesh_loaded(const AppState& state);
         void ensure_garment_mesh_loaded(AppState& state);
         void ensure_smplh_mesh_loaded(AppState& state);
+        void ensure_sketch2rig_rig_loaded(AppState& state);
 
         bool ensure_smplh_model_loaded(AppState& state, SmplType gender);
         void ensure_garment_to_smpl_mapping(AppState& state);
@@ -108,6 +109,8 @@ namespace poseweaver
         void process_cloth_cancel_simulation(AppState& state);
         void update_cloth_simulation_job(AppState& state);
         void apply_cloth_simulation_frame(AppState& state);
+        void capture_scene_view_snapshot_if_requested(AppState& state, const ViewportRect& view);
+        void capture_generated_cloth_render_if_requested(AppState& state);
 
         void regenerate_uv_wireframe_segments();
         bool try_load_smpl_uv_layout_once();
@@ -122,6 +125,7 @@ namespace poseweaver
         int m_garment_mesh_index = 2;
         int m_smplh_mesh_index = 3;
         int m_wind_arrow_mesh_index = 4;
+        int m_sketch2rig_rig_mesh_index = 5;
 
         // Indexed by mesh index in m_viewer.data_list.
         std::array<bool, 8> m_two_light_shader_installed{};
@@ -129,6 +133,8 @@ namespace poseweaver
         std::string m_object_mesh_name;
         std::string m_garment_mesh_name;
         std::string m_smplh_mesh_name;
+        std::string m_sketch2rig_rig_source_path;
+        std::string m_sketch2rig_rig_last_error;
         int m_last_fb_w = 0;
         int m_last_fb_h = 0;
         Eigen::MatrixXd m_garment_rest_vertices;
@@ -140,8 +146,17 @@ namespace poseweaver
         SmplhParams m_smplh_params;
         Eigen::MatrixXd m_smplh_vertices;
 
+        Eigen::MatrixXd m_sketch2rig_rig_source_joints;
+        std::vector<int> m_sketch2rig_rig_parents;
+        int m_sketch2rig_rig_image_size = 512;
+        bool m_sketch2rig_rig_source_valid = false;
+
         bool m_smplh_deform_dirty = true;
         bool m_smplh_last_show_character = true;
+        bool m_smplh_last_raw_rig_root_valid = false;
+        Eigen::Vector3d m_smplh_last_raw_rig_root = Eigen::Vector3d::Zero();
+        bool m_smplh_last_raw_rig_height_valid = false;
+        double m_smplh_last_raw_rig_height = 0.0;
         bool m_garment_last_show_mesh = false;
 
         bool m_garment_vertex_merge_settings_valid = false;
@@ -164,6 +179,9 @@ namespace poseweaver
         std::uint64_t m_last_cloth_simulate_request_id = 0;
         std::uint64_t m_last_cloth_clear_simulation_request_id = 0;
         std::uint64_t m_last_cloth_cancel_simulation_request_id = 0;
+        std::uint64_t m_last_scene_view_snap_to_target_request_id = 0;
+        std::uint64_t m_last_scene_view_snapshot_request_id = 0;
+        std::uint64_t m_last_cloth_render_request_id = 0;
 
         std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
         std::uint64_t m_cloth_sim_pose_version = 0;
@@ -200,7 +218,9 @@ namespace poseweaver
             bool valid = false;
 
             Eigen::MatrixXd body_V; // (#Vbody x 3)
+            Eigen::MatrixXi body_F; // (#Fbody x 3), needed when XPBD uses simplified SMPL topology
             bool body_valid = false;
+            bool body_topology_valid = false;
             std::atomic_uint64_t seq{ 0 };
         };
 
@@ -245,5 +265,9 @@ namespace poseweaver
 
         std::string m_smplh_loaded_pose_name;
         Eigen::VectorXd m_smplh_loaded_pose_axis_angle;
+        std::uint64_t m_smplh_last_pose_reload_request_id = 0;
+        bool m_smplh_loaded_pose_mirror_x = false;
+        bool m_smplh_mesh_mirror_x = false;
+        bool m_smplh_sim_preview_mesh_active = false;
     };
 }

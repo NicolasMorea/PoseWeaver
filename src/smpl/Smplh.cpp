@@ -499,8 +499,12 @@ namespace poseweaver
 		const std::filesystem::path& pose_npz_path,
 		Eigen::VectorXd& pose_axis_angle_out,
 		std::optional<Eigen::VectorXd>* betas_out,
-		std::string* error_message)
+		std::string* error_message,
+		bool* mirror_x_out)
 	{
+		if (mirror_x_out)
+			*mirror_x_out = false;
+
 		cnpy::NpyArray poses;
 		try
 		{
@@ -546,6 +550,25 @@ namespace poseweaver
 
 			const Eigen::AngleAxisd aa_new(R_new);
 			pose_axis_angle_out.head<3>() = aa_new.axis() * aa_new.angle();
+		}
+
+		if (mirror_x_out)
+		{
+			try
+			{
+				cnpy::NpyArray mirror_flag = cnpy::npz_load(pose_npz_path.string(), "poseweaver_mirror_x");
+				if (mirror_flag.shape.size() == 1 && mirror_flag.shape[0] >= 1)
+				{
+					if (mirror_flag.word_size == sizeof(int))
+						*mirror_x_out = (mirror_flag.data<int>()[0] != 0);
+					else if (mirror_flag.word_size == sizeof(long long))
+						*mirror_x_out = (mirror_flag.data<long long>()[0] != 0);
+				}
+			}
+			catch (const std::exception&)
+			{
+				*mirror_x_out = false;
+			}
 		}
 
 		if (betas_out)

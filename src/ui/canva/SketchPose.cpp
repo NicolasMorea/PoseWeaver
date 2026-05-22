@@ -399,7 +399,7 @@ namespace poseweaver::ui_canva
             return aa.axis() * aa.angle();
         }
 
-        static Eigen::MatrixXd rest_joints_blender_from_model(
+        static Eigen::MatrixXd rest_joints_smpl_from_model(
             const SmplhModel& model,
             const std::vector<double>& betas_in)
         {
@@ -417,18 +417,17 @@ namespace poseweaver::ui_canva
 
             Eigen::Map<const MatrixX3dRM> v_shaped(v_shaped_flat.data(), V, 3);
             Eigen::MatrixXd joints = model.J_regressor * v_shaped;
-            joints.col(1) *= -1.0;
             return joints;
         }
 
         static std::vector<double> estimate_pose_from_bone_angles(
-            const Eigen::MatrixXd& target_joints_blender,
-            const Eigen::MatrixXd& rest_joints_blender,
+            const Eigen::MatrixXd& target_joints_smpl,
+            const Eigen::MatrixXd& rest_joints_smpl,
             int full_joint_count)
         {
             const int keep = std::min<int>(
                 kSketchJointCount,
-                std::min<int>((int)target_joints_blender.rows(), (int)rest_joints_blender.rows()));
+                std::min<int>((int)target_joints_smpl.rows(), (int)rest_joints_smpl.rows()));
             std::vector<Eigen::Matrix3d> global_rot((size_t)full_joint_count, Eigen::Matrix3d::Identity());
             std::vector<Eigen::Matrix3d> local_rot((size_t)full_joint_count, Eigen::Matrix3d::Identity());
             const auto children = children_from_parents(kSketchParents, keep);
@@ -444,9 +443,9 @@ namespace poseweaver::ui_canva
                 for (int child : children[(size_t)j])
                 {
                     const Eigen::Vector3d rest_dir =
-                        normalize_or_zero(rest_joints_blender.row(child).transpose() - rest_joints_blender.row(j).transpose());
+                        normalize_or_zero(rest_joints_smpl.row(child).transpose() - rest_joints_smpl.row(j).transpose());
                     const Eigen::Vector3d target_dir =
-                        normalize_or_zero(target_joints_blender.row(child).transpose() - target_joints_blender.row(j).transpose());
+                        normalize_or_zero(target_joints_smpl.row(child).transpose() - target_joints_smpl.row(j).transpose());
                     if (rest_dir.squaredNorm() == 0.0 || target_dir.squaredNorm() == 0.0)
                         continue;
                     src.push_back(rest_dir);
@@ -464,11 +463,10 @@ namespace poseweaver::ui_canva
                 global_rot[(size_t)j] = project_to_rotation(parent_global * local);
             }
 
-            const Eigen::Matrix3d C = (Eigen::Vector3d(1.0, -1.0, 1.0)).asDiagonal();
             std::vector<double> pose((size_t)std::max(0, full_joint_count) * 3u, 0.0);
             for (int j = 0; j < keep; ++j)
             {
-                const Eigen::Vector3d aa = matrix_to_axis_angle(C * local_rot[(size_t)j] * C);
+                const Eigen::Vector3d aa = matrix_to_axis_angle(local_rot[(size_t)j]);
                 pose[(size_t)j * 3u + 0u] = aa.x();
                 pose[(size_t)j * 3u + 1u] = aa.y();
                 pose[(size_t)j * 3u + 2u] = aa.z();
@@ -476,13 +474,13 @@ namespace poseweaver::ui_canva
             return pose;
         }
 
-        static Eigen::MatrixXd rig_joints_to_camera_blender(
+        static Eigen::MatrixXd rig_joints_to_camera_scene_axes(
             const std::vector<RigJoint>& joints,
             int image_size)
         {
             const int size = std::max(2, image_size);
-            constexpr double kAngleX = 1.0471975803375244;
             constexpr double kAngleY = 0.7348438501358032;
+            constexpr double kAngleX = kAngleY;
             const double cx = 0.5 * (double)(size - 1);
             const double cy = 0.5 * (double)(size - 1);
             const double fx = 0.5 * (double)(size - 1) / std::tan(0.5 * kAngleX);
@@ -497,9 +495,18 @@ namespace poseweaver::ui_canva
                 const double v = (p.y() >= -0.25 && p.y() <= 1.25) ? p.y() * (double)(size - 1) : p.y();
                 const double z = p.z();
                 out(i, 0) = (u - cx) / fx * z;
-                out(i, 1) = (v - cy) / fy * z;
+                out(i, 1) = -(v - cy) / fy * z;
                 out(i, 2) = -z;
             }
+            return out;
+        }
+
+        static Eigen::MatrixXd mirror_x_for_smpl_solve(const Eigen::MatrixXd& target_joints_scene)
+        {
+            // The renderer mirrors generated sketch poses in X, so solve against the inverse target.
+            Eigen::MatrixXd out = target_joints_scene;
+            if (out.cols() >= 1)
+                out.col(0) *= -1.0;
             return out;
         }
 
@@ -556,6 +563,8 @@ namespace poseweaver::ui_canva
                 << "  \"npz\": \"" << json_escape(npz_path.string()) << "\",\n"
                 << "  \"gender\": \"" << json_escape(gender) << "\",\n"
                 << "  \"gender_index\": " << gender_index_from_string(gender) << ",\n"
+                << "  \"mirror_smpl_x\": true,\n"
+                << "  \"pose_solve_space\": \"smpl_axes_pre_display_mirror_x\",\n"
                 << "  \"image_size\": " << image_size << ",\n"
                 << "  \"parents\": [";
             for (int i = 0; i < kSketchJointCount; ++i)
@@ -566,7 +575,7 @@ namespace poseweaver::ui_canva
             out << "],\n  \"pose_axis_angle\": [";
             for (size_t i = 0; i < pose.size(); ++i)
                 out << (i ? ", " : "") << pose[i];
-            out << "],\n  \"target_joints_camera_blender\": [\n";
+            out << "],\n  \"target_joints_camera_scene\": [\n";
             for (int r = 0; r < target_joints.rows(); ++r)
             {
                 out << "    [" << target_joints(r, 0) << ", " << target_joints(r, 1) << ", " << target_joints(r, 2) << "]";
@@ -602,6 +611,9 @@ namespace poseweaver::ui_canva
 
                 const int no_root_fix = 1;
                 cnpy::npz_save(path.string(), "poseweaver_no_root_fix", &no_root_fix, { 1u }, "a");
+
+                const int mirror_x = 1;
+                cnpy::npz_save(path.string(), "poseweaver_mirror_x", &mirror_x, { 1u }, "a");
 
                 std::vector<unsigned char> gender_bytes(gender.begin(), gender.end());
                 if (gender_bytes.empty())
@@ -660,10 +672,11 @@ namespace poseweaver::ui_canva
             return false;
         }
 
-        const Eigen::MatrixXd target_joints = rig_joints_to_camera_blender(rig_joints, image_size);
-        const Eigen::MatrixXd rest_joints = rest_joints_blender_from_model(model, betas);
+        const Eigen::MatrixXd target_joints = rig_joints_to_camera_scene_axes(rig_joints, image_size);
+        const Eigen::MatrixXd target_joints_for_smpl = mirror_x_for_smpl_solve(target_joints);
+        const Eigen::MatrixXd rest_joints = rest_joints_smpl_from_model(model, betas);
         const std::vector<double> pose =
-            estimate_pose_from_bone_angles(target_joints, rest_joints, model.joint_count());
+            estimate_pose_from_bone_angles(target_joints_for_smpl, rest_joints, model.joint_count());
 
         if (!save_json(out_json_path, rig_json_path, betas_json_path, out_npz_path, gender, betas, pose, target_joints, image_size, out_error)
             || !save_npz(out_npz_path, gender, betas, pose, out_error))

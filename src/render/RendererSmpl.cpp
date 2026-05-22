@@ -56,6 +56,9 @@ namespace poseweaver
         m_smplh_deform_dirty = true;
         m_smplh_loaded_pose_name.clear();
         m_smplh_loaded_pose_axis_angle.resize(0);
+        m_smplh_last_pose_reload_request_id = 0;
+        m_smplh_loaded_pose_mirror_x = false;
+        m_smplh_mesh_mirror_x = false;
 
         m_smplh_params.betas = Eigen::VectorXd::Zero(m_smplh_model.beta_count());
         m_smplh_params.pose_axis_angle = Eigen::VectorXd::Zero(3 * m_smplh_model.joint_count());
@@ -70,6 +73,17 @@ namespace poseweaver
         auto& data = m_viewer.data(m_smplh_mesh_index);
 
         const bool want_visible = state.show_smpl_character;
+        if (m_smplh_sim_preview_mesh_active && m_cloth_sim_job_running)
+        {
+            data.set_visible(state.controls.preview ? true : want_visible);
+            return;
+        }
+        if (m_smplh_sim_preview_mesh_active && !m_cloth_sim_job_running)
+        {
+            m_smplh_sim_preview_mesh_active = false;
+            m_smplh_mesh_name.clear();
+        }
+
         if (!m_smplh_last_show_character && want_visible)
             m_smplh_deform_dirty = true;
         m_smplh_last_show_character = want_visible;
@@ -115,10 +129,14 @@ namespace poseweaver
             if (state.selection.pose_index >= 0 && state.selection.pose_index < (int)state.selection.poses.size())
                 pose_name = state.selection.poses[(size_t)state.selection.pose_index];
 
-            if (pose_name != m_smplh_loaded_pose_name)
+            const bool pose_reload_requested =
+                state.pose_asset_reload_request_id != m_smplh_last_pose_reload_request_id;
+            if (pose_name != m_smplh_loaded_pose_name || pose_reload_requested)
             {
                 m_smplh_loaded_pose_name = pose_name;
+                m_smplh_last_pose_reload_request_id = state.pose_asset_reload_request_id;
                 m_smplh_loaded_pose_axis_angle.resize(0);
+                m_smplh_loaded_pose_mirror_x = false;
                 m_pose_version++;
 
                 m_smplh_deform_dirty = true;
@@ -129,7 +147,8 @@ namespace poseweaver
                     const std::filesystem::path pose_path = assets_dir() / "poses" / pose_name;
                     std::string pose_err;
                     Eigen::VectorXd pose_axis_angle;
-                    if (!smplh_load_pose_npz(pose_path, pose_axis_angle, nullptr, &pose_err))
+                    bool mirror_x = false;
+                    if (!smplh_load_pose_npz(pose_path, pose_axis_angle, nullptr, &pose_err, &mirror_x))
                     {
                         std::fprintf(stderr, "[PoseWeaver] Failed to load pose '%s': %s\n", pose_name.c_str(), pose_err.c_str());
                         console_add_line(state, std::string("ERROR: Failed to load pose '") + pose_name + "': " + pose_err);
@@ -137,6 +156,7 @@ namespace poseweaver
                     else
                     {
                         m_smplh_loaded_pose_axis_angle = std::move(pose_axis_angle);
+                        m_smplh_loaded_pose_mirror_x = mirror_x;
                         console_add_line(state, std::string("Pose loaded: ") + pose_name);
                     }
                 }
@@ -172,6 +192,30 @@ namespace poseweaver
         }
 
         bool recomputed_vertices = false;
+        const bool align_to_raw_rig =
+            m_smplh_loaded_pose_mirror_x && state.scene_view_raw_rig_root_valid;
+        const bool scale_to_raw_rig =
+            align_to_raw_rig && state.scene_view_raw_rig_height_valid;
+        const Eigen::Vector3d raw_rig_root(
+            (double)state.scene_view_raw_rig_root[0],
+            (double)state.scene_view_raw_rig_root[1],
+            (double)state.scene_view_raw_rig_root[2]);
+        const double raw_rig_height = (double)state.scene_view_raw_rig_height;
+        if (align_to_raw_rig != m_smplh_last_raw_rig_root_valid
+            || (align_to_raw_rig && (raw_rig_root - m_smplh_last_raw_rig_root).squaredNorm() > 1e-12))
+        {
+            m_smplh_deform_dirty = true;
+            m_smplh_last_raw_rig_root_valid = align_to_raw_rig;
+            m_smplh_last_raw_rig_root = raw_rig_root;
+        }
+        if (scale_to_raw_rig != m_smplh_last_raw_rig_height_valid
+            || (scale_to_raw_rig && std::abs(raw_rig_height - m_smplh_last_raw_rig_height) > 1e-9))
+        {
+            m_smplh_deform_dirty = true;
+            m_smplh_last_raw_rig_height_valid = scale_to_raw_rig;
+            m_smplh_last_raw_rig_height = raw_rig_height;
+        }
+
         if (m_smplh_deform_dirty || m_smplh_vertices.rows() == 0)
         {
             MatrixX3dRM V_skinned;
@@ -184,6 +228,30 @@ namespace poseweaver
                 m_smplh_mesh_name.clear();
                 return;
             }
+            if (m_smplh_loaded_pose_mirror_x)
+                V_skinned.col(0) *= -1.0;
+            if (align_to_raw_rig
+                && m_smplh_model.J_regressor.rows() > 0
+                && m_smplh_model.J_regressor.cols() == V_skinned.rows())
+            {
+                const Eigen::MatrixXd joints = m_smplh_model.J_regressor * V_skinned;
+                if (joints.rows() > 0)
+                {
+                    const Eigen::Vector3d current_root = joints.row(0).transpose();
+                    double scale = 1.0;
+                    if (scale_to_raw_rig)
+                    {
+                        const double smpl_height = joints.col(1).maxCoeff() - joints.col(1).minCoeff();
+                        if (smpl_height > 1e-6 && std::isfinite(smpl_height)
+                            && raw_rig_height > 1e-6 && std::isfinite(raw_rig_height))
+                            scale = std::clamp(raw_rig_height / smpl_height, 0.05, 20.0);
+                    }
+
+                    V_skinned.rowwise() -= current_root.transpose();
+                    V_skinned *= scale;
+                    V_skinned.rowwise() += raw_rig_root.transpose();
+                }
+            }
             m_smplh_vertices = V_skinned;
             recomputed_vertices = true;
             m_smplh_deform_dirty = false;
@@ -194,9 +262,11 @@ namespace poseweaver
             m_pose_version++;
 
         const Eigen::MatrixXd& V = m_smplh_vertices;
-        const Eigen::MatrixXi F = m_smplh_model.F;
+        Eigen::MatrixXi F = m_smplh_model.F;
+        if (m_smplh_loaded_pose_mirror_x && F.cols() >= 3)
+            F.col(1).swap(F.col(2));
 
-        if (m_smplh_mesh_name != desired)
+        if (m_smplh_mesh_name != desired || m_smplh_mesh_mirror_x != m_smplh_loaded_pose_mirror_x)
         {
             data.clear();
             data.set_mesh(V, F);
@@ -208,6 +278,7 @@ namespace poseweaver
 
             m_viewer.core().align_camera_center(V, F);
             m_smplh_mesh_name = desired;
+            m_smplh_mesh_mirror_x = m_smplh_loaded_pose_mirror_x;
         }
         else
         {
