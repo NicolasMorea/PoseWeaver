@@ -450,6 +450,28 @@ namespace poseweaver
         const int steps_target = (params.duration_seconds <= 0.0) ? 0 : (int)std::ceil(params.duration_seconds / dt);
         const int steps = std::min(steps_target, std::max(0, max_frames - 1));
 
+        std::vector<std::pair<int, int>> fixed_entries;
+        if (!params.fixed_vertex_indices.empty() &&
+            params.fixed_vertex_targets.cols() == 3 &&
+            params.fixed_vertex_targets.rows() == (int)params.fixed_vertex_indices.size())
+        {
+            fixed_entries.reserve(params.fixed_vertex_indices.size());
+            for (int ri = 0; ri < (int)params.fixed_vertex_indices.size(); ++ri)
+            {
+                const int vi = params.fixed_vertex_indices[(size_t)ri];
+                if (vi >= 0 && vi < N && params.fixed_vertex_targets.row(ri).allFinite())
+                    fixed_entries.emplace_back(vi, ri);
+            }
+        }
+
+        const auto apply_fixed_positions = [&](Eigen::MatrixXd& Xfix)
+        {
+            if (Xfix.rows() != N || Xfix.cols() != 3)
+                return;
+            for (const auto& fr : fixed_entries)
+                Xfix.row(fr.first) = params.fixed_vertex_targets.row(fr.second);
+        };
+
         if (progress_steps_done)
             progress_steps_done->store(0);
 
@@ -484,6 +506,7 @@ namespace poseweaver
         const double w_bend = bend_stiff * 10.0 * w_base;
         const double w_iso_bend = iso_bend_stiff * 10.0 * w_base;
         const double w_col = col_stiff * 50.0 * w_base;
+        const double w_pin = fixed_entries.empty() ? 0.0 : (1.0e8 * w_base);
 
         const double thickness = std::max(0.0, params.collision_thickness);
 
@@ -496,7 +519,9 @@ namespace poseweaver
         }
 
         Eigen::MatrixXd X = cloth_V0;
+        apply_fixed_positions(X);
         Eigen::MatrixXd X_prev = cloth_V0;
+        apply_fixed_positions(X_prev);
         Eigen::MatrixXd Vv = Eigen::MatrixXd::Zero(N, 3);
 
         ClothPdResult result;
@@ -541,6 +566,7 @@ namespace poseweaver
                 const auto t0 = Clock::now();
                 Y = X + dt * Vv;
                 Y.col(1).array() += (dt * dt) * params.gravity_y;
+                apply_fixed_positions(Y);
                 ms_predict += to_ms(Clock::now() - t0);
             }
 
@@ -596,7 +622,7 @@ namespace poseweaver
             // Assemble constant system matrix A for this timestep.
             const auto t_assemble0 = Clock::now();
             std::vector<Triplet> T;
-            T.reserve((size_t)N * 3u + edges.size() * 24u + hinges.size() * 6u + iso_bend_edges.size() * 24u + contacts.size() * 6u);
+            T.reserve((size_t)N * 3u + edges.size() * 24u + hinges.size() * 6u + iso_bend_edges.size() * 24u + contacts.size() * 6u + fixed_entries.size() * 3u);
 
             // Mass term.
             for (int i = 0; i < N; ++i)
@@ -657,6 +683,12 @@ namespace poseweaver
             //     }
             // }
 
+            if (w_pin > 0.0)
+            {
+                for (const auto& fr : fixed_entries)
+                    add_block_I3(T, fr.first, fr.first, w_pin);
+            }
+
             SpMat A(3 * N, 3 * N);
             A.setFromTriplets(T.begin(), T.end());
             ms_assemble += to_ms(Clock::now() - t_assemble0);
@@ -694,6 +726,12 @@ namespace poseweaver
                 {
                     const double m = mass[i] * inv_dt2;
                     rhs.segment<3>(3 * i) += m * yvec.segment<3>(3 * i);
+                }
+
+                if (w_pin > 0.0)
+                {
+                    for (const auto& fr : fixed_entries)
+                        add_vec3(rhs, fr.first, params.fixed_vertex_targets.row(fr.second), w_pin);
                 }
 
                 // Stretch projections.
@@ -872,6 +910,7 @@ namespace poseweaver
             }
 
             unpack(xvec, X);
+            apply_fixed_positions(X);
 
             // Update contact set on the converged positions and apply a final push-out pass.
             // This helps catch contacts that were not present in the initial broad+narrow phase.
@@ -887,6 +926,7 @@ namespace poseweaver
                 {
                     const auto t0 = Clock::now();
                     (void)collision::apply_vertex_triangle_pushout(X, body_V, body_F, contacts, thickness, 2);
+                    apply_fixed_positions(X);
                     ms_post_pushout += to_ms(Clock::now() - t0);
                 }
             }
@@ -897,6 +937,8 @@ namespace poseweaver
 
             // Velocity update.
             Vv = (X - X_prev) / dt;
+            for (const auto& fr : fixed_entries)
+                Vv.row(fr.first).setZero();
 
             // Damping.
             const double damp = std::clamp(params.damping, 0.0, 0.99);
@@ -948,6 +990,7 @@ namespace poseweaver
 
                     // Re-apply position update to match modified velocities.
                     X = X_prev + dt * Vv;
+                    apply_fixed_positions(X);
                     ms_friction += to_ms(Clock::now() - t0);
                 }
 
@@ -964,9 +1007,12 @@ namespace poseweaver
                     {
                         const auto t0 = Clock::now();
                         (void)collision::apply_vertex_triangle_pushout(X, body_V, body_F, contacts, thickness, 1);
+                        apply_fixed_positions(X);
                         ms_post_pushout += to_ms(Clock::now() - t0);
                     }
                     Vv = (X - X_prev) / dt;
+                    for (const auto& fr : fixed_entries)
+                        Vv.row(fr.first).setZero();
                 }
             }
 

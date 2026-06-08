@@ -20,6 +20,10 @@ namespace poseweaver
             { process_garment_prefit(state); });
         consume_request(state.garment_relax_request_id, m_last_garment_relax_request_id, [&]()
             { process_garment_relax(state); });
+        consume_request(state.cloth_constraints_save_request_id, m_last_cloth_constraints_save_request_id, [&]()
+            { process_cloth_constraints_save(state); });
+        consume_request(state.cloth_constraints_clear_request_id, m_last_cloth_constraints_clear_request_id, [&]()
+            { process_cloth_constraints_clear(state); });
         consume_request(state.uv_image_request_id, m_last_uv_image_request_id, [&]()
             { generate_uv_debug_image(state); });
 

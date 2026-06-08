@@ -135,6 +135,360 @@ namespace poseweaver
             return pressed;
         }
 
+        struct UvPanePlacement
+        {
+            ImVec2 origin = ImVec2(0.0f, 0.0f);
+            ImVec2 image_size = ImVec2(0.0f, 0.0f);
+            ImVec2 clip_min = ImVec2(0.0f, 0.0f);
+            ImVec2 clip_max = ImVec2(0.0f, 0.0f);
+            bool valid = false;
+        };
+
+        struct UvHoverPoint
+        {
+            float u = 0.0f;
+            float v = 0.0f;
+            bool valid = false;
+        };
+
+        static UvPanePlacement draw_uv_projection_pane(
+            AppState& state,
+            Renderer& renderer,
+            const Renderer::UvDebugTextureInfo& info,
+            const ImVec2& pane_size)
+        {
+            UvPanePlacement placement;
+            if (pane_size.x <= 1.0f || pane_size.y <= 1.0f)
+                return placement;
+
+            const ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("uv_canvas", pane_size,
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return placement;
+
+            const float tex_w = (float)info.width;
+            const float tex_h = (float)info.height;
+            const float fit_scale = (tex_w > 0.0f && tex_h > 0.0f)
+                ? std::min(pane_size.x / tex_w, pane_size.y / tex_h)
+                : 1.0f;
+
+            if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+            {
+                const ImVec2 d = ImGui::GetIO().MouseDelta;
+                state.uv_view_pan_x += d.x;
+                state.uv_view_pan_y += d.y;
+            }
+
+            if (hovered)
+            {
+                const float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0f)
+                {
+                    const float zoom_before = state.uv_view_zoom;
+                    const float zoom_mul = (wheel > 0.0f) ? 1.12f : (1.0f / 1.12f);
+                    state.uv_view_zoom = std::clamp(state.uv_view_zoom * zoom_mul, 0.05f, 50.0f);
+                    const float zoom_after = state.uv_view_zoom;
+
+                    const ImVec2 mouse = ImGui::GetIO().MousePos;
+                    const ImVec2 canvas_center =
+                        ImVec2(canvas_pos.x + pane_size.x * 0.5f, canvas_pos.y + pane_size.y * 0.5f);
+                    const ImVec2 centered_origin = ImVec2(
+                        canvas_center.x - 0.5f * tex_w * fit_scale * zoom_before,
+                        canvas_center.y - 0.5f * tex_h * fit_scale * zoom_before);
+                    const ImVec2 origin_before =
+                        ImVec2(centered_origin.x + state.uv_view_pan_x, centered_origin.y + state.uv_view_pan_y);
+                    const ImVec2 p_img = ImVec2(mouse.x - origin_before.x, mouse.y - origin_before.y);
+
+                    const float s = (zoom_before > 0.0f) ? (zoom_after / zoom_before) : 1.0f;
+                    const ImVec2 origin_after_centered = ImVec2(
+                        canvas_center.x - 0.5f * tex_w * fit_scale * zoom_after,
+                        canvas_center.y - 0.5f * tex_h * fit_scale * zoom_after);
+                    const ImVec2 origin_after = ImVec2(mouse.x - p_img.x * s, mouse.y - p_img.y * s);
+
+                    state.uv_view_pan_x = origin_after.x - origin_after_centered.x;
+                    state.uv_view_pan_y = origin_after.y - origin_after_centered.y;
+                }
+            }
+
+            const float zoom = state.uv_view_zoom;
+            const ImVec2 canvas_center =
+                ImVec2(canvas_pos.x + pane_size.x * 0.5f, canvas_pos.y + pane_size.y * 0.5f);
+            const ImVec2 img_size = ImVec2(tex_w * fit_scale * zoom, tex_h * fit_scale * zoom);
+            const ImVec2 origin = ImVec2(
+                canvas_center.x - img_size.x * 0.5f + state.uv_view_pan_x,
+                canvas_center.y - img_size.y * 0.5f + state.uv_view_pan_y);
+
+            dl->PushClipRect(canvas_pos, ImVec2(canvas_pos.x + pane_size.x, canvas_pos.y + pane_size.y), true);
+
+            ImTextureID tid = (ImTextureID)(intptr_t)info.texture_id;
+            dl->AddImage(tid, origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y));
+
+            const auto& cloth_tris = renderer.garment_uv_triangles();
+            if (!cloth_tris.empty())
+            {
+                constexpr size_t kMaxFillTris = 20000;
+                if (cloth_tris.size() <= kMaxFillTris)
+                {
+                    const ImU32 cloth_fill_col = IM_COL32(0, 128, 255, 45);
+                    for (const auto& t : cloth_tris)
+                    {
+                        const float u0 = std::clamp(t.u0, 0.0f, 1.0f);
+                        const float v0 = std::clamp(t.v0, 0.0f, 1.0f);
+                        const float u1 = std::clamp(t.u1, 0.0f, 1.0f);
+                        const float v1 = std::clamp(t.v1, 0.0f, 1.0f);
+                        const float u2 = std::clamp(t.u2, 0.0f, 1.0f);
+                        const float v2 = std::clamp(t.v2, 0.0f, 1.0f);
+
+                        const ImVec2 a =
+                            ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
+                        const ImVec2 b =
+                            ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
+                        const ImVec2 c =
+                            ImVec2(origin.x + u2 * img_size.x, origin.y + (1.0f - v2) * img_size.y);
+                        dl->AddTriangleFilled(a, b, c, cloth_fill_col);
+                    }
+                }
+            }
+
+            const auto& segs = renderer.smpl_uv_wireframe_segments();
+            const ImU32 col = IM_COL32(0, 0, 0, 255);
+            constexpr float kThickness = 0.75f;
+            for (const auto& s : segs)
+            {
+                const float u0 = std::clamp(s.u0, 0.0f, 1.0f);
+                const float v0 = std::clamp(s.v0, 0.0f, 1.0f);
+                const float u1 = std::clamp(s.u1, 0.0f, 1.0f);
+                const float v1 = std::clamp(s.v1, 0.0f, 1.0f);
+
+                const ImVec2 a = ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
+                const ImVec2 b = ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
+                dl->AddLine(a, b, col, kThickness);
+            }
+
+            const auto& cloth_segs = renderer.garment_uv_wireframe_segments();
+            if (!cloth_segs.empty())
+            {
+                const ImU32 cloth_line_col = IM_COL32(0, 90, 220, 230);
+                constexpr float kClothThickness = 1.15f;
+                for (const auto& s : cloth_segs)
+                {
+                    const float u0 = std::clamp(s.u0, 0.0f, 1.0f);
+                    const float v0 = std::clamp(s.v0, 0.0f, 1.0f);
+                    const float u1 = std::clamp(s.u1, 0.0f, 1.0f);
+                    const float v1 = std::clamp(s.v1, 0.0f, 1.0f);
+
+                    const ImVec2 a =
+                        ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
+                    const ImVec2 b =
+                        ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
+                    dl->AddLine(a, b, cloth_line_col, kClothThickness);
+                }
+            }
+
+            dl->AddRect(origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y), IM_COL32(0, 0, 0, 100));
+            dl->PopClipRect();
+
+            placement.origin = origin;
+            placement.image_size = img_size;
+            placement.clip_min = canvas_pos;
+            placement.clip_max = ImVec2(canvas_pos.x + pane_size.x, canvas_pos.y + pane_size.y);
+            placement.valid = img_size.x > 0.0f && img_size.y > 0.0f;
+            return placement;
+        }
+
+        static UvPanePlacement draw_sketch2uv_prediction_pane(
+            Renderer& renderer,
+            const Renderer::UvDebugTextureInfo& info,
+            const ImVec2& pane_size,
+            UvHoverPoint& hover_point)
+        {
+            UvPanePlacement placement;
+            if (pane_size.x <= 1.0f || pane_size.y <= 1.0f || !info.valid)
+                return placement;
+
+            const ImVec2 pane_pos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("uv_prediction_canvas", pane_size,
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+            const bool hovered = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return placement;
+
+            const float tex_w = (float)info.width;
+            const float tex_h = (float)info.height;
+            const float fit_scale = (tex_w > 0.0f && tex_h > 0.0f)
+                ? std::min(pane_size.x / tex_w, pane_size.y / tex_h)
+                : 1.0f;
+            const ImVec2 img_size = ImVec2(tex_w * fit_scale, tex_h * fit_scale);
+            const ImVec2 origin = ImVec2(
+                pane_pos.x + (pane_size.x - img_size.x) * 0.5f,
+                pane_pos.y + (pane_size.y - img_size.y) * 0.5f);
+
+            dl->PushClipRect(pane_pos, ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y), true);
+            ImTextureID tid = (ImTextureID)(intptr_t)info.texture_id;
+            dl->AddImage(tid, origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y));
+            dl->AddRect(origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y), IM_COL32(0, 0, 0, 100));
+
+            if (hovered && img_size.x > 0.0f && img_size.y > 0.0f)
+            {
+                const ImVec2 mouse = ImGui::GetIO().MousePos;
+                if (mouse.x >= origin.x && mouse.x < origin.x + img_size.x
+                    && mouse.y >= origin.y && mouse.y < origin.y + img_size.y)
+                {
+                    const int px = std::clamp(
+                        (int)std::floor(((mouse.x - origin.x) / img_size.x) * tex_w),
+                        0,
+                        std::max(0, info.width - 1));
+                    const int py = std::clamp(
+                        (int)std::floor(((mouse.y - origin.y) / img_size.y) * tex_h),
+                        0,
+                        std::max(0, info.height - 1));
+                    float u = 0.0f;
+                    float v = 0.0f;
+                    if (renderer.sketch2uv_prediction_uv_at(px, py, u, v))
+                    {
+                        hover_point.u = u;
+                        hover_point.v = v;
+                        hover_point.valid = true;
+                        const ImVec2 p = ImVec2(
+                            origin.x + (((float)px + 0.5f) / tex_w) * img_size.x,
+                            origin.y + (((float)py + 0.5f) / tex_h) * img_size.y);
+                        dl->AddCircle(p, 5.0f, IM_COL32(255, 235, 40, 240), 16, 1.5f);
+                        dl->AddCircle(p, 2.0f, IM_COL32(0, 0, 0, 220), 12, 1.0f);
+                    }
+                }
+            }
+
+            dl->PopClipRect();
+
+            placement.origin = origin;
+            placement.image_size = img_size;
+            placement.clip_min = pane_pos;
+            placement.clip_max = ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y);
+            placement.valid = img_size.x > 0.0f && img_size.y > 0.0f;
+            return placement;
+        }
+
+        static bool predicted_pose_camera_available(const AppState& state)
+        {
+            if (!state.scene_view_target_valid || state.scene_view_snapshot_pose_name.empty())
+                return false;
+            if (state.selection.pose_index < 0 || state.selection.pose_index >= (int)state.selection.poses.size())
+                return false;
+            return state.selection.poses[(size_t)state.selection.pose_index] == state.scene_view_snapshot_pose_name;
+        }
+
+        static UvPanePlacement draw_smpl_body_preview_pane(
+            AppState& state,
+            Renderer& renderer,
+            const ImVec2& pane_size)
+        {
+            UvPanePlacement placement;
+            if (pane_size.x <= 1.0f || pane_size.y <= 1.0f)
+                return placement;
+
+            const ImVec2 pane_pos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("smpl_body_preview_canvas", pane_size,
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return placement;
+
+            const int render_w = std::max(32, (int)std::floor(pane_size.x));
+            const int render_h = std::max(32, (int)std::floor(pane_size.y));
+            const Renderer::SmplBodyPreviewInfo info = renderer.render_smpl_body_preview(state, render_w, render_h);
+            if (!info.valid)
+                return placement;
+
+            const float tex_w = (float)info.width;
+            const float tex_h = (float)info.height;
+            const float fit_scale = (tex_w > 0.0f && tex_h > 0.0f)
+                ? std::min(pane_size.x / tex_w, pane_size.y / tex_h)
+                : 1.0f;
+            const ImVec2 img_size = ImVec2(tex_w * fit_scale, tex_h * fit_scale);
+            const ImVec2 origin = ImVec2(
+                pane_pos.x + (pane_size.x - img_size.x) * 0.5f,
+                pane_pos.y + (pane_size.y - img_size.y) * 0.5f);
+
+            dl->PushClipRect(pane_pos, ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y), true);
+            ImTextureID tid = (ImTextureID)(intptr_t)info.texture_id;
+            dl->AddImage(
+                tid,
+                origin,
+                ImVec2(origin.x + img_size.x, origin.y + img_size.y),
+                ImVec2(0.0f, 1.0f),
+                ImVec2(1.0f, 0.0f));
+            dl->AddRect(origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y), IM_COL32(0, 0, 0, 100));
+            dl->PopClipRect();
+
+            placement.origin = origin;
+            placement.image_size = img_size;
+            placement.clip_min = pane_pos;
+            placement.clip_max = ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y);
+            placement.valid = img_size.x > 0.0f && img_size.y > 0.0f;
+            return placement;
+        }
+
+        static void draw_uv_hover_indicator(const UvPanePlacement& projection, const UvHoverPoint& hover_point)
+        {
+            if (!projection.valid || !hover_point.valid)
+                return;
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return;
+
+            const float u = std::clamp(hover_point.u, 0.0f, 1.0f);
+            const float v = std::clamp(hover_point.v, 0.0f, 1.0f);
+            const ImVec2 p = ImVec2(
+                projection.origin.x + u * projection.image_size.x,
+                projection.origin.y + (1.0f - v) * projection.image_size.y);
+
+            dl->PushClipRect(projection.clip_min, projection.clip_max, true);
+            dl->AddCircleFilled(p, 4.5f, IM_COL32(255, 235, 40, 235), 18);
+            dl->AddCircle(p, 8.0f, IM_COL32(0, 0, 0, 235), 20, 1.5f);
+            dl->AddLine(ImVec2(p.x - 12.0f, p.y), ImVec2(p.x + 12.0f, p.y), IM_COL32(0, 0, 0, 210), 1.0f);
+            dl->AddLine(ImVec2(p.x, p.y - 12.0f), ImVec2(p.x, p.y + 12.0f), IM_COL32(0, 0, 0, 210), 1.0f);
+            dl->PopClipRect();
+        }
+
+        static void draw_smpl_body_hover_indicator(
+            Renderer& renderer,
+            const UvPanePlacement& preview,
+            const UvHoverPoint& hover_point)
+        {
+            if (!preview.valid || !hover_point.valid)
+                return;
+
+            Eigen::Vector3f body_point;
+            if (!renderer.smpl_body_point_for_uv(hover_point.u, hover_point.v, body_point))
+                return;
+
+            float x01 = 0.0f;
+            float y01 = 0.0f;
+            if (!renderer.smpl_body_preview_project(body_point, x01, y01))
+                return;
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return;
+
+            const ImVec2 p = ImVec2(
+                preview.origin.x + x01 * preview.image_size.x,
+                preview.origin.y + y01 * preview.image_size.y);
+
+            dl->PushClipRect(preview.clip_min, preview.clip_max, true);
+            dl->AddCircleFilled(p, 5.0f, IM_COL32(255, 235, 40, 235), 18);
+            dl->AddCircle(p, 9.0f, IM_COL32(0, 0, 0, 235), 20, 1.6f);
+            dl->AddCircle(p, 14.0f, IM_COL32(255, 235, 40, 120), 24, 1.2f);
+            dl->PopClipRect();
+        }
+
     }
 
     void Ui::draw_cloth_view(AppState& state, Renderer& renderer, const UiFrameInfo& frame)
@@ -166,6 +520,9 @@ namespace poseweaver
             ImGui::SameLine();
             if (scene_toolbar_toggle("Rig (W)", state.show_sketch2rig_rig))
                 state.show_sketch2rig_rig = !state.show_sketch2rig_rig;
+            ImGui::SameLine();
+            if (scene_toolbar_toggle("Ink Cloth", state.cloth_toon_shader))
+                state.cloth_toon_shader = !state.cloth_toon_shader;
             ImGui::SameLine();
             if (ImGui::Button("Snap to Target (A)"))
                 state.scene_view_snap_to_target_request_id++;
@@ -249,6 +606,30 @@ namespace poseweaver
                             dl->AddCircleFilled(wind_screen, 4.0f, IM_COL32(220, 220, 220, 200));
                         if (light_ok)
                             dl->AddCircleFilled(light_screen, 4.0f, IM_COL32(255, 255, 180, 220));
+                        if (state.cloth_constraints_edit_enabled && state.cloth_constraint_drag_active)
+                        {
+                            ImVec2 a(
+                                vp_pos.x + state.cloth_constraint_drag_start_screen[0],
+                                vp_pos.y + state.cloth_constraint_drag_start_screen[1]);
+                            ImVec2 b(
+                                vp_pos.x + state.cloth_constraint_drag_end_screen[0],
+                                vp_pos.y + state.cloth_constraint_drag_end_screen[1]);
+                            a.x = std::clamp(a.x, top_left.x, top_left.x + avail.x);
+                            b.x = std::clamp(b.x, top_left.x, top_left.x + avail.x);
+                            a.y = std::clamp(a.y, top_left.y, top_left.y + avail.y);
+                            b.y = std::clamp(b.y, top_left.y, top_left.y + avail.y);
+
+                            const ImVec2 mn(std::min(a.x, b.x), std::min(a.y, b.y));
+                            const ImVec2 mx(std::max(a.x, b.x), std::max(a.y, b.y));
+                            const ImU32 fill = (state.cloth_constraint_edit_mode == 2)
+                                ? IM_COL32(255, 105, 80, 38)
+                                : IM_COL32(70, 230, 255, 42);
+                            const ImU32 outline = (state.cloth_constraint_edit_mode == 2)
+                                ? IM_COL32(255, 120, 90, 230)
+                                : IM_COL32(80, 235, 255, 230);
+                            dl->AddRectFilled(mn, mx, fill);
+                            dl->AddRect(mn, mx, outline, 0.0f, 0, 1.5f);
+                        }
                     }
 
                     const float dxl = mouse.x - light_screen.x;
@@ -359,136 +740,66 @@ namespace poseweaver
                 else
                     ImGui::TextUnformatted("UV layout: (missing) using fallback planar projection");
 
-                const ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
                 const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
 
                 if (canvas_size.x > 1.0f && canvas_size.y > 1.0f)
                 {
-                    ImGui::InvisibleButton("uv_canvas", canvas_size,
-                        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+                    const auto prediction_info = renderer.sketch2uv_prediction_texture_info();
+                    const bool show_prediction = prediction_info.valid && canvas_size.x > 320.0f;
+                    const bool show_body_preview =
+                        show_prediction
+                        && predicted_pose_camera_available(state)
+                        && canvas_size.x > 560.0f;
+                    const float gap = show_prediction ? 10.0f : 0.0f;
+                    const float total_gap = show_body_preview ? 2.0f * gap : gap;
+                    const float projection_w = show_prediction
+                        ? (show_body_preview
+                            ? std::max(1.0f, std::floor((canvas_size.x - total_gap) * 0.42f))
+                            : std::max(1.0f, std::floor((canvas_size.x - gap) * 0.58f)))
+                        : canvas_size.x;
+                    const float prediction_w = show_prediction
+                        ? (show_body_preview
+                            ? std::max(1.0f, std::floor((canvas_size.x - total_gap) * 0.29f))
+                            : std::max(1.0f, canvas_size.x - gap - projection_w))
+                        : 0.0f;
+                    const float body_w = show_body_preview
+                        ? std::max(1.0f, canvas_size.x - total_gap - projection_w - prediction_w)
+                        : 0.0f;
 
-                    const bool hovered = ImGui::IsItemHovered();
-                    const bool active = ImGui::IsItemActive();
-                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    UvHoverPoint hover_point;
+                    UvPanePlacement body_preview;
+                    ImGui::PushID("uv_projection_pane");
+                    const UvPanePlacement projection = draw_uv_projection_pane(
+                        state,
+                        renderer,
+                        info,
+                        ImVec2(projection_w, canvas_size.y));
+                    ImGui::PopID();
 
-                    const float tex_w = (float)info.width;
-                    const float tex_h = (float)info.height;
-                    const float fit_scale = (tex_w > 0.0f && tex_h > 0.0f)
-                        ? std::min(canvas_size.x / tex_w, canvas_size.y / tex_h)
-                        : 1.0f;
-
-                    if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                    if (show_prediction)
                     {
-                        const ImVec2 d = ImGui::GetIO().MouseDelta;
-                        state.uv_view_pan_x += d.x;
-                        state.uv_view_pan_y += d.y;
-                    }
+                        ImGui::SameLine(0.0f, gap);
+                        ImGui::PushID("sketch2uv_prediction_pane");
+                        draw_sketch2uv_prediction_pane(
+                            renderer,
+                            prediction_info,
+                            ImVec2(prediction_w, canvas_size.y),
+                            hover_point);
+                        ImGui::PopID();
+                        draw_uv_hover_indicator(projection, hover_point);
 
-                    if (hovered)
-                    {
-                        const float wheel = ImGui::GetIO().MouseWheel;
-                        if (wheel != 0.0f)
+                        if (show_body_preview)
                         {
-                            const float zoom_before = state.uv_view_zoom;
-                            const float zoom_mul = (wheel > 0.0f) ? 1.12f : (1.0f / 1.12f);
-                            state.uv_view_zoom = std::clamp(state.uv_view_zoom * zoom_mul, 0.05f, 50.0f);
-                            const float zoom_after = state.uv_view_zoom;
-
-                            const ImVec2 mouse = ImGui::GetIO().MousePos;
-                            const ImVec2 canvas_center =
-                                ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.5f);
-                            const ImVec2 centered_origin = ImVec2(
-                                canvas_center.x - 0.5f * tex_w * fit_scale * zoom_before,
-                                canvas_center.y - 0.5f * tex_h * fit_scale * zoom_before);
-                            const ImVec2 origin_before =
-                                ImVec2(centered_origin.x + state.uv_view_pan_x, centered_origin.y + state.uv_view_pan_y);
-                            const ImVec2 p_img = ImVec2(mouse.x - origin_before.x, mouse.y - origin_before.y);
-
-                            const float s = (zoom_before > 0.0f) ? (zoom_after / zoom_before) : 1.0f;
-                            const ImVec2 origin_after_centered = ImVec2(
-                                canvas_center.x - 0.5f * tex_w * fit_scale * zoom_after,
-                                canvas_center.y - 0.5f * tex_h * fit_scale * zoom_after);
-                            const ImVec2 origin_after = ImVec2(mouse.x - p_img.x * s, mouse.y - p_img.y * s);
-
-                            state.uv_view_pan_x = origin_after.x - origin_after_centered.x;
-                            state.uv_view_pan_y = origin_after.y - origin_after_centered.y;
+                            ImGui::SameLine(0.0f, gap);
+                            ImGui::PushID("smpl_body_preview_pane");
+                            body_preview = draw_smpl_body_preview_pane(
+                                state,
+                                renderer,
+                                ImVec2(body_w, canvas_size.y));
+                            ImGui::PopID();
+                            draw_smpl_body_hover_indicator(renderer, body_preview, hover_point);
                         }
                     }
-
-                    const float zoom = state.uv_view_zoom;
-                    const ImVec2 canvas_center =
-                        ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.5f);
-                    const ImVec2 img_size = ImVec2(tex_w * fit_scale * zoom, tex_h * fit_scale * zoom);
-                    const ImVec2 origin = ImVec2(
-                        canvas_center.x - img_size.x * 0.5f + state.uv_view_pan_x,
-                        canvas_center.y - img_size.y * 0.5f + state.uv_view_pan_y);
-
-                    ImTextureID tid = (ImTextureID)(intptr_t)info.texture_id;
-                    dl->AddImage(tid, origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y));
-
-                    const auto& cloth_tris = renderer.garment_uv_triangles();
-                    if (!cloth_tris.empty())
-                    {
-                        constexpr size_t kMaxFillTris = 20000;
-                        if (cloth_tris.size() <= kMaxFillTris)
-                        {
-                            const ImU32 cloth_fill_col = IM_COL32(0, 128, 255, 45);
-                            for (const auto& t : cloth_tris)
-                            {
-                                const float u0 = std::clamp(t.u0, 0.0f, 1.0f);
-                                const float v0 = std::clamp(t.v0, 0.0f, 1.0f);
-                                const float u1 = std::clamp(t.u1, 0.0f, 1.0f);
-                                const float v1 = std::clamp(t.v1, 0.0f, 1.0f);
-                                const float u2 = std::clamp(t.u2, 0.0f, 1.0f);
-                                const float v2 = std::clamp(t.v2, 0.0f, 1.0f);
-
-                                const ImVec2 a =
-                                    ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
-                                const ImVec2 b =
-                                    ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
-                                const ImVec2 c =
-                                    ImVec2(origin.x + u2 * img_size.x, origin.y + (1.0f - v2) * img_size.y);
-                                dl->AddTriangleFilled(a, b, c, cloth_fill_col);
-                            }
-                        }
-                    }
-
-                    const auto& segs = renderer.smpl_uv_wireframe_segments();
-                    const ImU32 col = IM_COL32(0, 0, 0, 255);
-                    constexpr float kThickness = 0.75f;
-                    for (const auto& s : segs)
-                    {
-                        const float u0 = std::clamp(s.u0, 0.0f, 1.0f);
-                        const float v0 = std::clamp(s.v0, 0.0f, 1.0f);
-                        const float u1 = std::clamp(s.u1, 0.0f, 1.0f);
-                        const float v1 = std::clamp(s.v1, 0.0f, 1.0f);
-
-                        const ImVec2 a = ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
-                        const ImVec2 b = ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
-                        dl->AddLine(a, b, col, kThickness);
-                    }
-
-                    const auto& cloth_segs = renderer.garment_uv_wireframe_segments();
-                    if (!cloth_segs.empty())
-                    {
-                        const ImU32 cloth_line_col = IM_COL32(0, 90, 220, 230);
-                        constexpr float kClothThickness = 1.15f;
-                        for (const auto& s : cloth_segs)
-                        {
-                            const float u0 = std::clamp(s.u0, 0.0f, 1.0f);
-                            const float v0 = std::clamp(s.v0, 0.0f, 1.0f);
-                            const float u1 = std::clamp(s.u1, 0.0f, 1.0f);
-                            const float v1 = std::clamp(s.v1, 0.0f, 1.0f);
-
-                            const ImVec2 a =
-                                ImVec2(origin.x + u0 * img_size.x, origin.y + (1.0f - v0) * img_size.y);
-                            const ImVec2 b =
-                                ImVec2(origin.x + u1 * img_size.x, origin.y + (1.0f - v1) * img_size.y);
-                            dl->AddLine(a, b, cloth_line_col, kClothThickness);
-                        }
-                    }
-
-                    dl->AddRect(origin, ImVec2(origin.x + img_size.x, origin.y + img_size.y), IM_COL32(0, 0, 0, 100));
                 }
             }
 
@@ -500,7 +811,7 @@ namespace poseweaver
             state.canva_tab_active = true;
             state.cloth_view = ViewportRect{ 0, 0, 0, 0, true };
 
-            ui_canva::draw_canva_tab(state);
+            ui_canva::draw_canva_tab(state, renderer);
 
             ImGui::EndTabItem();
         }

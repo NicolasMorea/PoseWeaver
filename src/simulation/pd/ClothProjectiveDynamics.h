@@ -44,6 +44,9 @@ namespace poseweaver
         double wind_random_time = 0.0;
 
         int max_frames = 300;
+
+        std::vector<int> fixed_vertex_indices;
+        Eigen::MatrixXd fixed_vertex_targets; // (#fixed x 3), in simulation/world space
     };
 
     struct ClothPdStats

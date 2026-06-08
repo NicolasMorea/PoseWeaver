@@ -610,6 +610,47 @@ namespace poseweaver
             inv_mass[i] = (m > 0.0 && std::isfinite(m)) ? (1.0 / m) : 0.0;
         }
 
+        std::vector<std::pair<int, int>> fixed_entries;
+        const bool have_fixed_targets =
+            !params.fixed_vertex_indices.empty() &&
+            !params.fixed_vertex_target_sequence.empty() &&
+            params.fixed_vertex_target_sequence.front().cols() == 3 &&
+            params.fixed_vertex_target_sequence.front().rows() == (int)params.fixed_vertex_indices.size();
+        if (have_fixed_targets)
+        {
+            fixed_entries.reserve(params.fixed_vertex_indices.size());
+            for (int ri = 0; ri < (int)params.fixed_vertex_indices.size(); ++ri)
+            {
+                const int vi = params.fixed_vertex_indices[(size_t)ri];
+                if (vi >= 0 && vi < N)
+                {
+                    fixed_entries.emplace_back(vi, ri);
+                    inv_mass[vi] = 0.0;
+                }
+            }
+        }
+
+        const auto fixed_targets_for_frame = [&](int frame_index) -> const Eigen::MatrixXd*
+        {
+            if (fixed_entries.empty())
+                return nullptr;
+            const int idx = std::clamp(frame_index, 0, (int)params.fixed_vertex_target_sequence.size() - 1);
+            const Eigen::MatrixXd& targets = params.fixed_vertex_target_sequence[(size_t)idx];
+            if (targets.cols() != 3 || targets.rows() != (int)params.fixed_vertex_indices.size())
+                return nullptr;
+            return &targets;
+        };
+
+        const auto apply_fixed_positions = [&](Eigen::MatrixXd& Xfix, int frame_index)
+        {
+            const Eigen::MatrixXd* targets = fixed_targets_for_frame(frame_index);
+            if (!targets || Xfix.rows() != N || Xfix.cols() != 3)
+                return;
+            for (const auto& fr : fixed_entries)
+                if (targets->row(fr.second).allFinite())
+                    Xfix.row(fr.first) = targets->row(fr.second);
+        };
+
         // Compliance alphas are scaled by sub_dt, not dt, so stiffness is invariant to substep count.
         const int substeps = std::max(1, params.substeps);
         const double sub_dt = dt / (double)substeps;
@@ -650,6 +691,7 @@ namespace poseweaver
         };
 
         Eigen::MatrixXd X = cloth_V0;
+        apply_fixed_positions(X, 0);
         Eigen::MatrixXd Vv = Eigen::MatrixXd::Zero(N, 3);
 
         ClothXpbdResult result;
@@ -685,6 +727,7 @@ namespace poseweaver
                 }
             }
             const Eigen::MatrixXd& cur_body_V = *p_body_V;
+            const int fixed_frame = std::min(step + 1, std::max(0, max_frames - 1));
 
             for (int sub = 0; sub < substeps; ++sub)
             {
@@ -706,8 +749,10 @@ namespace poseweaver
                     apply_wind_prediction(X_pred, X, step * substeps + sub, sub_dt, params);
                     ms_wind += to_ms(Clock::now() - t0);
                 }
+                apply_fixed_positions(X_pred, fixed_frame);
 
                 Eigen::MatrixXd Xs = X_pred;
+                apply_fixed_positions(Xs, fixed_frame);
 
                 col_candidates.clear();
                 {
@@ -745,6 +790,8 @@ namespace poseweaver
                 {
                     if (cancel && cancel->load())
                         break;
+
+                    apply_fixed_positions(Xs, fixed_frame);
 
                     if (params.stretch_enabled && stretch_alpha >= 0.0 && !stretch_edges.empty())
                     {
@@ -885,6 +932,8 @@ namespace poseweaver
                         self_contacts.clear();
                         lambda_self.clear();
                     }
+
+                    apply_fixed_positions(Xs, fixed_frame);
                 }
 
                 // Final collision refresh on converged positions + extra passes for stubborn penetrations.
@@ -907,6 +956,7 @@ namespace poseweaver
                         const auto t0 = Clock::now();
                         for (const auto& c : contacts)
                             apply_collision_constraint(Xs, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                        apply_fixed_positions(Xs, fixed_frame);
                         ms_collision_solve += to_ms(Clock::now() - t0);
                     }
                 }
@@ -934,6 +984,7 @@ namespace poseweaver
                         const auto t0 = Clock::now();
                         for (size_t ci = 0; ci < self_contacts.size(); ++ci)
                             apply_self_collision_constraint(Xs, cloth_F, self_contacts[ci], inv_mass, N, self_thickness, self_col_alpha, lambda_self[ci]);
+                        apply_fixed_positions(Xs, fixed_frame);
                         ms_self_collision_solve += to_ms(Clock::now() - t0);
                     }
                 }
@@ -944,8 +995,11 @@ namespace poseweaver
                 }
 
                 X = Xs;
+                apply_fixed_positions(X, fixed_frame);
 
                 Vv = (X - X_sub_prev) / sub_dt;
+                for (const auto& fr : fixed_entries)
+                    Vv.row(fr.first).setZero();
 
                 const double damp = std::clamp(params.damping, 0.0, 0.99);
                 Vv *= (1.0 - damp);
@@ -1030,6 +1084,7 @@ namespace poseweaver
                     }
 
                     X = X_sub_prev + sub_dt * Vv;
+                    apply_fixed_positions(X, fixed_frame);
                     ms_friction += to_ms(Clock::now() - t0);
 
                     if (params.collision_enabled && col_alpha >= 0.0 && !col_candidates.empty())
@@ -1046,9 +1101,12 @@ namespace poseweaver
                             const auto t1 = Clock::now();
                             for (const auto& c : contacts)
                                 apply_collision_constraint(X, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                            apply_fixed_positions(X, fixed_frame);
                             ms_collision_solve += to_ms(Clock::now() - t1);
                         }
                         Vv = (X - X_sub_prev) / sub_dt;
+                        for (const auto& fr : fixed_entries)
+                            Vv.row(fr.first).setZero();
                     }
 
                     if (params.self_collision_enabled && self_col_alpha >= 0.0 && self_thickness > 0.0)
@@ -1065,8 +1123,11 @@ namespace poseweaver
                             const auto t1 = Clock::now();
                             for (size_t ci = 0; ci < self_contacts.size(); ++ci)
                                 apply_self_collision_constraint(X, cloth_F, self_contacts[ci], inv_mass, N, self_thickness, self_col_alpha, lambda_self[ci]);
+                            apply_fixed_positions(X, fixed_frame);
                             ms_self_collision_solve += to_ms(Clock::now() - t1);
                             Vv = (X - X_sub_prev) / sub_dt;
+                            for (const auto& fr : fixed_entries)
+                                Vv.row(fr.first).setZero();
                         }
                     }
                 }

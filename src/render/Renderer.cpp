@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include <stb_image_write.h>
@@ -180,6 +181,29 @@ namespace poseweaver
             return link_program(vs, fs);
         }
 
+        static GLuint build_cloth_toon_program()
+        {
+            // Same attribute names as libigl's MeshGL, with extra uniforms for the ink outline pass.
+            const std::filesystem::path vs_path = assets_dir() / "shaders" / "cloth_toon.vert.glsl";
+            const std::filesystem::path fs_path = assets_dir() / "shaders" / "cloth_toon.frag.glsl";
+
+            const std::string vs_src = read_text_file(vs_path);
+            const std::string fs_src = read_text_file(fs_path);
+            if (vs_src.empty() || fs_src.empty())
+            {
+                std::fprintf(
+                    stderr,
+                    "Cloth toon shader load failed (vs=%s, fs=%s)\n",
+                    vs_path.string().c_str(),
+                    fs_path.string().c_str());
+                return 0;
+            }
+
+            const GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_src.c_str());
+            const GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src.c_str());
+            return link_program(vs, fs);
+        }
+
         static Eigen::Vector3d wind_dir_from_angles_deg(double yaw_deg, double pitch_deg)
         {
             constexpr double kPi = 3.14159265358979323846264338327950288;
@@ -314,12 +338,13 @@ namespace poseweaver
             };
         }
 
-        static std::vector<unsigned char> resize_gl_rgba_to_top_left_512(
+        static std::vector<unsigned char> resize_gl_rgba_to_top_left(
             const std::vector<unsigned char>& src,
             int src_w,
-            int src_h)
+            int src_h,
+            int out_size)
         {
-            constexpr int kOut = 512;
+            const int kOut = std::max(1, out_size);
             std::vector<unsigned char> dst((size_t)kOut * (size_t)kOut * 4u, 255u);
             if (src.empty() || src_w <= 0 || src_h <= 0)
                 return dst;
@@ -545,7 +570,11 @@ namespace poseweaver
         ensure_sketch2rig_rig_loaded(state);
 
         const bool need_body_for_garment = state.show_garment_mesh && (state.selection.pose_index >= 0);
-        if (state.show_smpl || need_body_for_garment)
+        const bool need_body_for_displacement =
+            state.canva_displacement_request_id != m_last_canva_displacement_request_id;
+        const bool need_body_for_smpl_layer =
+            state.scene_view_snapshot_request_id != m_last_scene_view_snapshot_request_id;
+        if (state.show_smpl || need_body_for_garment || need_body_for_displacement || need_body_for_smpl_layer)
             ensure_smplh_mesh_loaded(state);
         else
             m_viewer.data(m_smplh_mesh_index).set_visible(false);
@@ -566,6 +595,8 @@ namespace poseweaver
         handle_garment_posing(state, false);
 
         call_commands_from_state(state);
+        ensure_sketch2uv_prediction_texture(state);
+        process_canva_displacement_map(state);
 
         update_cloth_simulation_job(state);
         apply_cloth_simulation_frame(state);
@@ -709,6 +740,8 @@ namespace poseweaver
 
         apply_target_camera(core, state, m_last_scene_view_snap_to_target_request_id);
         update_core_matrices(core);
+        process_cloth_constraint_click(state);
+        update_garment_constraint_visualization(state);
 
         // primary light: user-controlled; secondary: mirrored in X/Z around scene center.
         const Eigen::Vector3d light1_world_d(
@@ -739,12 +772,12 @@ namespace poseweaver
 
         core.clear_framebuffers();
 
-        const auto ensure_two_light_shader_installed = [&](int mesh_index)
+        const auto ensure_mesh_shader_installed = [&](int mesh_index, MeshShaderVariant variant)
         {
             const size_t i = (size_t)mesh_index;
-            if (i >= m_two_light_shader_installed.size())
+            if (i >= m_mesh_shader_variant.size())
                 return;
-            if (m_two_light_shader_installed[i])
+            if (m_mesh_shader_variant[i] == variant)
                 return;
 
             auto& data = m_viewer.data(mesh_index);
@@ -752,7 +785,9 @@ namespace poseweaver
             if (!meshgl.is_initialized)
                 return;
 
-            const GLuint prog = build_two_light_program();
+            const GLuint prog = (variant == MeshShaderVariant::ClothToon)
+                ? build_cloth_toon_program()
+                : build_two_light_program();
             if (prog == 0)
                 return;
 
@@ -761,10 +796,10 @@ namespace poseweaver
             if (old != 0)
                 glDeleteProgram(old);
 
-            m_two_light_shader_installed[i] = true;
+            m_mesh_shader_variant[i] = variant;
         };
 
-        const auto draw_mesh_with_two_lights = [&](int mesh_index)
+        const auto draw_scene_mesh = [&](int mesh_index)
         {
             auto& data = m_viewer.data(mesh_index);
             if (!(data.is_visible & core.id))
@@ -785,7 +820,12 @@ namespace poseweaver
                 data.dirty = igl::opengl::MeshGL::DIRTY_NONE;
             }
 
-            ensure_two_light_shader_installed(mesh_index);
+            const bool use_cloth_toon =
+                state.cloth_toon_shader && mesh_index == m_garment_mesh_index;
+            const MeshShaderVariant shader_variant = use_cloth_toon
+                ? MeshShaderVariant::ClothToon
+                : MeshShaderVariant::TwoLight;
+            ensure_mesh_shader_installed(mesh_index, shader_variant);
 
             data.meshgl.bind_mesh();
             glViewport((int)core.viewport(0), (int)core.viewport(1), (int)core.viewport(2), (int)core.viewport(3));
@@ -805,6 +845,8 @@ namespace poseweaver
             glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
             glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
             glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
+            glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
+            glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
 
             glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
             glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
@@ -815,6 +857,31 @@ namespace poseweaver
                 glUniform1f(glGetUniformLocation(prog, "texture_factor"), core.is_set(data.show_texture) ? 1.0f : 0.0f);
                 glUniform1f(glGetUniformLocation(prog, "matcap_factor"), core.is_set(data.use_matcap) ? 1.0f : 0.0f);
                 glUniform1f(glGetUniformLocation(prog, "double_sided"), data.double_sided ? 1.0f : 0.0f);
+
+                if (use_cloth_toon)
+                {
+                    const GLboolean old_cull_enabled = glIsEnabled(GL_CULL_FACE);
+                    GLint old_cull_face = GL_BACK;
+                    GLboolean old_depth_mask = GL_TRUE;
+                    glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
+                    glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+
+                    const float outline_width = std::clamp((float)(0.006 * scene_diag), 0.0025f, 0.0200f);
+                    glEnable(GL_CULL_FACE);
+                    glCullFace(GL_FRONT);
+                    glDepthMask(GL_FALSE);
+                    glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
+                    glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), outline_width);
+                    data.meshgl.draw_mesh(true);
+
+                    glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
+                    glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
+                    glDepthMask(old_depth_mask);
+                    glCullFace((GLenum)old_cull_face);
+                    if (!old_cull_enabled)
+                        glDisable(GL_CULL_FACE);
+                }
+
                 data.meshgl.draw_mesh(true);
                 glUniform1f(glGetUniformLocation(prog, "matcap_factor"), 0.0f);
                 glUniform1f(glGetUniformLocation(prog, "texture_factor"), 0.0f);
@@ -860,9 +927,26 @@ namespace poseweaver
 
         const auto draw_scene_contents = [&]()
         {
-            draw_mesh_with_two_lights(m_object_mesh_index);
-            draw_mesh_with_two_lights(m_garment_mesh_index);
-            draw_mesh_with_two_lights(m_smplh_mesh_index);
+            draw_scene_mesh(m_object_mesh_index);
+            draw_scene_mesh(m_garment_mesh_index);
+            draw_scene_mesh(m_smplh_mesh_index);
+
+            {
+                auto& garment = m_viewer.data(m_garment_mesh_index);
+                if (garment.points.rows() > 0)
+                {
+                    const auto old_faces = garment.show_faces;
+                    const auto old_lines = garment.show_lines;
+                    const auto old_overlay = garment.show_overlay;
+                    garment.show_faces = 0;
+                    garment.show_lines = 0;
+                    garment.show_overlay = 1;
+                    core.draw(garment, false);
+                    garment.show_faces = old_faces;
+                    garment.show_lines = old_lines;
+                    garment.show_overlay = old_overlay;
+                }
+            }
 
             core.draw(m_viewer.data(m_grid_mesh_index), false);
             core.draw(m_viewer.data(m_wind_arrow_mesh_index), false);
@@ -871,50 +955,14 @@ namespace poseweaver
 
         draw_scene_contents();
 
-        const auto snapshot_ready = [&]() -> bool
-        {
-            const std::uint64_t request_id = state.scene_view_snapshot_request_id;
-            if (request_id == 0 || request_id == m_last_scene_view_snapshot_request_id)
-                return false;
-            if (!state.scene_view_snapshot_pose_name.empty()
-                && m_smplh_loaded_pose_name != state.scene_view_snapshot_pose_name)
-                return false;
-            return m_smplh_vertices.rows() > 0;
-        };
-
-        if (snapshot_ready())
-        {
-            const ViewportRect snapshot_view = sketch2rig_projection_rect(view);
-            if (snapshot_view.valid && snapshot_view.width > 0 && snapshot_view.height > 0)
-            {
-                const Eigen::Vector4f old_viewport = core.viewport;
-                core.viewport = Eigen::Vector4f(
-                    (float)snapshot_view.x,
-                    (float)snapshot_view.y,
-                    (float)snapshot_view.width,
-                    (float)snapshot_view.height);
-                update_core_matrices(core);
-
-                glEnable(GL_SCISSOR_TEST);
-                glScissor(snapshot_view.x, snapshot_view.y, snapshot_view.width, snapshot_view.height);
-                glViewport(snapshot_view.x, snapshot_view.y, snapshot_view.width, snapshot_view.height);
-                glClearColor(0.45f, 0.45f, 0.47f, 1.0f);
-                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-                draw_scene_contents();
-                capture_scene_view_snapshot_if_requested(state, snapshot_view);
-
-                core.viewport = old_viewport;
-                update_core_matrices(core);
-            }
-        }
+        capture_scene_view_snapshot_if_requested(state, sketch2rig_projection_rect(view));
 
         capture_generated_cloth_render_if_requested(state);
 
         glDisable(GL_SCISSOR_TEST);
     }
 
-    void Renderer::capture_scene_view_snapshot_if_requested(AppState& state, const ViewportRect& view)
+    void Renderer::capture_scene_view_snapshot_if_requested(AppState& state, const ViewportRect& /*view*/)
     {
         const std::uint64_t request_id = state.scene_view_snapshot_request_id;
         if (request_id == 0 || request_id == m_last_scene_view_snapshot_request_id)
@@ -922,37 +970,322 @@ namespace poseweaver
         if (!state.scene_view_snapshot_pose_name.empty()
             && m_smplh_loaded_pose_name != state.scene_view_snapshot_pose_name)
             return;
-        if (m_smplh_vertices.rows() <= 0 || view.width <= 0 || view.height <= 0)
+        if (m_smplh_vertices.rows() <= 0)
             return;
 
-        std::vector<unsigned char> pixels((size_t)view.width * (size_t)view.height * 4u, 0u);
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadBuffer(GL_BACK);
-        glReadPixels(view.x, view.y, view.width, view.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        auto& body = m_viewer.data(m_smplh_mesh_index);
+        if (body.V.rows() <= 0 || body.F.rows() <= 0)
+            return;
 
-        std::vector<unsigned char> out = resize_gl_rgba_to_top_left_512(pixels, view.width, view.height);
+        constexpr int kOut = 512;
+
+        GLint old_framebuffer = 0;
+        GLint old_viewport[4] = { 0, 0, 0, 0 };
+        GLint old_read_buffer = GL_BACK;
+        GLboolean old_scissor = glIsEnabled(GL_SCISSOR_TEST);
+        GLboolean old_blend = glIsEnabled(GL_BLEND);
+        GLboolean old_depth = glIsEnabled(GL_DEPTH_TEST);
+        GLboolean old_cull = glIsEnabled(GL_CULL_FACE);
+        GLint old_cull_face = GL_BACK;
+        GLboolean old_depth_mask = GL_TRUE;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
+        glGetIntegerv(GL_VIEWPORT, old_viewport);
+        glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
+        glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+
+        GLuint fbo = 0;
+        GLuint color = 0;
+        GLuint depth = 0;
+        glGenFramebuffers(1, &fbo);
+        glGenTextures(1, &color);
+        glGenRenderbuffers(1, &depth);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glBindTexture(GL_TEXTURE_2D, color);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kOut, kOut, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kOut, kOut);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        {
+            console_add_line(state, "SMPL layer render failed: framebuffer incomplete");
+            glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)old_framebuffer);
+            glReadBuffer((GLenum)old_read_buffer);
+            glDeleteRenderbuffers(1, &depth);
+            glDeleteTextures(1, &color);
+            glDeleteFramebuffers(1, &fbo);
+            m_last_scene_view_snapshot_request_id = request_id;
+            state.scene_view_snapshot_completed_id = request_id;
+            state.scene_view_snapshot_path.clear();
+            return;
+        }
+
+        auto& core = m_viewer.core();
+        const Eigen::Vector4f old_core_viewport = core.viewport;
+        const Eigen::Matrix4f old_view = core.view;
+        const Eigen::Matrix4f old_proj = core.proj;
+        const Eigen::Matrix4f old_norm = core.norm;
+        const Eigen::Vector4f old_background = core.background_color;
+        const Eigen::Vector3f old_camera_eye = core.camera_eye;
+        const Eigen::Vector3f old_camera_center = core.camera_center;
+        const Eigen::Vector3f old_camera_up = core.camera_up;
+        const float old_camera_zoom = core.camera_zoom;
+        const float old_camera_base_zoom = core.camera_base_zoom;
+        const Eigen::Vector3f old_camera_translation = core.camera_translation;
+        const Eigen::Vector3f old_camera_base_translation = core.camera_base_translation;
+        const Eigen::Quaternionf old_trackball_angle = core.trackball_angle;
+        const float old_camera_view_angle = core.camera_view_angle;
+
+        Eigen::MatrixXd snapshot_smpl_vertices = m_smplh_vertices;
+        bool restore_body_vertices_after_snapshot = false;
+        if (state.scene_view_snapshot_use_rigopt_camera)
+        {
+            MatrixX3dRM raw_vertices;
+            std::string eval_err;
+            if (smplh_evaluate_lbs(m_smplh_model, m_smplh_params, raw_vertices, &eval_err))
+            {
+                if (m_smplh_loaded_pose_mirror_x)
+                    raw_vertices.col(0) *= -1.0;
+                snapshot_smpl_vertices = raw_vertices;
+                restore_body_vertices_after_snapshot = true;
+            }
+            else
+            {
+                console_add_line(state, "SMPL layer render warning: rig optimizer raw SMPL eval failed: " + eval_err);
+            }
+        }
+
+        core.viewport = Eigen::Vector4f(0.0f, 0.0f, (float)kOut, (float)kOut);
+        if (state.scene_view_snapshot_use_rigopt_camera)
+        {
+            const float source_size = (float)std::max(1, state.scene_view_snapshot_rigopt_camera_source_size);
+            const float output_scale = (float)kOut / source_size;
+            const float s = state.scene_view_snapshot_rigopt_camera_scale * output_scale;
+            const float tx = state.scene_view_snapshot_rigopt_camera_translation[0] * output_scale;
+            const float ty = state.scene_view_snapshot_rigopt_camera_translation[1] * output_scale;
+
+            // Rig optimization renders with a fixed image-space orthographic camera:
+            // px = x * scale + tx, py = -y * scale + ty. Do not reuse the
+            // predicted scene camera here, or the debug silhouette and SMPL
+            // layer can look like opposite sides of the body.
+            core.view = Eigen::Matrix4f::Identity();
+
+            float z_min = std::numeric_limits<float>::infinity();
+            float z_max = -std::numeric_limits<float>::infinity();
+            for (int i = 0; i < snapshot_smpl_vertices.rows(); ++i)
+            {
+                const Eigen::Vector4f hp(
+                    (float)snapshot_smpl_vertices(i, 0),
+                    (float)snapshot_smpl_vertices(i, 1),
+                    (float)snapshot_smpl_vertices(i, 2),
+                    1.0f);
+                const float z = (core.view * hp).z();
+                if (std::isfinite(z))
+                {
+                    z_min = std::min(z_min, z);
+                    z_max = std::max(z_max, z);
+                }
+            }
+            if (!std::isfinite(z_min) || !std::isfinite(z_max) || std::abs(z_max - z_min) < 1e-6f)
+            {
+                z_min = -1.0f;
+                z_max = 1.0f;
+            }
+            const float z_scale = 1.6f / std::max(1e-6f, z_max - z_min);
+            const float z_bias = -0.8f - z_min * z_scale;
+
+            core.proj = Eigen::Matrix4f::Zero();
+            core.proj(0, 0) = 2.0f * s / (float)kOut;
+            core.proj(0, 3) = 2.0f * tx / (float)kOut - 1.0f;
+            core.proj(1, 1) = 2.0f * s / (float)kOut;
+            core.proj(1, 3) = 1.0f - 2.0f * ty / (float)kOut;
+            core.proj(2, 2) = z_scale;
+            core.proj(2, 3) = z_bias;
+            core.proj(3, 3) = 1.0f;
+            core.norm = core.view.inverse().transpose();
+        }
+        else if (state.scene_view_target_valid)
+        {
+            std::uint64_t force_camera = state.scene_view_snap_to_target_request_id - 1u;
+            apply_target_camera(core, state, force_camera);
+            update_core_matrices(core);
+        }
+        else
+        {
+            update_core_matrices(core);
+        }
+        core.background_color = Eigen::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
+
+        const Eigen::Vector3d scene_center = snapshot_smpl_vertices.colwise().mean().transpose();
+        const Eigen::RowVector3d mn = snapshot_smpl_vertices.colwise().minCoeff();
+        const Eigen::RowVector3d mx = snapshot_smpl_vertices.colwise().maxCoeff();
+        double scene_diag = (mx - mn).norm();
+        if (!(scene_diag > 1e-9) || !std::isfinite(scene_diag))
+            scene_diag = 1.0;
+
+        const Eigen::Vector3d light1_world_d(
+            (double)state.light_position[0],
+            (double)state.light_position[1],
+            (double)state.light_position[2]);
+        Eigen::Vector3d d = light1_world_d - scene_center;
+        if (!d.allFinite() || d.squaredNorm() < 1e-12)
+            d = Eigen::Vector3d(0.35 * scene_diag, 0.45 * scene_diag, 0.55 * scene_diag);
+        const Eigen::Vector3d light2_world_d = scene_center + Eigen::Vector3d(-d.x(), d.y(), -d.z());
+        const Eigen::Vector4f light1_world(
+            (float)light1_world_d.x(),
+            (float)light1_world_d.y(),
+            (float)light1_world_d.z(),
+            1.0f);
+        const Eigen::Vector4f light2_world(
+            (float)light2_world_d.x(),
+            (float)light2_world_d.y(),
+            (float)light2_world_d.z(),
+            1.0f);
+        const Eigen::Vector3f light1_eye = (core.view * light1_world).head<3>();
+        const Eigen::Vector3f light2_eye = (core.view * light2_world).head<3>();
+
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, kOut, kOut);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        if (restore_body_vertices_after_snapshot)
+        {
+            body.set_vertices(snapshot_smpl_vertices);
+            body.compute_normals();
+        }
+
+        if (body.dirty)
+        {
+            body.updateGL(body, body.invert_normals, body.meshgl);
+            body.dirty = igl::opengl::MeshGL::DIRTY_NONE;
+        }
+
+        const size_t shader_index = (size_t)m_smplh_mesh_index;
+        if (shader_index < m_mesh_shader_variant.size()
+            && m_mesh_shader_variant[shader_index] != MeshShaderVariant::TwoLight
+            && body.meshgl.is_initialized)
+        {
+            const GLuint prog = build_two_light_program();
+            if (prog != 0)
+            {
+                const GLuint old = body.meshgl.shader_mesh;
+                body.meshgl.shader_mesh = prog;
+                if (old != 0)
+                    glDeleteProgram(old);
+                m_mesh_shader_variant[shader_index] = MeshShaderVariant::TwoLight;
+            }
+        }
+
+        body.meshgl.bind_mesh();
+        const GLuint prog = body.meshgl.shader_mesh;
+        glUniformMatrix4fv(glGetUniformLocation(prog, "view"), 1, GL_FALSE, core.view.data());
+        glUniformMatrix4fv(glGetUniformLocation(prog, "proj"), 1, GL_FALSE, core.proj.data());
+        glUniformMatrix4fv(glGetUniformLocation(prog, "normal_matrix"), 1, GL_FALSE, core.norm.data());
+        glUniform1f(glGetUniformLocation(prog, "specular_exponent"), body.shininess);
+        glUniform3fv(glGetUniformLocation(prog, "light_position_eye"), 1, light1_eye.data());
+        glUniform3fv(glGetUniformLocation(prog, "light_position_eye2"), 1, light2_eye.data());
+        glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
+        glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
+        glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
+        glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
+        glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
+        glUniform1i(glGetUniformLocation(prog, "shadow_pass"), 0);
+        glUniform1f(glGetUniformLocation(prog, "texture_factor"), core.is_set(body.show_texture) ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "matcap_factor"), core.is_set(body.use_matcap) ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "double_sided"), body.double_sided ? 1.0f : 0.0f);
+        body.meshgl.draw_mesh(true);
+
+        std::vector<unsigned char> pixels((size_t)kOut * (size_t)kOut * 4u, 0u);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, kOut, kOut, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        std::vector<unsigned char> out = resize_gl_rgba_to_top_left(pixels, kOut, kOut, kOut);
+
+        if (restore_body_vertices_after_snapshot)
+        {
+            body.set_vertices(m_smplh_vertices);
+            body.compute_normals();
+        }
+
+        core.viewport = old_core_viewport;
+        core.view = old_view;
+        core.proj = old_proj;
+        core.norm = old_norm;
+        core.background_color = old_background;
+        core.camera_eye = old_camera_eye;
+        core.camera_center = old_camera_center;
+        core.camera_up = old_camera_up;
+        core.camera_zoom = old_camera_zoom;
+        core.camera_base_zoom = old_camera_base_zoom;
+        core.camera_translation = old_camera_translation;
+        core.camera_base_translation = old_camera_base_translation;
+        core.trackball_angle = old_trackball_angle;
+        core.camera_view_angle = old_camera_view_angle;
+
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)old_framebuffer);
+        glReadBuffer((GLenum)old_read_buffer);
+        glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3]);
+        if (old_scissor)
+            glEnable(GL_SCISSOR_TEST);
+        else
+            glDisable(GL_SCISSOR_TEST);
+        if (old_blend)
+            glEnable(GL_BLEND);
+        else
+            glDisable(GL_BLEND);
+        if (old_depth)
+            glEnable(GL_DEPTH_TEST);
+        else
+            glDisable(GL_DEPTH_TEST);
+        if (old_cull)
+            glEnable(GL_CULL_FACE);
+        else
+            glDisable(GL_CULL_FACE);
+        glCullFace((GLenum)old_cull_face);
+        glDepthMask(old_depth_mask);
+        glDeleteRenderbuffers(1, &depth);
+        glDeleteTextures(1, &color);
+        glDeleteFramebuffers(1, &fbo);
 
         std::error_code ec;
         const std::filesystem::path renders_dir = std::filesystem::path("renders");
         std::filesystem::create_directories(renders_dir, ec);
         if (ec)
         {
-            console_add_line(state, "Scene View snapshot failed: " + ec.message());
+            console_add_line(state, "SMPL layer render failed: " + ec.message());
+            m_last_scene_view_snapshot_request_id = request_id;
+            state.scene_view_snapshot_completed_id = request_id;
+            state.scene_view_snapshot_path.clear();
             return;
         }
 
-        const std::filesystem::path out_path = renders_dir / "canva_scene_pose_check.png";
-        const int ok = stbi_write_png(out_path.string().c_str(), 512, 512, 4, out.data(), 512 * 4);
+        const std::filesystem::path out_path = renders_dir / "canva_smpl_layer.png";
+        const int ok = stbi_write_png(out_path.string().c_str(), kOut, kOut, 4, out.data(), kOut * 4);
         if (ok == 0)
         {
-            console_add_line(state, "Scene View snapshot failed: could not write " + out_path.string());
+            console_add_line(state, "SMPL layer render failed: could not write " + out_path.string());
+            m_last_scene_view_snapshot_request_id = request_id;
+            state.scene_view_snapshot_completed_id = request_id;
+            state.scene_view_snapshot_path.clear();
             return;
         }
 
         state.scene_view_snapshot_path = out_path.string();
         state.scene_view_snapshot_completed_id = request_id;
         m_last_scene_view_snapshot_request_id = request_id;
-        console_add_line(state, "Scene View snapshot saved: " + out_path.string());
+        console_add_line(state, "SMPL layer render saved: " + out_path.string());
     }
 
     void Renderer::capture_generated_cloth_render_if_requested(AppState& state)
@@ -979,15 +1312,17 @@ namespace poseweaver
             return;
         }
 
-        constexpr int kOut = 512;
+        constexpr int kOut = 1024;
 
         GLint old_framebuffer = 0;
         GLint old_viewport[4] = { 0, 0, 0, 0 };
+        GLint old_read_buffer = GL_BACK;
         GLboolean old_scissor = glIsEnabled(GL_SCISSOR_TEST);
         GLboolean old_blend = glIsEnabled(GL_BLEND);
         GLboolean old_depth = glIsEnabled(GL_DEPTH_TEST);
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &old_framebuffer);
         glGetIntegerv(GL_VIEWPORT, old_viewport);
+        glGetIntegerv(GL_READ_BUFFER, &old_read_buffer);
 
         GLuint fbo = 0;
         GLuint color = 0;
@@ -1013,6 +1348,7 @@ namespace poseweaver
         {
             console_add_line(state, "Generated cloth render failed: framebuffer incomplete");
             glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)old_framebuffer);
+            glReadBuffer((GLenum)old_read_buffer);
             glDeleteRenderbuffers(1, &depth);
             glDeleteTextures(1, &color);
             glDeleteFramebuffers(1, &fbo);
@@ -1080,18 +1416,18 @@ namespace poseweaver
         }
 
         const size_t shader_index = (size_t)m_garment_mesh_index;
-        if (shader_index < m_two_light_shader_installed.size()
-            && !m_two_light_shader_installed[shader_index]
+        if (shader_index < m_mesh_shader_variant.size()
+            && m_mesh_shader_variant[shader_index] != MeshShaderVariant::ClothToon
             && garment.meshgl.is_initialized)
         {
-            const GLuint prog = build_two_light_program();
+            const GLuint prog = build_cloth_toon_program();
             if (prog != 0)
             {
                 const GLuint old = garment.meshgl.shader_mesh;
                 garment.meshgl.shader_mesh = prog;
                 if (old != 0)
                     glDeleteProgram(old);
-                m_two_light_shader_installed[shader_index] = true;
+                m_mesh_shader_variant[shader_index] = MeshShaderVariant::ClothToon;
             }
         }
 
@@ -1107,18 +1443,43 @@ namespace poseweaver
         glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
         glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
         glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
+        glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
+        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
         glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
         glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
         glUniform1i(glGetUniformLocation(prog, "shadow_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "texture_factor"), core.is_set(garment.show_texture) ? 1.0f : 0.0f);
         glUniform1f(glGetUniformLocation(prog, "matcap_factor"), core.is_set(garment.use_matcap) ? 1.0f : 0.0f);
         glUniform1f(glGetUniformLocation(prog, "double_sided"), garment.double_sided ? 1.0f : 0.0f);
+
+        const GLboolean old_cull_enabled = glIsEnabled(GL_CULL_FACE);
+        GLint old_cull_face = GL_BACK;
+        GLboolean old_depth_mask = GL_TRUE;
+        glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
+
+        const float outline_width = std::clamp((float)(0.006 * scene_diag), 0.0025f, 0.0200f);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+        glDepthMask(GL_FALSE);
+        glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
+        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), outline_width);
+        garment.meshgl.draw_mesh(true);
+
+        glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
+        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
+        glDepthMask(old_depth_mask);
+        glCullFace((GLenum)old_cull_face);
+        if (!old_cull_enabled)
+            glDisable(GL_CULL_FACE);
+
         garment.meshgl.draw_mesh(true);
 
         std::vector<unsigned char> pixels((size_t)kOut * (size_t)kOut * 4u, 0u);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
         glReadPixels(0, 0, kOut, kOut, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        std::vector<unsigned char> out = resize_gl_rgba_to_top_left_512(pixels, kOut, kOut);
+        std::vector<unsigned char> out = resize_gl_rgba_to_top_left(pixels, kOut, kOut, kOut);
 
         std::error_code ec;
         const std::filesystem::path renders_dir = std::filesystem::path("renders");
@@ -1133,6 +1494,7 @@ namespace poseweaver
         core.viewport = old_core_viewport;
         update_core_matrices(core);
         glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)old_framebuffer);
+        glReadBuffer((GLenum)old_read_buffer);
         glViewport(old_viewport[0], old_viewport[1], old_viewport[2], old_viewport[3]);
         if (old_scissor)
             glEnable(GL_SCISSOR_TEST);
@@ -1190,6 +1552,54 @@ namespace poseweaver
         return info;
     }
 
+    Renderer::UvDebugTextureInfo Renderer::sketch2uv_prediction_texture_info() const
+    {
+        UvDebugTextureInfo info;
+        info.texture_id = m_sketch2uv_prediction_texture_id;
+        info.width = m_sketch2uv_prediction_texture_w;
+        info.height = m_sketch2uv_prediction_texture_h;
+        info.valid = (m_sketch2uv_prediction_texture_id != 0
+            && m_sketch2uv_prediction_texture_w > 0
+            && m_sketch2uv_prediction_texture_h > 0);
+        return info;
+    }
+
+    bool Renderer::sketch2uv_prediction_uv_at(int x, int y, float& out_u, float& out_v) const
+    {
+        const int w = m_sketch2uv_prediction_texture_w;
+        const int h = m_sketch2uv_prediction_texture_h;
+        if (x < 0 || y < 0 || x >= w || y >= h || w <= 0 || h <= 0)
+            return false;
+
+        const size_t pix = (size_t)y * (size_t)w + (size_t)x;
+        const size_t count = (size_t)w * (size_t)h;
+        if (m_sketch2uv_prediction_uv.size() >= count * 2u
+            && m_sketch2uv_prediction_mask.size() >= count)
+        {
+            const float mask = m_sketch2uv_prediction_mask[pix];
+            const float u = m_sketch2uv_prediction_uv[pix];
+            const float v = m_sketch2uv_prediction_uv[count + pix];
+            if (mask > 0.5f && std::isfinite(u) && std::isfinite(v))
+            {
+                out_u = std::clamp(u, 0.0f, 1.0f);
+                out_v = std::clamp(v, 0.0f, 1.0f);
+                return true;
+            }
+            return false;
+        }
+
+        if (m_sketch2uv_prediction_pixels.size() < count * 4u)
+            return false;
+
+        const unsigned char* px = m_sketch2uv_prediction_pixels.data() + pix * 4u;
+        if (px[0] == 0u && px[1] == 0u && px[2] == 0u)
+            return false;
+
+        out_u = (float)px[0] / 255.0f;
+        out_v = (float)px[1] / 255.0f;
+        return true;
+    }
+
     const std::vector<Renderer::UvSegment>& Renderer::smpl_uv_wireframe_segments() const
     {
         return m_smpl_uv_segments;
@@ -1214,8 +1624,24 @@ namespace poseweaver
         m_uv_debug_texture_h = 0;
         m_smpl_uv_segments.clear();
 
+        if (m_sketch2uv_prediction_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_sketch2uv_prediction_texture_id);
+            m_sketch2uv_prediction_texture_id = 0;
+        }
+        m_sketch2uv_prediction_texture_w = 0;
+        m_sketch2uv_prediction_texture_h = 0;
+        m_sketch2uv_prediction_json_path.clear();
+        m_sketch2uv_prediction_request_id = 0;
+        m_sketch2uv_prediction_pixels.clear();
+        m_sketch2uv_prediction_uv.clear();
+        m_sketch2uv_prediction_mask.clear();
+
+        release_smpl_body_preview();
+
         for (auto& data : m_viewer.data_list)
             data.meshgl.free();
+        m_mesh_shader_variant.fill(MeshShaderVariant::Default);
         for (auto& core : m_viewer.core_list)
             core.shut();
         m_viewer.shutdown_plugins();

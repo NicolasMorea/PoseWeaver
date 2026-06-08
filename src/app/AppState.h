@@ -223,12 +223,27 @@ namespace poseweaver
         std::uint64_t scene_view_snapshot_completed_id = 0;
         std::string scene_view_snapshot_pose_name;
         std::string scene_view_snapshot_path;
+        bool scene_view_snapshot_use_rigopt_camera = false;
+        float scene_view_snapshot_rigopt_camera_scale = 1.0f;
+        std::array<float, 2> scene_view_snapshot_rigopt_camera_translation{ 0.0f, 0.0f };
+        int scene_view_snapshot_rigopt_camera_source_size = 512;
 
         std::uint64_t garment_pushout_request_id = 0;
         std::uint64_t garment_ease_request_id = 0;
         std::uint64_t garment_prefit_request_id = 0;
         std::uint64_t garment_relax_request_id = 0;
         std::uint64_t uv_image_request_id = 0;
+        std::uint64_t cloth_constraints_save_request_id = 0;
+        std::uint64_t cloth_constraints_clear_request_id = 0;
+        std::uint64_t cloth_constraint_click_request_id = 0;
+        int cloth_constraint_selection_x0 = 0;
+        int cloth_constraint_selection_y0 = 0;
+        int cloth_constraint_selection_x1 = 0;
+        int cloth_constraint_selection_y1 = 0;
+        int cloth_constraint_click_mods = 0;
+        bool cloth_constraint_drag_active = false;
+        std::array<float, 2> cloth_constraint_drag_start_screen{ 0.0f, 0.0f };
+        std::array<float, 2> cloth_constraint_drag_end_screen{ 0.0f, 0.0f };
 
         std::uint64_t cloth_simulate_request_id = 0;
         std::uint64_t cloth_clear_simulation_request_id = 0;
@@ -237,9 +252,20 @@ namespace poseweaver
         std::uint64_t cloth_render_completed_id = 0;
         std::string cloth_render_path;
 
+        std::uint64_t canva_displacement_request_id = 0;
+        std::uint64_t canva_displacement_completed_id = 0;
+        std::string canva_displacement_uv_json_path;
+        std::string canva_displacement_model_input_path;
+        std::string canva_displacement_path;
+
         float garment_min_cloth_skin_distance = 0.001f;
         float garment_ease_amount = 0.20f;
         int garment_prefit_steps = 10;
+        bool cloth_constraints_edit_enabled = false;
+        int cloth_constraint_edit_mode = 0; // 0 toggle, 1 add, 2 erase
+        float cloth_constraint_pick_radius = 18.0f;
+        int cloth_constraint_count = 0;
+        std::string cloth_constraint_status;
 
         bool garment_vertex_merge_enabled = true;
         float garment_vertex_merge_distance = 0.0025f;
@@ -262,6 +288,7 @@ namespace poseweaver
 
         Sketch2RigUiState sketch2rig;
         Sketch2RigUiState sketch2betas;
+        Sketch2RigUiState sketch2uv;
 
         SmplShapeState smpl_shape;
         UiLayoutState layout;
@@ -278,6 +305,7 @@ namespace poseweaver
         bool show_object_mesh = false;
         bool show_garment_mesh = true;
         bool garment_color_by_smpl_uv = false;
+        bool cloth_toon_shader = false;
         bool show_console = true;
     };
 

@@ -47,6 +47,14 @@ namespace poseweaver
             float v1 = 0.0f;
         };
 
+        struct SmplBodyPreviewInfo
+        {
+            unsigned int texture_id = 0;
+            int width = 0;
+            int height = 0;
+            bool valid = false;
+        };
+
         struct UvTriangle
         {
             float u0 = 0.0f;
@@ -63,9 +71,25 @@ namespace poseweaver
         SceneCameraInfo scene_camera_info() const;
 
         UvDebugTextureInfo uv_debug_texture_info() const;
+        UvDebugTextureInfo sketch2uv_prediction_texture_info() const;
+        bool sketch2uv_prediction_uv_at(int x, int y, float& out_u, float& out_v) const;
         const std::vector<UvSegment>& smpl_uv_wireframe_segments() const;
+        SmplBodyPreviewInfo render_smpl_body_preview(AppState& state, int width, int height);
+        bool smpl_body_point_for_uv(float u, float v, Eigen::Vector3f& out_point) const;
+        bool smpl_body_preview_project(const Eigen::Vector3f& point, float& out_x01, float& out_y01) const;
+        bool fit_cloth_render_to_smpl_visibility(
+            AppState& state,
+            const std::vector<unsigned char>& cloth_rgba,
+            int width,
+            int height,
+            const std::string& uv_json_path,
+            std::vector<unsigned char>& out_rgba,
+            int& out_tested_count,
+            int& out_removed_count,
+            std::string* out_error);
 
         bool garment_to_smpl_mapping_valid() const { return m_garment_to_smpl.valid(); }
+        int garment_constraint_count() const;
         const std::vector<UvSegment>& garment_uv_wireframe_segments() const { return m_garment_uv_segments; }
         const std::vector<UvTriangle>& garment_uv_triangles() const { return m_garment_uv_triangles; }
 
@@ -83,6 +107,13 @@ namespace poseweaver
         void on_char(unsigned int codepoint, int mods);
 
     private:
+        enum class MeshShaderVariant
+        {
+            Default = 0,
+            TwoLight = 1,
+            ClothToon = 2,
+        };
+
         void ensure_initialized();
 
         void ensure_grid_built();
@@ -102,7 +133,14 @@ namespace poseweaver
         void process_garment_ease(AppState& state);
         void process_garment_prefit(AppState& state);
         void process_garment_relax(AppState& state);
+        void process_cloth_constraints_save(AppState& state);
+        void process_cloth_constraints_clear(AppState& state);
+        void process_cloth_constraint_click(AppState& state);
+        void load_garment_constraints(AppState& state, int vertex_count);
+        void update_garment_constraint_visualization(AppState& state);
         void generate_uv_debug_image(AppState& state);
+        void ensure_sketch2uv_prediction_texture(AppState& state);
+        void release_smpl_body_preview();
 
         void process_cloth_simulate(AppState& state);
         void process_cloth_clear_simulation(AppState& state);
@@ -111,6 +149,7 @@ namespace poseweaver
         void apply_cloth_simulation_frame(AppState& state);
         void capture_scene_view_snapshot_if_requested(AppState& state, const ViewportRect& view);
         void capture_generated_cloth_render_if_requested(AppState& state);
+        void process_canva_displacement_map(AppState& state);
 
         void regenerate_uv_wireframe_segments();
         bool try_load_smpl_uv_layout_once();
@@ -128,7 +167,7 @@ namespace poseweaver
         int m_sketch2rig_rig_mesh_index = 5;
 
         // Indexed by mesh index in m_viewer.data_list.
-        std::array<bool, 8> m_two_light_shader_installed{};
+        std::array<MeshShaderVariant, 8> m_mesh_shader_variant{};
 
         std::string m_object_mesh_name;
         std::string m_garment_mesh_name;
@@ -170,11 +209,34 @@ namespace poseweaver
         std::uint64_t m_last_garment_prefit_request_id = 0;
 
         std::uint64_t m_last_garment_relax_request_id = 0;
+        std::uint64_t m_last_cloth_constraints_save_request_id = 0;
+        std::uint64_t m_last_cloth_constraints_clear_request_id = 0;
+        std::uint64_t m_last_cloth_constraint_click_request_id = 0;
+        std::vector<unsigned char> m_garment_constraints;
+        std::string m_garment_constraints_mesh_name;
 
         unsigned int m_uv_debug_texture_id = 0;
         int m_uv_debug_texture_w = 0;
         int m_uv_debug_texture_h = 0;
         std::uint64_t m_last_uv_image_request_id = 0;
+
+        unsigned int m_sketch2uv_prediction_texture_id = 0;
+        int m_sketch2uv_prediction_texture_w = 0;
+        int m_sketch2uv_prediction_texture_h = 0;
+        std::string m_sketch2uv_prediction_json_path;
+        std::uint64_t m_sketch2uv_prediction_request_id = 0;
+        std::vector<unsigned char> m_sketch2uv_prediction_pixels;
+        std::vector<float> m_sketch2uv_prediction_uv;
+        std::vector<float> m_sketch2uv_prediction_mask;
+
+        unsigned int m_smpl_body_preview_fbo = 0;
+        unsigned int m_smpl_body_preview_texture_id = 0;
+        unsigned int m_smpl_body_preview_depth = 0;
+        int m_smpl_body_preview_w = 0;
+        int m_smpl_body_preview_h = 0;
+        Eigen::Matrix4f m_smpl_body_preview_view = Eigen::Matrix4f::Identity();
+        Eigen::Matrix4f m_smpl_body_preview_proj = Eigen::Matrix4f::Identity();
+        bool m_smpl_body_preview_camera_valid = false;
 
         std::uint64_t m_last_cloth_simulate_request_id = 0;
         std::uint64_t m_last_cloth_clear_simulation_request_id = 0;
@@ -182,6 +244,7 @@ namespace poseweaver
         std::uint64_t m_last_scene_view_snap_to_target_request_id = 0;
         std::uint64_t m_last_scene_view_snapshot_request_id = 0;
         std::uint64_t m_last_cloth_render_request_id = 0;
+        std::uint64_t m_last_canva_displacement_request_id = 0;
 
         std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
         std::uint64_t m_cloth_sim_pose_version = 0;

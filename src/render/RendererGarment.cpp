@@ -45,6 +45,10 @@ namespace poseweaver
             m_garment_uv_vertex_colors.resize(0, 0);
             m_garment_uv_vertex_colors_valid = false;
             m_last_garment_color_by_smpl_uv = false;
+            m_garment_constraints.clear();
+            m_garment_constraints_mesh_name.clear();
+            state.cloth_constraint_count = 0;
+            state.cloth_constraint_status.clear();
             if (was_loaded)
             {
                 m_garment_version++;
@@ -131,6 +135,7 @@ namespace poseweaver
             m_garment_uv_vertex_colors.resize(0, 0);
             m_garment_uv_vertex_colors_valid = false;
             m_last_garment_color_by_smpl_uv = false;
+            load_garment_constraints(state, (int)V.rows());
         }
         else
         {
@@ -144,6 +149,7 @@ namespace poseweaver
 
         ensure_garment_to_smpl_mapping(state);
         ensure_garment_uv_projection();
+        update_garment_constraint_visualization(state);
 
         if (state.garment_color_by_smpl_uv)
         {

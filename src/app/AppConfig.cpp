@@ -45,6 +45,10 @@ namespace
             if (std::isfinite(v))
                 state->garment_vertex_merge_distance = std::clamp(v, 0.0f, 0.05f);
         }
+        if (std::sscanf(line, "ClothToonShader=%d", &iv) == 1)
+        {
+            state->cloth_toon_shader = (iv != 0);
+        }
 
         if (std::sscanf(line, "SimulationPreview=%d", &iv) == 1)
         {
@@ -360,6 +364,7 @@ namespace
         buf->appendf("GarmentMinClothSkinDistance=%.6f\n", state->garment_min_cloth_skin_distance);
         buf->appendf("GarmentVertexMergeEnabled=%d\n", state->garment_vertex_merge_enabled ? 1 : 0);
         buf->appendf("GarmentVertexMergeDistance=%.9f\n", state->garment_vertex_merge_distance);
+        buf->appendf("ClothToonShader=%d\n", state->cloth_toon_shader ? 1 : 0);
         buf->appendf("SimulationPreview=%d\n", state->controls.preview ? 1 : 0);
         buf->appendf("SmoothSequence=%d\n", state->controls.smooth_sequence ? 1 : 0);
         buf->appendf("SmoothSequenceLength=%.6f\n", state->controls.smooth_sequence_length);

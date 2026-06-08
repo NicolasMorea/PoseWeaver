@@ -42,25 +42,6 @@ namespace
         void init(GLFWwindow* w)
         {
             window = w;
-            cursors[ImGuiMouseCursor_Arrow] = glfwCreateStandardCursor(GLFW_ARROW_CURSOR);
-            cursors[ImGuiMouseCursor_TextInput] = glfwCreateStandardCursor(GLFW_IBEAM_CURSOR);
-            cursors[ImGuiMouseCursor_ResizeNS] = glfwCreateStandardCursor(GLFW_VRESIZE_CURSOR);
-            cursors[ImGuiMouseCursor_ResizeEW] = glfwCreateStandardCursor(GLFW_HRESIZE_CURSOR);
-            cursors[ImGuiMouseCursor_Hand] = glfwCreateStandardCursor(GLFW_HAND_CURSOR);
-
-#ifdef GLFW_RESIZE_ALL_CURSOR
-            cursors[ImGuiMouseCursor_ResizeAll] = glfwCreateStandardCursor(GLFW_RESIZE_ALL_CURSOR);
-#endif
-#ifdef GLFW_RESIZE_NESW_CURSOR
-            cursors[ImGuiMouseCursor_ResizeNESW] = glfwCreateStandardCursor(GLFW_RESIZE_NESW_CURSOR);
-#endif
-#ifdef GLFW_RESIZE_NWSE_CURSOR
-            cursors[ImGuiMouseCursor_ResizeNWSE] = glfwCreateStandardCursor(GLFW_RESIZE_NWSE_CURSOR);
-#endif
-#ifdef GLFW_NOT_ALLOWED_CURSOR
-            cursors[ImGuiMouseCursor_NotAllowed] = glfwCreateStandardCursor(GLFW_NOT_ALLOWED_CURSOR);
-#endif
-
             apply(ImGuiMouseCursor_Arrow);
         }
 
@@ -73,7 +54,10 @@ namespace
                 requested = ImGuiMouseCursor_Arrow;
 
             GLFWcursor* cursor = cursors[requested] ? cursors[requested] : cursors[ImGuiMouseCursor_Arrow];
-            glfwSetCursor(window, cursor);
+            if (cursor)
+                glfwSetCursor(window, cursor);
+            else
+                glfwSetCursor(window, nullptr);
             force_native_cursor_visible(window);
         }
 
@@ -139,7 +123,29 @@ namespace
         return (x_fb >= r.x && x_fb < (r.x + r.width) && y_fb >= r.y && y_fb < (r.y + r.height));
     }
 
+    static bool cursor_framebuffer_pos(GLFWwindow* window, double x, double y, int& out_x, int& out_y)
+    {
+        int win_w = 0, win_h = 0;
+        int fb_w = 0, fb_h = 0;
+        glfwGetWindowSize(window, &win_w, &win_h);
+        glfwGetFramebufferSize(window, &fb_w, &fb_h);
+
+        if (fb_w <= 0 || fb_h <= 0)
+            return false;
+
+        const double sx = (win_w > 0) ? (double)fb_w / (double)win_w : 1.0;
+        const double sy = (win_h > 0) ? (double)fb_h / (double)win_h : 1.0;
+
+        out_x = std::clamp((int)(x * sx), 0, std::max(0, fb_w - 1));
+        const int y_fb_top = (int)(y * sy);
+        out_y = std::clamp(fb_h - 1 - y_fb_top, 0, std::max(0, fb_h - 1));
+        return true;
+    }
+
     static bool g_forward_viewer_mouse = false;
+    static bool g_constraint_dragging = false;
+    static int g_constraint_drag_start_x = 0;
+    static int g_constraint_drag_start_y = 0;
 
     static void pw_glfw_window_focus_callback(GLFWwindow* window, int focused)
     {
@@ -170,6 +176,11 @@ namespace
         auto* app = app_from(window);
         if (!app || !app->renderer || !app->state)
             return;
+
+        if (g_constraint_dragging && app->state->cloth_constraints_edit_enabled)
+        {
+            app->state->cloth_constraint_drag_end_screen = { (float)x, (float)y };
+        }
 
         if (app->state->scene_view_gizmo_using)
             return;
@@ -205,7 +216,34 @@ namespace
             && (dist2_to(app->state->scene_view_wind_marker_screen) < pick_r2);
 
         const bool block_viewer = (app->state->scene_view_gizmo_over || app->state->scene_view_gizmo_using
-            || near_light || near_wind);
+            || near_light || near_wind || app->state->cloth_constraints_edit_enabled);
+
+        if (button == GLFW_MOUSE_BUTTON_LEFT && (in_view || g_constraint_dragging)
+            && app->state->cloth_constraints_edit_enabled
+            && !(app->state->scene_view_gizmo_over || app->state->scene_view_gizmo_using || near_light || near_wind))
+        {
+            int x_fb = 0;
+            int y_fb = 0;
+            if (action == GLFW_PRESS && cursor_framebuffer_pos(window, x, y, x_fb, y_fb))
+            {
+                g_constraint_dragging = true;
+                g_constraint_drag_start_x = x_fb;
+                g_constraint_drag_start_y = y_fb;
+                app->state->cloth_constraint_drag_active = true;
+                app->state->cloth_constraint_drag_start_screen = { (float)x, (float)y };
+                app->state->cloth_constraint_drag_end_screen = { (float)x, (float)y };
+                app->state->cloth_constraint_click_mods = mods;
+            }
+            else if (action == GLFW_RELEASE && g_constraint_dragging && cursor_framebuffer_pos(window, x, y, x_fb, y_fb))
+            {
+                app->state->cloth_constraint_selection_x0 = g_constraint_drag_start_x;
+                app->state->cloth_constraint_selection_y0 = g_constraint_drag_start_y;
+                app->state->cloth_constraint_selection_x1 = x_fb;
+                app->state->cloth_constraint_selection_y1 = y_fb;
+                app->state->cloth_constraint_click_mods = mods;
+                app->state->cloth_constraint_click_request_id++;
+            }
+        }
 
         if (action == GLFW_PRESS && in_view && !block_viewer)
             g_forward_viewer_mouse = true;
@@ -214,7 +252,14 @@ namespace
             app->renderer->on_mouse_button(button, action, mods);
 
         if (action == GLFW_RELEASE)
+        {
             g_forward_viewer_mouse = false;
+            if (button == GLFW_MOUSE_BUTTON_LEFT)
+            {
+                g_constraint_dragging = false;
+                app->state->cloth_constraint_drag_active = false;
+            }
+        }
     }
 
     static void pw_glfw_scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
@@ -414,10 +459,12 @@ int main(int, char**)
     poseweaver::Renderer renderer;
     poseweaver::Sketch2RigService sketch2rig("Sketch2Rig");
     poseweaver::Sketch2RigService sketch2betas("Sketch2Betas");
+    poseweaver::Sketch2RigService sketch2uv("Sketch2UV");
     NativeCursorGuard cursor_guard;
     cursor_guard.init(window);
     state.sketch2rig.service = &sketch2rig;
     state.sketch2betas.service = &sketch2betas;
+    state.sketch2uv.service = &sketch2uv;
 
     poseweaver::install_imgui_state_settings_handler(state);
 
@@ -451,6 +498,9 @@ int main(int, char**)
     sketch2betas.start(
         poseweaver::assets_dir() / "Sketch2Betas",
         std::filesystem::path(POSEWEAVER_SKETCH2BETAS_WORKER));
+    sketch2uv.start(
+        poseweaver::assets_dir() / "Sketch2Uv",
+        std::filesystem::path(POSEWEAVER_SKETCH2UV_WORKER));
 
     double last_time = glfwGetTime();
     double play_accum = 0.0;
@@ -488,6 +538,7 @@ int main(int, char**)
 
         sketch2rig.drain_events(state, state.sketch2rig);
         sketch2betas.drain_events(state, state.sketch2betas);
+        sketch2uv.drain_events(state, state.sketch2uv);
 
         if (state.asset_refresh_request_id != last_asset_refresh_request_id)
         {
@@ -537,6 +588,7 @@ int main(int, char**)
     cursor_guard.apply(ImGuiMouseCursor_Arrow);
     sketch2rig.stop();
     sketch2betas.stop();
+    sketch2uv.stop();
 
     poseweaver::save_imgui_settings_to_disk();
 

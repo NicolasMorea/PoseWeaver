@@ -3,8 +3,11 @@
 #include "core/Geometry.h"
 #include "simulation/ClothMeshProcessor.h"
 #include "simulation/SmplSimplifier.h"
+#include "simulation/collision/TriangleBvh.h"
 #include "simulation/pd/ClothProjectiveDynamics.h"
 #include "simulation/xpbd/ClothXpbd.h"
+
+#include <igl/signed_distance.h>
 
 #include <Eigen/Geometry>
 
@@ -13,9 +16,11 @@
 #include <cmath>
 #include <future>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace poseweaver
 {
@@ -32,6 +37,482 @@ namespace poseweaver
             if (count <= 0)
                 return 0;
             return std::clamp(i, 0, count - 1);
+        }
+
+        static Eigen::MatrixXd compute_cloth_smpl_targets(
+            const std::vector<int>& cloth_indices,
+            const Eigen::MatrixXd& fallback_cloth_V,
+            const ClothToSmplMapping& mapping,
+            const Eigen::MatrixXd& body_V,
+            const Eigen::MatrixXi& body_F,
+            const Eigen::MatrixXd& body_rest_V)
+        {
+            Eigen::MatrixXd targets((int)cloth_indices.size(), 3);
+            targets.setZero();
+
+            for (int ri = 0; ri < (int)cloth_indices.size(); ++ri)
+            {
+                const int vi = cloth_indices[(size_t)ri];
+                if (vi < 0 || vi >= fallback_cloth_V.rows())
+                    continue;
+
+                targets.row(ri) = fallback_cloth_V.row(vi);
+                if (!mapping.valid() || mapping.face_index.size() <= vi)
+                    continue;
+
+                const int fi = mapping.face_index[vi];
+                if (fi < 0 || fi >= body_F.rows())
+                    continue;
+
+                const int ia = body_F(fi, 0);
+                const int ib = body_F(fi, 1);
+                const int ic = body_F(fi, 2);
+                if (ia < 0 || ib < 0 || ic < 0 ||
+                    ia >= body_V.rows() || ib >= body_V.rows() || ic >= body_V.rows())
+                {
+                    continue;
+                }
+
+                const Eigen::RowVector3d bc = mapping.barycentric.row(vi);
+                const Eigen::RowVector3d p_def =
+                    bc[0] * body_V.row(ia) + bc[1] * body_V.row(ib) + bc[2] * body_V.row(ic);
+
+                Eigen::RowVector3d T_def, B_def, N_def;
+                if (!core::triangle_frame(body_V.row(ia), body_V.row(ib), body_V.row(ic), T_def, B_def, N_def))
+                {
+                    if (!core::triangle_frame(
+                            body_rest_V.row(ia),
+                            body_rest_V.row(ib),
+                            body_rest_V.row(ic),
+                            T_def,
+                            B_def,
+                            N_def))
+                    {
+                        continue;
+                    }
+                }
+
+                const Eigen::RowVector3d off_local = mapping.offset_local.row(vi);
+                targets.row(ri) = p_def + off_local[0] * T_def + off_local[1] * B_def + off_local[2] * N_def;
+            }
+
+            return targets;
+        }
+
+        struct ConstraintSkinProjectionResult
+        {
+            int corrected_vertices = 0;
+            int pushed_out_vertices = 0;
+            int pulled_in_vertices = 0;
+        };
+
+        static bool project_constraints_to_skin_margin(
+            Eigen::MatrixXd& cloth_V,
+            ClothToSmplMapping& mapping,
+            const std::vector<int>& cloth_indices,
+            const Eigen::MatrixXd& body_V,
+            const Eigen::MatrixXi& body_F,
+            double surface_offset,
+            ConstraintSkinProjectionResult* result,
+            std::string* error)
+        {
+            if (result)
+                *result = ConstraintSkinProjectionResult{};
+
+            if (cloth_indices.empty())
+                return true;
+            if (cloth_V.cols() != 3 || body_V.cols() != 3)
+            {
+                if (error)
+                    *error = "Expected 3D vertex positions (#V x 3).";
+                return false;
+            }
+            if (body_F.cols() != 3)
+            {
+                if (error)
+                    *error = "Expected body faces to be triangles (#F x 3).";
+                return false;
+            }
+            if (!mapping.valid() || mapping.face_index.size() != cloth_V.rows())
+            {
+                if (error)
+                    *error = "Cloth-to-SMPL mapping is not valid for constrained projection.";
+                return false;
+            }
+            if (body_V.rows() == 0 || body_F.rows() == 0)
+            {
+                if (error)
+                    *error = "Missing body mesh data.";
+                return false;
+            }
+            if (!(surface_offset >= 0.0) || !std::isfinite(surface_offset))
+            {
+                if (error)
+                    *error = "surface_offset must be a finite non-negative value.";
+                return false;
+            }
+
+            Eigen::MatrixXd P((int)cloth_indices.size(), 3);
+            std::vector<int> source_vertices;
+            source_vertices.reserve(cloth_indices.size());
+            for (int ri = 0; ri < (int)cloth_indices.size(); ++ri)
+            {
+                const int vi = cloth_indices[(size_t)ri];
+                if (vi < 0 || vi >= cloth_V.rows())
+                {
+                    if (error)
+                        *error = "Constrained cloth vertex index is out of range.";
+                    return false;
+                }
+                P.row(ri) = cloth_V.row(vi);
+                source_vertices.push_back(vi);
+            }
+
+            Eigen::VectorXd S;
+            Eigen::VectorXi I;
+            Eigen::MatrixXd C;
+            Eigen::MatrixXd N_unused;
+            igl::signed_distance(P, body_V, body_F, igl::SIGNED_DISTANCE_TYPE_FAST_WINDING_NUMBER, S, I, C, N_unused);
+
+            if (S.size() != P.rows() || I.size() != P.rows() || C.rows() != P.rows() || C.cols() != 3)
+            {
+                if (error)
+                    *error = "Signed-distance query returned unexpected sizes.";
+                return false;
+            }
+
+            const Eigen::RowVector3d body_centroid = body_V.colwise().mean();
+            constexpr double kEps = 1e-9;
+
+            int corrected = 0;
+            int pushed_out = 0;
+            int pulled_in = 0;
+
+            for (int ri = 0; ri < P.rows(); ++ri)
+            {
+                const int vi = source_vertices[(size_t)ri];
+                const int fi = I[ri];
+                if (fi < 0 || fi >= body_F.rows() || !std::isfinite(S[ri]))
+                    continue;
+
+                const int ia = body_F(fi, 0);
+                const int ib = body_F(fi, 1);
+                const int ic = body_F(fi, 2);
+                if (ia < 0 || ib < 0 || ic < 0 ||
+                    ia >= body_V.rows() || ib >= body_V.rows() || ic >= body_V.rows())
+                {
+                    continue;
+                }
+
+                Eigen::RowVector3d dir = (S[ri] >= 0.0) ? (P.row(ri) - C.row(ri)) : (C.row(ri) - P.row(ri));
+                double dir_norm = dir.norm();
+                if (!(dir_norm > 1e-12) || !std::isfinite(dir_norm))
+                {
+                    const Eigen::RowVector3d a = body_V.row(ia);
+                    const Eigen::RowVector3d b = body_V.row(ib);
+                    const Eigen::RowVector3d c = body_V.row(ic);
+                    dir = (b - a).cross(c - a);
+                    dir_norm = dir.norm();
+                    if (!(dir_norm > 1e-12) || !std::isfinite(dir_norm))
+                        dir = C.row(ri) - body_centroid;
+                    else if (dir.dot(((a + b + c) / 3.0) - body_centroid) < 0.0)
+                        dir = -dir;
+                    dir_norm = dir.norm();
+                }
+                if (!(dir_norm > 1e-12) || !std::isfinite(dir_norm))
+                    continue;
+                dir /= dir_norm;
+
+                const Eigen::RowVector3d corrected_p = C.row(ri) + surface_offset * dir;
+                if (!corrected_p.allFinite())
+                    continue;
+
+                if (S[ri] < surface_offset - kEps)
+                    pushed_out++;
+                else if (S[ri] > surface_offset + kEps)
+                    pulled_in++;
+
+                const Eigen::RowVector3d a = body_V.row(ia);
+                const Eigen::RowVector3d b = body_V.row(ib);
+                const Eigen::RowVector3d c = body_V.row(ic);
+                const Eigen::RowVector3d bc = core::barycentric_on_triangle(C.row(ri), a, b, c);
+                if (!bc.allFinite())
+                    continue;
+                const Eigen::RowVector3d off = corrected_p - C.row(ri);
+
+                Eigen::RowVector3d T, B, N;
+                if (!core::triangle_frame(a, b, c, T, B, N))
+                {
+                    mapping.offset_local.row(vi) = off;
+                }
+                else
+                {
+                    mapping.offset_local(vi, 0) = off.dot(T);
+                    mapping.offset_local(vi, 1) = off.dot(B);
+                    mapping.offset_local(vi, 2) = off.dot(N);
+                }
+
+                cloth_V.row(vi) = corrected_p;
+                mapping.face_index[vi] = fi;
+                mapping.barycentric.row(vi) = bc;
+                mapping.offset.row(vi) = off;
+                corrected++;
+            }
+
+            if (corrected != P.rows())
+            {
+                if (error)
+                {
+                    *error = "Could only project " + std::to_string(corrected)
+                        + " of " + std::to_string((int)P.rows())
+                        + " constrained vertices to the skin margin.";
+                }
+                return false;
+            }
+
+            if (result)
+            {
+                result->corrected_vertices = corrected;
+                result->pushed_out_vertices = pushed_out;
+                result->pulled_in_vertices = pulled_in;
+            }
+            return true;
+        }
+
+        struct BodyProxyPrepStats
+        {
+            int frames_processed = 0;
+            int self_collision_contacts = 0;
+            double inflation_margin = 0.0;
+            double self_clearance = 0.0;
+        };
+
+        static Eigen::MatrixXd body_proxy_vertex_normals(
+            const Eigen::MatrixXd& V,
+            const Eigen::MatrixXi& F)
+        {
+            Eigen::MatrixXd N = Eigen::MatrixXd::Zero(V.rows(), 3);
+            if (V.rows() == 0 || V.cols() != 3 || F.cols() != 3)
+                return N;
+
+            const Eigen::RowVector3d centroid = V.colwise().mean();
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int i0 = F(fi, 0);
+                const int i1 = F(fi, 1);
+                const int i2 = F(fi, 2);
+                if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= V.rows() || i1 >= V.rows() || i2 >= V.rows())
+                    continue;
+
+                const Eigen::RowVector3d a = V.row(i0);
+                const Eigen::RowVector3d b = V.row(i1);
+                const Eigen::RowVector3d c = V.row(i2);
+                Eigen::RowVector3d n = (b - a).cross(c - a);
+                const double nn = n.norm();
+                if (!(nn > 1e-20) || !std::isfinite(nn))
+                    continue;
+
+                const Eigen::RowVector3d fc = (a + b + c) / 3.0;
+                if (n.dot(fc - centroid) < 0.0)
+                    n = -n;
+
+                N.row(i0) += n;
+                N.row(i1) += n;
+                N.row(i2) += n;
+            }
+
+            for (int vi = 0; vi < N.rows(); ++vi)
+            {
+                Eigen::RowVector3d n = N.row(vi);
+                double nn = n.norm();
+                if (!(nn > 1e-20) || !std::isfinite(nn))
+                {
+                    n = V.row(vi) - centroid;
+                    nn = n.norm();
+                }
+                if (!(nn > 1e-20) || !std::isfinite(nn))
+                    n = Eigen::RowVector3d(0.0, 1.0, 0.0);
+                else
+                    n /= nn;
+                N.row(vi) = n;
+            }
+
+            return N;
+        }
+
+        static void inflate_body_proxy(
+            Eigen::MatrixXd& V,
+            const Eigen::MatrixXi& F,
+            double margin)
+        {
+            if (!(margin > 0.0) || V.rows() == 0 || V.cols() != 3)
+                return;
+
+            const Eigen::MatrixXd N = body_proxy_vertex_normals(V, F);
+            if (N.rows() != V.rows())
+                return;
+
+            V += margin * N;
+        }
+
+        static bool body_proxy_face_is_local_to_vertex(
+            int vi,
+            int face,
+            const Eigen::MatrixXi& F,
+            const std::vector<std::vector<int>>& one_ring)
+        {
+            if (vi < 0 || face < 0 || face >= F.rows())
+                return true;
+
+            for (int k = 0; k < 3; ++k)
+            {
+                const int fv = F(face, k);
+                if (fv == vi)
+                    return true;
+                if (vi >= 0 && vi < (int)one_ring.size())
+                {
+                    const auto& ring = one_ring[(size_t)vi];
+                    if (std::find(ring.begin(), ring.end(), fv) != ring.end())
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        static std::vector<std::vector<int>> build_body_proxy_one_ring(
+            int vertex_count,
+            const Eigen::MatrixXi& F)
+        {
+            std::vector<std::vector<int>> one_ring((size_t)std::max(0, vertex_count));
+            const auto add_edge = [&](int a, int b)
+            {
+                if (a < 0 || b < 0 || a >= vertex_count || b >= vertex_count || a == b)
+                    return;
+                auto& ring = one_ring[(size_t)a];
+                if (std::find(ring.begin(), ring.end(), b) == ring.end())
+                    ring.push_back(b);
+            };
+
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int i0 = F(fi, 0);
+                const int i1 = F(fi, 1);
+                const int i2 = F(fi, 2);
+                add_edge(i0, i1);
+                add_edge(i1, i0);
+                add_edge(i1, i2);
+                add_edge(i2, i1);
+                add_edge(i2, i0);
+                add_edge(i0, i2);
+            }
+
+            return one_ring;
+        }
+
+        static int relax_body_proxy_self_collisions(
+            Eigen::MatrixXd& V,
+            const Eigen::MatrixXi& F,
+            double clearance,
+            int passes)
+        {
+            if (!(clearance > 0.0) || passes <= 0 || V.rows() == 0 || F.rows() == 0 || V.cols() != 3 || F.cols() != 3)
+                return 0;
+
+            const std::vector<std::vector<int>> one_ring = build_body_proxy_one_ring((int)V.rows(), F);
+            const double search_radius = std::max(0.02, clearance * 5.0);
+            const double max_dist2 = search_radius * search_radius;
+
+            int contacts = 0;
+            for (int pass = 0; pass < passes; ++pass)
+            {
+                collision::TriangleBvh bvh;
+                bvh.build(V, F);
+                if (!bvh.bounds().valid())
+                    break;
+
+                const Eigen::RowVector3d centroid = V.colwise().mean();
+                int pass_contacts = 0;
+
+                for (int vi = 0; vi < V.rows(); ++vi)
+                {
+                    const Eigen::Vector3d p = V.row(vi);
+                    int face = -1;
+                    Eigen::Vector3d q;
+                    double dist2 = std::numeric_limits<double>::infinity();
+                    if (!bvh.closest_triangle(p, V, F, face, q, dist2, max_dist2, vi))
+                        continue;
+                    if (body_proxy_face_is_local_to_vertex(vi, face, F, one_ring))
+                        continue;
+
+                    const int i0 = F(face, 0);
+                    const int i1 = F(face, 1);
+                    const int i2 = F(face, 2);
+                    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= V.rows() || i1 >= V.rows() || i2 >= V.rows())
+                        continue;
+
+                    const Eigen::Vector3d a = V.row(i0);
+                    const Eigen::Vector3d b = V.row(i1);
+                    const Eigen::Vector3d c = V.row(i2);
+
+                    Eigen::Vector3d bary;
+                    q = core::closest_point_on_triangle(p, a, b, c, &bary);
+                    Eigen::Vector3d n = (b - a).cross(c - a);
+                    const double nn = n.norm();
+                    if (!(nn > 1e-20) || !std::isfinite(nn) || !bary.allFinite())
+                        continue;
+                    n /= nn;
+
+                    const Eigen::Vector3d face_centroid = (a + b + c) / 3.0;
+                    if (n.dot(face_centroid - centroid.transpose()) < 0.0)
+                        n = -n;
+
+                    const double signed_distance = n.dot(p - q);
+                    if (!(signed_distance < clearance) || !std::isfinite(signed_distance))
+                        continue;
+
+                    const double b0 = std::clamp(bary[0], 0.0, 1.0);
+                    const double b1 = std::clamp(bary[1], 0.0, 1.0);
+                    const double b2 = std::clamp(bary[2], 0.0, 1.0);
+                    const double denom = 1.0 + b0 * b0 + b1 * b1 + b2 * b2;
+                    if (!(denom > 1e-12))
+                        continue;
+
+                    const double depth = std::min(clearance - signed_distance, 0.5 * search_radius);
+                    const Eigen::Vector3d corr = (depth / denom) * n;
+                    if (!corr.allFinite())
+                        continue;
+
+                    V.row(vi) += corr.transpose();
+                    V.row(i0) -= (b0 * corr).transpose();
+                    V.row(i1) -= (b1 * corr).transpose();
+                    V.row(i2) -= (b2 * corr).transpose();
+
+                    pass_contacts++;
+                }
+
+                contacts += pass_contacts;
+                if (pass_contacts == 0)
+                    break;
+            }
+
+            return contacts;
+        }
+
+        static BodyProxyPrepStats prepare_xpbd_body_proxy_frame(
+            Eigen::MatrixXd& V,
+            const Eigen::MatrixXi& F,
+            double inflation_margin,
+            double self_clearance)
+        {
+            BodyProxyPrepStats stats;
+            stats.frames_processed = 1;
+            stats.inflation_margin = inflation_margin;
+            stats.self_clearance = self_clearance;
+
+            inflate_body_proxy(V, F, inflation_margin);
+            stats.self_collision_contacts = relax_body_proxy_self_collisions(V, F, self_clearance, 4);
+            return stats;
         }
     }
 
@@ -119,9 +600,40 @@ namespace poseweaver
         if (m_smplh_loaded_pose_mirror_x && body_F.cols() >= 3)
             body_F.col(1).swap(body_F.col(2));
 
+        const SimulationSolver solver = state.controls.solver;
+        const int max_frames_for_progress = std::max(1, state.controls.max_frames);
+        const double dt_for_steps =
+            (solver == SimulationSolver::ProjectiveDynamics)
+                ? (double)state.params.dt
+                : (double)state.xpbd_params.dt;
+        const double duration_for_steps =
+            (solver == SimulationSolver::ProjectiveDynamics)
+                ? (double)state.params.duration_seconds
+                : (double)state.xpbd_params.duration_seconds;
+        const int steps_target = (duration_for_steps <= 0.0) ? 0 : (int)std::ceil(duration_for_steps / dt_for_steps);
+        const int steps = std::min(steps_target, std::max(0, max_frames_for_progress - 1));
+
+        const int n_joints = m_smplh_model.joint_count();
+        const int dof = 3 * n_joints;
+        const bool smooth_sequence_pose_ready =
+            state.controls.smooth_sequence
+            && solver == SimulationSolver::Xpbd
+            && state.selection.pose_index >= 0
+            && m_smplh_loaded
+            && n_joints > 0
+            && (int)m_smplh_loaded_pose_axis_angle.size() == dof
+            && m_garment_rest_vertices.rows() > 0;
+        const float smooth_sequence_frac = std::clamp(state.controls.smooth_sequence_length, 0.0f, 1.0f);
+        const int smooth_sequence_steps = smooth_sequence_pose_ready
+            ? static_cast<int>(std::round(smooth_sequence_frac * static_cast<float>(steps)))
+            : 0;
+        const bool use_smooth_sequence_start_pose = smooth_sequence_steps > 0;
+
         SmplhParams tpose_params;
         tpose_params.betas = m_smplh_params.betas;
-        tpose_params.pose_axis_angle = Eigen::VectorXd::Zero(3 * m_smplh_model.joint_count());
+        tpose_params.pose_axis_angle = Eigen::VectorXd::Zero(dof);
+        if (use_smooth_sequence_start_pose)
+            tpose_params.pose_axis_angle.head<3>() = m_smplh_loaded_pose_axis_angle.head<3>();
 
         MatrixX3dRM body_tpose_rm;
         std::string tpose_err;
@@ -226,13 +738,52 @@ namespace poseweaver
                 return;
             }
             console_add_line(state,
-                std::string("Simulation starts from T-pose cloth with betas; push-out moved ")
+                std::string("Simulation starts from ")
+                    + (use_smooth_sequence_start_pose ? "root-aligned T-pose cloth" : "T-pose cloth")
+                    + " with betas; push-out moved "
                     + std::to_string(push_res.moved_vertices) + " vertices");
         }
 
-        Eigen::MatrixXd body_V = m_smplh_vertices;
+        std::vector<int> fixed_vertex_indices;
+        if ((int)m_garment_constraints.size() == cloth_V0.rows())
+        {
+            fixed_vertex_indices.reserve(m_garment_constraints.size());
+            for (int vi = 0; vi < (int)m_garment_constraints.size(); ++vi)
+                if (m_garment_constraints[(size_t)vi])
+                    fixed_vertex_indices.push_back(vi);
+        }
 
-        const SimulationSolver solver = state.controls.solver;
+        ClothToSmplMapping constraint_attachment_mapping = m_garment_to_smpl;
+        if (!fixed_vertex_indices.empty())
+        {
+            ConstraintSkinProjectionResult constraint_res;
+            std::string constraint_err;
+            const double offset = std::max(0.0, (double)state.garment_min_cloth_skin_distance);
+            const bool constraint_ok = project_constraints_to_skin_margin(
+                cloth_V0,
+                constraint_attachment_mapping,
+                fixed_vertex_indices,
+                body_tpose,
+                body_F,
+                offset,
+                &constraint_res,
+                &constraint_err);
+            if (!constraint_ok)
+            {
+                state.controls.simulating = false;
+                state.controls.sim_stage.clear();
+                console_add_line(state, "ERROR: Simulation constrained cloth projection failed: "
+                    + (constraint_err.empty() ? std::string("(unknown error)") : constraint_err));
+                return;
+            }
+            console_add_line(state,
+                "Constrained T-pose vertices corrected to skin margin: "
+                + std::to_string(constraint_res.corrected_vertices)
+                + " updated, pushed_out=" + std::to_string(constraint_res.pushed_out_vertices)
+                + ", pushed_in=" + std::to_string(constraint_res.pulled_in_vertices));
+        }
+
+        Eigen::MatrixXd body_V = m_smplh_vertices;
 
         const auto wind_dir_from_angles = [](double yaw_deg, double pitch_deg)
         {
@@ -249,10 +800,6 @@ namespace poseweaver
 
         std::optional<ClothPdParams> pd_params;
         std::optional<ClothXpbdParams> xpbd_params;
-
-        double dt_for_progress = 1.0 / 60.0;
-        double duration_for_progress = 0.0;
-        int max_frames_for_progress = std::max(1, state.controls.max_frames);
 
         if (solver == SimulationSolver::ProjectiveDynamics)
         {
@@ -277,8 +824,6 @@ namespace poseweaver
             p.wind_random_space = std::max(0.0, (double)state.params.wind_random_space);
             p.wind_random_time = std::max(0.0, (double)state.params.wind_random_time);
 
-            dt_for_progress = p.dt;
-            duration_for_progress = p.duration_seconds;
             pd_params = p;
         }
         else
@@ -312,16 +857,8 @@ namespace poseweaver
             p.wind_random_time = std::max(0.0, (double)state.xpbd_params.wind_random_time);
 
             p.max_frames = max_frames_for_progress;
-
-            dt_for_progress = p.dt;
-            duration_for_progress = p.duration_seconds;
             xpbd_params = p;
         }
-
-        const double dt = dt_for_progress;
-        const int max_frames = std::max(1, max_frames_for_progress);
-        const int steps_target = (duration_for_progress <= 0.0) ? 0 : (int)std::ceil(duration_for_progress / dt);
-        const int steps = std::min(steps_target, std::max(0, max_frames - 1));
 
         if (state.controls.smooth_sequence
             && xpbd_params.has_value()
@@ -332,8 +869,6 @@ namespace poseweaver
             && m_garment_rest_vertices.rows() > 0
             && m_garment_rest_vertices.rows() == cloth_V0.rows())
         {
-            const int n_joints = m_smplh_model.joint_count();
-            const int dof = 3 * n_joints;
             const Eigen::VectorXd& target_aa = m_smplh_loaded_pose_axis_angle;
 
             const auto aa_to_quat = [](const Eigen::Vector3d& aa_vec)
@@ -372,8 +907,7 @@ namespace poseweaver
                 }
             };
 
-            const float seq_frac = std::clamp(state.controls.smooth_sequence_length, 0.0f, 1.0f);
-            const int seq_steps = static_cast<int>(std::round(seq_frac * static_cast<float>(steps)));
+            const int seq_steps = smooth_sequence_steps;
 
             if (seq_steps > 0)
             {
@@ -420,7 +954,7 @@ namespace poseweaver
 
                 if (seq_ok)
                 {
-                    console_add_line(state, "Smooth sequence ready; cloth starts from pushed-out betas T-pose.");
+                    console_add_line(state, "Smooth sequence ready; cloth starts from the same root-aligned T-pose as SMPL.");
                 }
                 else
                 {
@@ -432,6 +966,62 @@ namespace poseweaver
                 // seq_steps == 0: toggle is on but length is 0% — start cloth from T-pose with static target body.
             }
         }
+
+        if (!fixed_vertex_indices.empty())
+        {
+            Eigen::MatrixXd body_rest_for_targets = m_smplh_model.v_template;
+            if (m_smplh_loaded_pose_mirror_x && body_rest_for_targets.cols() >= 1)
+                body_rest_for_targets.col(0) *= -1.0;
+
+            if (pd_params.has_value())
+            {
+                pd_params->fixed_vertex_indices = fixed_vertex_indices;
+                pd_params->fixed_vertex_targets = compute_cloth_smpl_targets(
+                    fixed_vertex_indices,
+                    cloth_V0,
+                    constraint_attachment_mapping,
+                    body_V,
+                    body_F,
+                    body_rest_for_targets);
+            }
+
+            if (xpbd_params.has_value())
+            {
+                xpbd_params->fixed_vertex_indices = fixed_vertex_indices;
+                auto& target_seq = xpbd_params->fixed_vertex_target_sequence;
+                target_seq.clear();
+
+                if (!xpbd_params->body_sequence.empty())
+                {
+                    target_seq.reserve(xpbd_params->body_sequence.size());
+                    for (const Eigen::MatrixXd& body_frame : xpbd_params->body_sequence)
+                    {
+                        target_seq.push_back(compute_cloth_smpl_targets(
+                            fixed_vertex_indices,
+                            cloth_V0,
+                            constraint_attachment_mapping,
+                            body_frame,
+                            body_F,
+                            body_rest_for_targets));
+                    }
+                }
+                else
+                {
+                    target_seq.push_back(compute_cloth_smpl_targets(
+                        fixed_vertex_indices,
+                        cloth_V0,
+                        constraint_attachment_mapping,
+                        body_V,
+                        body_F,
+                        body_rest_for_targets));
+                }
+            }
+
+            console_add_line(state,
+                "Position constraints active: " + std::to_string((int)fixed_vertex_indices.size()) +
+                " vertices pinned to SMPL-relative targets");
+        }
+
         if (xpbd_params.has_value())
         {
             const double keep_percent = std::clamp((double)state.xpbd_params.smpl_geometry_percent, 1.0, 100.0);
@@ -493,6 +1083,59 @@ namespace poseweaver
                         std::string("WARNING: XPBD SMPL simplification skipped: ")
                             + (simpl_err.empty() ? std::string("(unknown error)") : simpl_err));
                 }
+            }
+
+            if (xpbd_params->collision_enabled && body_V.rows() > 0 && body_F.rows() > 0)
+            {
+                state.controls.sim_stage = "Preparing SMPL proxy";
+                const auto t0 = std::chrono::steady_clock::now();
+
+                const double collision_thickness = std::max(0.0, xpbd_params->collision_thickness);
+                const double inflation_margin = std::clamp(
+                    std::max(0.0015, 0.5 * collision_thickness),
+                    0.0015,
+                    0.008);
+                const double self_clearance = std::clamp(
+                    std::max(0.0020, 1.25 * inflation_margin),
+                    0.0020,
+                    0.012);
+
+                BodyProxyPrepStats proxy_stats;
+                proxy_stats.inflation_margin = inflation_margin;
+                proxy_stats.self_clearance = self_clearance;
+
+                {
+                    const BodyProxyPrepStats frame_stats = prepare_xpbd_body_proxy_frame(
+                        body_V,
+                        body_F,
+                        inflation_margin,
+                        self_clearance);
+                    proxy_stats.frames_processed += frame_stats.frames_processed;
+                    proxy_stats.self_collision_contacts += frame_stats.self_collision_contacts;
+                }
+
+                for (Eigen::MatrixXd& frame : xpbd_params->body_sequence)
+                {
+                    const BodyProxyPrepStats frame_stats = prepare_xpbd_body_proxy_frame(
+                        frame,
+                        body_F,
+                        inflation_margin,
+                        self_clearance);
+                    proxy_stats.frames_processed += frame_stats.frames_processed;
+                    proxy_stats.self_collision_contacts += frame_stats.self_collision_contacts;
+                }
+
+                const auto elapsed = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(3)
+                    << "XPBD SMPL proxy: inflated by " << (1000.0 * inflation_margin)
+                    << " mm, self-cleaned " << proxy_stats.frames_processed
+                    << " frame" << (proxy_stats.frames_processed == 1 ? "" : "s")
+                    << " (" << proxy_stats.self_collision_contacts
+                    << " vertex-triangle corrections, " << std::setprecision(2)
+                    << elapsed << " ms)";
+                console_add_line(state, oss.str());
             }
         }
 

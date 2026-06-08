@@ -291,6 +291,33 @@ namespace poseweaver
                         state.garment_relax_request_id++;
                         log_line(state, "[Garment] Mild relax requested");
                     }
+
+                    ImGui::Separator();
+
+                    if (ImGui::TreeNodeEx("Position constraints", ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        const char* edit_label = state.cloth_constraints_edit_enabled ? "Stop editing" : "Edit constraints";
+                        if (ImGui::Button(edit_label))
+                            state.cloth_constraints_edit_enabled = !state.cloth_constraints_edit_enabled;
+                        ImGui::SameLine();
+                        if (ImGui::Button("Save"))
+                            state.cloth_constraints_save_request_id++;
+                        ImGui::SameLine();
+                        if (ImGui::Button("Clear"))
+                            state.cloth_constraints_clear_request_id++;
+
+                        const char* modes[] = { "Toggle", "Add", "Erase" };
+                        state.cloth_constraint_edit_mode = std::clamp(state.cloth_constraint_edit_mode, 0, 2);
+                        ImGui::Combo("Mode", &state.cloth_constraint_edit_mode, modes, IM_ARRAYSIZE(modes));
+                        ImGui::SliderFloat("Pick radius", &state.cloth_constraint_pick_radius, 4.0f, 60.0f, "%.0f px");
+                        state.cloth_constraint_pick_radius = std::clamp(state.cloth_constraint_pick_radius, 2.0f, 120.0f);
+
+                        ImGui::Text("Constrained vertices: %d", renderer.garment_constraint_count());
+                        if (!state.cloth_constraint_status.empty())
+                            ImGui::TextUnformatted(state.cloth_constraint_status.c_str());
+
+                        ImGui::TreePop();
+                    }
                 }
 
                 ImGui::EndTabItem();

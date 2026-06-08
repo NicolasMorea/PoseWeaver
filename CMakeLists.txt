@@ -127,6 +127,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/core/Paths.h
 		src/simulation/ClothMeshProcessor.cpp
 		src/simulation/ClothMeshProcessor.h
+		src/simulation/SmplSimplifier.cpp
+		src/simulation/SmplSimplifier.h
 		src/simulation/collision/TriangleBvh.cpp
 		src/simulation/collision/TriangleBvh.h
 		src/simulation/collision/ClothContacts.h
@@ -143,10 +145,14 @@ if(POSEWEAVER_BUILD_APP)
 		src/render/Renderer.cpp
 		src/render/RendererCommands.cpp
 		src/render/RendererClothSimulationCommands.cpp
+		src/render/RendererClothConstraints.cpp
+		src/render/RendererDisplacement.cpp
 		src/render/RendererGarmentCommands.cpp
 		src/render/Renderer.h
 		src/render/RendererGarment.cpp
+		src/render/RendererRig.cpp
 		src/render/RendererSmpl.cpp
+		src/render/RendererSmplPreview.cpp
 		src/render/RendererUv.cpp
 		src/render/RendererUvCommands.cpp
 		src/render/RendererInternal.h
@@ -173,6 +179,8 @@ if(POSEWEAVER_BUILD_APP)
 		POSEWEAVER_ASSETS_DIR="${CMAKE_SOURCE_DIR}/assets"
 		POSEWEAVER_SKETCH2RIG_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2rig/inference_worker.py"
 		POSEWEAVER_SKETCH2BETAS_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2betas/inference_worker.py"
+		POSEWEAVER_SKETCH2UV_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2uv/inference_worker.py"
+		POSEWEAVER_RIG_OPTIMIZER_WORKER="${CMAKE_SOURCE_DIR}/src/rigopt/optimize_rig.py"
 	)
 
 	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs Threads::Threads)

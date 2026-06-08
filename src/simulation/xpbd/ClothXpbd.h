@@ -43,6 +43,8 @@ namespace poseweaver
         int max_frames = 300;
 
         std::vector<Eigen::MatrixXd> body_sequence;
+        std::vector<int> fixed_vertex_indices;
+        std::vector<Eigen::MatrixXd> fixed_vertex_target_sequence; // each (#fixed x 3)
     };
 
     struct ClothXpbdStats
