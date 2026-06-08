@@ -40,8 +40,16 @@
 # debug information files
 *.dwo
 
-# ignore build
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# ignore build & renders
 build
+renders
+
+# ignore docs for now (will add at the end when the project is done)
+doc
 
 #ignore assets and scripts files
 assets
