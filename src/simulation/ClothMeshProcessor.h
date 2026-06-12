@@ -49,6 +49,15 @@ namespace poseweaver
         double max_vertex_displacement = 0.0;
     };
 
+    struct ClothRenderRefineResult
+    {
+        int passes = 0;
+        int added_vertices = 0;
+        int output_faces = 0;
+        double max_edge_before = 0.0;
+        double max_edge_after = 0.0;
+    };
+
     // Pushes penetrating cloth vertices outside the body surface by projecting them to the closest point on the body mesh and adding a small outward offset
     bool push_cloth_vertices_outside_body(
         Eigen::MatrixXd& cloth_V,
@@ -88,5 +97,14 @@ namespace poseweaver
         const Eigen::MatrixXi& body_F,
         const ClothPrefitRelaxParams& params,
         ClothPrefitRelaxResult* result,
+        std::string* error);
+
+    bool refine_cloth_mesh_for_render(
+        const Eigen::MatrixXd& cloth_V,
+        const Eigen::MatrixXi& cloth_F,
+        double target_edge_length,
+        Eigen::MatrixXd& out_V,
+        Eigen::MatrixXi& out_F,
+        ClothRenderRefineResult* result,
         std::string* error);
 }

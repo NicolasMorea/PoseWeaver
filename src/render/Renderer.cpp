@@ -1,5 +1,6 @@
 #include "render/Renderer.h"
 #include "core/Paths.h"
+#include "simulation/ClothMeshProcessor.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -17,6 +18,7 @@
 #include <limits>
 #include <vector>
 
+#include <stb_image.h>
 #include <stb_image_write.h>
 
 namespace poseweaver
@@ -390,6 +392,138 @@ namespace poseweaver
 
             return dst;
         }
+
+        static float luminance(unsigned char r, unsigned char g, unsigned char b)
+        {
+            return (
+                0.2126f * (float)r
+                + 0.7152f * (float)g
+                + 0.0722f * (float)b) / 255.0f;
+        }
+
+        static bool load_stroke_luminance_mean(
+            const std::filesystem::path& path,
+            float& out_mean)
+        {
+            out_mean = 0.0f;
+            if (path.empty())
+                return false;
+
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+            stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 4);
+            if (!pixels || width <= 0 || height <= 0)
+            {
+                if (pixels)
+                    stbi_image_free(pixels);
+                return false;
+            }
+
+            const size_t count = (size_t)width * (size_t)height;
+            float max_darkness = 0.0f;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const unsigned char* px = pixels + i * 4u;
+                const float alpha = (float)px[3] / 255.0f;
+                const float lum = luminance(px[0], px[1], px[2]) * alpha + (1.0f - alpha);
+                max_darkness = std::max(max_darkness, 1.0f - lum);
+            }
+
+            const float threshold = max_darkness / 3.0f;
+            double sum = 0.0;
+            size_t stroke_count = 0;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const unsigned char* px = pixels + i * 4u;
+                const float alpha = (float)px[3] / 255.0f;
+                const float lum = luminance(px[0], px[1], px[2]) * alpha + (1.0f - alpha);
+                if (1.0f - lum <= threshold)
+                    continue;
+                sum += (double)lum;
+                stroke_count++;
+            }
+            stbi_image_free(pixels);
+
+            if (stroke_count == 0)
+                return false;
+            out_mean = std::clamp((float)(sum / (double)stroke_count), 0.0f, 1.0f);
+            return true;
+        }
+
+        static bool match_render_stroke_luminance(
+            std::vector<unsigned char>& rgba,
+            float target_mean)
+        {
+            if (rgba.size() < 4u)
+                return false;
+
+            float max_darkness = 0.0f;
+            for (size_t i = 0; i + 3u < rgba.size(); i += 4u)
+            {
+                if (rgba[i + 3u] < 128u)
+                    continue;
+                max_darkness = std::max(
+                    max_darkness,
+                    1.0f - luminance(rgba[i], rgba[i + 1u], rgba[i + 2u]));
+            }
+            if (max_darkness <= 1e-6f)
+                return false;
+
+            const float threshold = max_darkness / 3.0f;
+            std::vector<float> stroke_darkness;
+            stroke_darkness.reserve(rgba.size() / 16u);
+            for (size_t i = 0; i + 3u < rgba.size(); i += 4u)
+            {
+                if (rgba[i + 3u] < 128u)
+                    continue;
+                const float darkness =
+                    1.0f - luminance(rgba[i], rgba[i + 1u], rgba[i + 2u]);
+                if (darkness > threshold)
+                    stroke_darkness.push_back(darkness);
+            }
+            if (stroke_darkness.empty())
+                return false;
+
+            const float target_darkness = 1.0f - std::clamp(target_mean, 0.02f, 0.98f);
+            const auto scaled_mean = [&](float scale)
+            {
+                double sum = 0.0;
+                for (float darkness : stroke_darkness)
+                    sum += (double)std::clamp(darkness * scale, 0.0f, 1.0f);
+                return (float)(sum / (double)stroke_darkness.size());
+            };
+
+            float lo = 0.0f;
+            float hi = 1.0f;
+            while (scaled_mean(hi) < target_darkness && hi < 1024.0f)
+                hi *= 2.0f;
+            for (int iter = 0; iter < 32; ++iter)
+            {
+                const float mid = 0.5f * (lo + hi);
+                if (scaled_mean(mid) < target_darkness)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+
+            const float scale = hi;
+            for (size_t i = 0; i + 3u < rgba.size(); i += 4u)
+            {
+                if (rgba[i + 3u] == 0u)
+                    continue;
+                for (size_t channel = 0; channel < 3u; ++channel)
+                {
+                    const float value = (float)rgba[i + channel] / 255.0f;
+                    const float adjusted = 1.0f - std::clamp((1.0f - value) * scale, 0.0f, 1.0f);
+                    rgba[i + channel] = (unsigned char)std::clamp<int>(
+                        (int)std::lround(adjusted * 255.0f),
+                        0,
+                        255);
+                }
+            }
+            return true;
+        }
     }
 
     void Renderer::init(GLFWwindow* window)
@@ -414,11 +548,13 @@ namespace poseweaver
         m_smplh_mesh_index = m_viewer.append_mesh(true);
         m_wind_arrow_mesh_index = m_viewer.append_mesh(true);
         m_sketch2rig_rig_mesh_index = m_viewer.append_mesh(true);
+        m_cloth_render_mesh_index = m_viewer.append_mesh(false);
 
         m_viewer.data(m_object_mesh_index).set_visible(false);
         m_viewer.data(m_garment_mesh_index).set_visible(false);
         m_viewer.data(m_smplh_mesh_index).set_visible(false);
         m_viewer.data(m_sketch2rig_rig_mesh_index).set_visible(false);
+        m_viewer.data(m_cloth_render_mesh_index).set_visible(false);
 
         {
             auto& w = m_viewer.data(m_wind_arrow_mesh_index);
@@ -549,6 +685,74 @@ namespace poseweaver
         m_viewer.key_pressed(codepoint, mods);
     }
 
+    void Renderer::reset_computed_state(AppState& state)
+    {
+        if (m_cloth_sim_job_running && m_cloth_sim_cancel_flag)
+            m_cloth_sim_cancel_flag->store(true);
+        m_cloth_sim_restart_pending = false;
+        ++m_pose_version;
+        process_cloth_clear_simulation(state);
+        state.controls.simulating = false;
+
+        m_last_scene_view_snapshot_request_id = state.scene_view_snapshot_request_id;
+        m_last_cloth_render_request_id = state.cloth_render_request_id;
+        m_last_canva_displacement_request_id = state.canva_displacement_request_id;
+        m_last_uv_image_request_id = state.uv_image_request_id;
+
+        m_sketch2rig_rig_source_path.clear();
+        m_sketch2rig_rig_last_error.clear();
+        m_sketch2rig_rig_source_joints.resize(0, 0);
+        m_sketch2rig_rig_scene_joints.resize(0, 0);
+        m_sketch2rig_rig_parents.clear();
+        m_sketch2rig_rig_source_valid = false;
+        if (m_initialized)
+        {
+            auto& rig = m_viewer.data(m_sketch2rig_rig_mesh_index);
+            rig.clear();
+            rig.set_visible(false);
+
+            auto& cloth_render = m_viewer.data(m_cloth_render_mesh_index);
+            cloth_render.clear();
+            cloth_render.set_visible(false);
+        }
+
+        if (m_sketch2uv_prediction_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_sketch2uv_prediction_texture_id);
+            m_sketch2uv_prediction_texture_id = 0;
+        }
+        m_sketch2uv_prediction_texture_w = 0;
+        m_sketch2uv_prediction_texture_h = 0;
+        m_sketch2uv_prediction_json_path.clear();
+        m_sketch2uv_prediction_request_id = 0;
+        m_sketch2uv_prediction_pixels.clear();
+        m_sketch2uv_prediction_uv.clear();
+        m_sketch2uv_prediction_mask.clear();
+
+        if (m_uv_debug_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_uv_debug_texture_id);
+            m_uv_debug_texture_id = 0;
+        }
+        m_uv_debug_texture_w = 0;
+        m_uv_debug_texture_h = 0;
+        m_smpl_uv_segments.clear();
+        m_garment_uv_segments.clear();
+        m_garment_uv_triangles.clear();
+        m_garment_uv_overlay_valid = false;
+        m_smpl_uv_vertex_colors.resize(0, 0);
+        m_smpl_uv_per_vertex.resize(0, 0);
+        m_smpl_uv_vertex_colors_valid = false;
+        m_garment_uv_vertex_colors.resize(0, 0);
+        m_garment_uv_vertex_colors_valid = false;
+
+        release_smpl_body_preview();
+        m_smplh_loaded_pose_name.clear();
+        m_smplh_loaded_pose_axis_angle.resize(0);
+        m_smplh_sim_preview_mesh_active = false;
+        m_smplh_deform_dirty = true;
+    }
+
     void Renderer::render(AppState& state, int fb_width, int fb_height)
     {
         ensure_initialized();
@@ -669,15 +873,9 @@ namespace poseweaver
                 diag = 1.0;
             const double len = std::clamp(0.25 * diag, 0.05, 1.0);
 
-            const float wind_yaw_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                ? state.params.wind_yaw_deg
-                : state.xpbd_params.wind_yaw_deg;
-            const float wind_pitch_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                ? state.params.wind_pitch_deg
-                : state.xpbd_params.wind_pitch_deg;
-            const float wind_force = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                ? state.params.wind_force
-                : state.xpbd_params.wind_force;
+            const float wind_yaw_deg = state.xpbd_params.wind_yaw_deg;
+            const float wind_pitch_deg = state.xpbd_params.wind_pitch_deg;
+            const float wind_force = state.xpbd_params.wind_force;
 
             Eigen::Vector3d dir = wind_dir_from_angles_deg((double)wind_yaw_deg, (double)wind_pitch_deg);
             const double dn = dir.norm();
@@ -1293,6 +1491,9 @@ namespace poseweaver
         const std::uint64_t request_id = state.cloth_render_request_id;
         if (request_id == 0 || request_id == m_last_cloth_render_request_id)
             return;
+        state.cloth_render_source_vertex_count = 0;
+        state.cloth_render_vertex_count = 0;
+        state.cloth_render_face_count = 0;
         if (m_garment_mesh_name.empty() || !state.show_garment_mesh)
         {
             m_last_cloth_render_request_id = request_id;
@@ -1312,7 +1513,49 @@ namespace poseweaver
             return;
         }
 
+        state.cloth_render_source_vertex_count = garment.V.rows();
+        igl::opengl::ViewerData* render_mesh = &garment;
+        ClothRenderRefineResult refine_result;
+        if (state.cloth_render_fine)
+        {
+            Eigen::MatrixXd refined_V;
+            Eigen::MatrixXi refined_F;
+            std::string refine_error;
+            const double target = std::clamp((double)state.cloth_render_target_detail_size, 0.0001, 0.25);
+            if (!refine_cloth_mesh_for_render(
+                    garment.V,
+                    garment.F,
+                    target,
+                    refined_V,
+                    refined_F,
+                    &refine_result,
+                    &refine_error))
+            {
+                m_last_cloth_render_request_id = request_id;
+                state.cloth_render_completed_id = request_id;
+                state.cloth_render_path.clear();
+                console_add_line(state, "Fine cloth render failed: " + refine_error);
+                return;
+            }
+
+            auto& fine_mesh = m_viewer.data(m_cloth_render_mesh_index);
+            fine_mesh.clear();
+            fine_mesh.set_mesh(refined_V, refined_F);
+            fine_mesh.show_faces = 1;
+            fine_mesh.show_lines = 0;
+            fine_mesh.show_overlay = 0;
+            fine_mesh.double_sided = garment.double_sided;
+            fine_mesh.shininess = garment.shininess;
+            fine_mesh.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+            fine_mesh.set_visible(false);
+            render_mesh = &fine_mesh;
+        }
+
+        state.cloth_render_vertex_count = render_mesh->V.rows();
+        state.cloth_render_face_count = render_mesh->F.rows();
+
         constexpr int kOut = 1024;
+        constexpr int kRender = 2048;
 
         GLint old_framebuffer = 0;
         GLint old_viewport[4] = { 0, 0, 0, 0 };
@@ -1337,11 +1580,11 @@ namespace poseweaver
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kOut, kOut, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kRender, kRender, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
 
         glBindRenderbuffer(GL_RENDERBUFFER, depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kOut, kOut);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kRender, kRender);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
 
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -1360,17 +1603,17 @@ namespace poseweaver
 
         auto& core = m_viewer.core();
         const Eigen::Vector4f old_core_viewport = core.viewport;
-        if (state.scene_view_target_valid)
+        if (!state.cloth_render_use_current_camera && state.scene_view_target_valid)
         {
             std::uint64_t force_camera = state.scene_view_snap_to_target_request_id - 1u;
             apply_target_camera(core, state, force_camera);
         }
-        core.viewport = Eigen::Vector4f(0.0f, 0.0f, (float)kOut, (float)kOut);
+        core.viewport = Eigen::Vector4f(0.0f, 0.0f, (float)kRender, (float)kRender);
         update_core_matrices(core);
 
-        Eigen::Vector3d scene_center = garment.V.colwise().mean().transpose();
-        const Eigen::RowVector3d mn = garment.V.colwise().minCoeff();
-        const Eigen::RowVector3d mx = garment.V.colwise().maxCoeff();
+        Eigen::Vector3d scene_center = render_mesh->V.colwise().mean().transpose();
+        const Eigen::RowVector3d mn = render_mesh->V.colwise().minCoeff();
+        const Eigen::RowVector3d mx = render_mesh->V.colwise().maxCoeff();
         double scene_diag = (mx - mn).norm();
         if (!(scene_diag > 1e-9) || !std::isfinite(scene_diag))
             scene_diag = 1.0;
@@ -1398,7 +1641,7 @@ namespace poseweaver
         const Eigen::Vector3f light2_eye = (core.view * light2_world).head<3>();
 
         glDisable(GL_SCISSOR_TEST);
-        glViewport(0, 0, kOut, kOut);
+        glViewport(0, 0, kRender, kRender);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -1409,35 +1652,38 @@ namespace poseweaver
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        if (garment.dirty)
+        if (render_mesh->dirty)
         {
-            garment.updateGL(garment, garment.invert_normals, garment.meshgl);
-            garment.dirty = igl::opengl::MeshGL::DIRTY_NONE;
+            render_mesh->updateGL(*render_mesh, render_mesh->invert_normals, render_mesh->meshgl);
+            render_mesh->dirty = igl::opengl::MeshGL::DIRTY_NONE;
         }
 
-        const size_t shader_index = (size_t)m_garment_mesh_index;
+        const int rendered_mesh_index = state.cloth_render_fine
+            ? m_cloth_render_mesh_index
+            : m_garment_mesh_index;
+        const size_t shader_index = (size_t)rendered_mesh_index;
         if (shader_index < m_mesh_shader_variant.size()
             && m_mesh_shader_variant[shader_index] != MeshShaderVariant::ClothToon
-            && garment.meshgl.is_initialized)
+            && render_mesh->meshgl.is_initialized)
         {
             const GLuint prog = build_cloth_toon_program();
             if (prog != 0)
             {
-                const GLuint old = garment.meshgl.shader_mesh;
-                garment.meshgl.shader_mesh = prog;
+                const GLuint old = render_mesh->meshgl.shader_mesh;
+                render_mesh->meshgl.shader_mesh = prog;
                 if (old != 0)
                     glDeleteProgram(old);
                 m_mesh_shader_variant[shader_index] = MeshShaderVariant::ClothToon;
             }
         }
 
-        garment.meshgl.bind_mesh();
-        const GLuint prog = garment.meshgl.shader_mesh;
+        render_mesh->meshgl.bind_mesh();
+        const GLuint prog = render_mesh->meshgl.shader_mesh;
 
         glUniformMatrix4fv(glGetUniformLocation(prog, "view"), 1, GL_FALSE, core.view.data());
         glUniformMatrix4fv(glGetUniformLocation(prog, "proj"), 1, GL_FALSE, core.proj.data());
         glUniformMatrix4fv(glGetUniformLocation(prog, "normal_matrix"), 1, GL_FALSE, core.norm.data());
-        glUniform1f(glGetUniformLocation(prog, "specular_exponent"), garment.shininess);
+        glUniform1f(glGetUniformLocation(prog, "specular_exponent"), render_mesh->shininess);
         glUniform3fv(glGetUniformLocation(prog, "light_position_eye"), 1, light1_eye.data());
         glUniform3fv(glGetUniformLocation(prog, "light_position_eye2"), 1, light2_eye.data());
         glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
@@ -1448,9 +1694,9 @@ namespace poseweaver
         glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
         glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
         glUniform1i(glGetUniformLocation(prog, "shadow_pass"), 0);
-        glUniform1f(glGetUniformLocation(prog, "texture_factor"), core.is_set(garment.show_texture) ? 1.0f : 0.0f);
-        glUniform1f(glGetUniformLocation(prog, "matcap_factor"), core.is_set(garment.use_matcap) ? 1.0f : 0.0f);
-        glUniform1f(glGetUniformLocation(prog, "double_sided"), garment.double_sided ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "texture_factor"), core.is_set(render_mesh->show_texture) ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "matcap_factor"), core.is_set(render_mesh->use_matcap) ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(prog, "double_sided"), render_mesh->double_sided ? 1.0f : 0.0f);
 
         const GLboolean old_cull_enabled = glIsEnabled(GL_CULL_FACE);
         GLint old_cull_face = GL_BACK;
@@ -1464,7 +1710,7 @@ namespace poseweaver
         glDepthMask(GL_FALSE);
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), outline_width);
-        garment.meshgl.draw_mesh(true);
+        render_mesh->meshgl.draw_mesh(true);
 
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
@@ -1473,18 +1719,26 @@ namespace poseweaver
         if (!old_cull_enabled)
             glDisable(GL_CULL_FACE);
 
-        garment.meshgl.draw_mesh(true);
+        render_mesh->meshgl.draw_mesh(true);
 
-        std::vector<unsigned char> pixels((size_t)kOut * (size_t)kOut * 4u, 0u);
+        std::vector<unsigned char> pixels((size_t)kRender * (size_t)kRender * 4u, 0u);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, kOut, kOut, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-        std::vector<unsigned char> out = resize_gl_rgba_to_top_left(pixels, kOut, kOut, kOut);
+        glReadPixels(0, 0, kRender, kRender, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        std::vector<unsigned char> out = resize_gl_rgba_to_top_left(pixels, kRender, kRender, kOut);
+
+        float sketch_stroke_mean = 0.0f;
+        const bool matched_stroke_mean =
+            load_stroke_luminance_mean(
+                std::filesystem::path(state.cloth_render_stroke_reference_path),
+                sketch_stroke_mean)
+            && match_render_stroke_luminance(out, sketch_stroke_mean);
 
         std::error_code ec;
         const std::filesystem::path renders_dir = std::filesystem::path("renders");
         std::filesystem::create_directories(renders_dir, ec);
-        const std::filesystem::path out_path = renders_dir / "canva_generated_cloth.png";
+        const std::filesystem::path out_path = renders_dir /
+            (state.cloth_render_fine ? "canva_fine_cloth.png" : "canva_generated_cloth.png");
         bool wrote = false;
         if (!ec)
         {
@@ -1517,7 +1771,25 @@ namespace poseweaver
         if (wrote)
         {
             state.cloth_render_path = out_path.string();
-            console_add_line(state, "Generated cloth render saved: " + out_path.string());
+            if (state.cloth_render_fine)
+            {
+                console_add_line(state,
+                    "Fine cloth render saved: " + out_path.string()
+                    + " (#V " + std::to_string(state.cloth_render_source_vertex_count)
+                    + " -> " + std::to_string(state.cloth_render_vertex_count)
+                    + ", #F=" + std::to_string(state.cloth_render_face_count)
+                    + ", passes=" + std::to_string(refine_result.passes) + ")");
+            }
+            else
+            {
+                console_add_line(state, "Generated cloth render saved: " + out_path.string());
+            }
+            if (matched_stroke_mean)
+            {
+                console_add_line(state,
+                    "Cloth render ink mean matched sketch: "
+                    + std::to_string(sketch_stroke_mean));
+            }
         }
         else
         {

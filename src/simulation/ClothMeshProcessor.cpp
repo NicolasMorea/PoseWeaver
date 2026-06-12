@@ -741,4 +741,255 @@ namespace poseweaver
         }
         return true;
     }
+
+    bool refine_cloth_mesh_for_render(
+        const Eigen::MatrixXd& cloth_V,
+        const Eigen::MatrixXi& cloth_F,
+        const double target_edge_length,
+        Eigen::MatrixXd& out_V,
+        Eigen::MatrixXi& out_F,
+        ClothRenderRefineResult* result,
+        std::string* error)
+    {
+        if (result)
+            *result = ClothRenderRefineResult{};
+        out_V.resize(0, 3);
+        out_F.resize(0, 3);
+
+        if (cloth_V.cols() != 3 || cloth_F.cols() != 3 || cloth_V.rows() <= 0 || cloth_F.rows() <= 0)
+        {
+            if (error)
+                *error = "Expected a non-empty triangular cloth mesh.";
+            return false;
+        }
+        if (!(target_edge_length > 0.0) || !std::isfinite(target_edge_length))
+        {
+            if (error)
+                *error = "Target detail size must be a finite positive value.";
+            return false;
+        }
+        if (!cloth_V.allFinite())
+        {
+            if (error)
+                *error = "Cloth vertices contain non-finite values.";
+            return false;
+        }
+        if (cloth_F.minCoeff() < 0 || cloth_F.maxCoeff() >= cloth_V.rows())
+        {
+            if (error)
+                *error = "Cloth faces contain invalid vertex indices.";
+            return false;
+        }
+
+        constexpr int kMaxPasses = 10;
+        constexpr int kMaxVertices = 2000000;
+        constexpr int kMaxFaces = 2000000;
+        constexpr double kSplitTolerance = 1.001;
+
+        Eigen::MatrixXd V = cloth_V;
+        Eigen::MatrixXi F = cloth_F;
+
+        const auto max_edge_length = [](const Eigen::MatrixXd& vertices, const Eigen::MatrixXi& faces)
+        {
+            double max_len = 0.0;
+            for (int fi = 0; fi < faces.rows(); ++fi)
+            {
+                const int ids[3] = { faces(fi, 0), faces(fi, 1), faces(fi, 2) };
+                for (int ei = 0; ei < 3; ++ei)
+                {
+                    const double len = (vertices.row(ids[(ei + 1) % 3]) - vertices.row(ids[ei])).norm();
+                    if (std::isfinite(len))
+                        max_len = std::max(max_len, len);
+                }
+            }
+            return max_len;
+        };
+
+        const double max_before = max_edge_length(V, F);
+        int passes = 0;
+        int added_vertices = 0;
+
+        for (; passes < kMaxPasses; ++passes)
+        {
+            Eigen::MatrixXd normals = Eigen::MatrixXd::Zero(V.rows(), 3);
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int a = F(fi, 0);
+                const int b = F(fi, 1);
+                const int c = F(fi, 2);
+                const Eigen::RowVector3d ab = V.row(b) - V.row(a);
+                const Eigen::RowVector3d ac = V.row(c) - V.row(a);
+                const Eigen::RowVector3d n = ab.cross(ac);
+                if (!n.allFinite() || n.squaredNorm() <= 1e-24)
+                    continue;
+                normals.row(a) += n;
+                normals.row(b) += n;
+                normals.row(c) += n;
+            }
+            for (int vi = 0; vi < normals.rows(); ++vi)
+            {
+                const double len = normals.row(vi).norm();
+                if (len > 1e-12 && std::isfinite(len))
+                    normals.row(vi) /= len;
+            }
+
+            std::unordered_map<long long, int> midpoint_index;
+            midpoint_index.reserve((size_t)F.rows());
+
+            std::vector<Eigen::RowVector3d> vertices;
+            vertices.reserve((size_t)V.rows() + (size_t)F.rows());
+            for (int vi = 0; vi < V.rows(); ++vi)
+                vertices.push_back(V.row(vi));
+
+            const auto curved_midpoint = [&](const int i, const int j)
+            {
+                const Eigen::RowVector3d p0 = V.row(i);
+                const Eigen::RowVector3d p1 = V.row(j);
+                const Eigen::RowVector3d linear = 0.5 * (p0 + p1);
+                Eigen::RowVector3d n0 = normals.row(i);
+                Eigen::RowVector3d n1 = normals.row(j);
+                if (n0.squaredNorm() <= 1e-20 || n1.squaredNorm() <= 1e-20)
+                    return linear;
+
+                const Eigen::RowVector3d d = p1 - p0;
+                const Eigen::RowVector3d b1 = (2.0 * p0 + p1 - d.dot(n0) * n0) / 3.0;
+                const Eigen::RowVector3d b2 = (2.0 * p1 + p0 + d.dot(n1) * n1) / 3.0;
+                Eigen::RowVector3d curved = 0.125 * p0 + 0.375 * b1 + 0.375 * b2 + 0.125 * p1;
+
+                const double edge_len = d.norm();
+                Eigen::RowVector3d offset = curved - linear;
+                const double offset_len = offset.norm();
+                const double max_offset = 0.25 * edge_len;
+                if (offset_len > max_offset && offset_len > 1e-12)
+                    curved = linear + offset * (max_offset / offset_len);
+                return curved.allFinite() ? curved : linear;
+            };
+
+            const auto get_midpoint = [&](const int i, const int j)
+            {
+                const long long key = edge_key(i, j);
+                const auto found = midpoint_index.find(key);
+                if (found != midpoint_index.end())
+                    return found->second;
+
+                const int index = (int)vertices.size();
+                vertices.push_back(curved_midpoint(i, j));
+                midpoint_index.emplace(key, index);
+                return index;
+            };
+
+            std::vector<Eigen::Vector3i> faces;
+            faces.reserve((size_t)F.rows() * 2u);
+            bool split_any = false;
+
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int a = F(fi, 0);
+                const int b = F(fi, 1);
+                const int c = F(fi, 2);
+                const bool s0 = (V.row(b) - V.row(a)).norm() > target_edge_length * kSplitTolerance;
+                const bool s1 = (V.row(c) - V.row(b)).norm() > target_edge_length * kSplitTolerance;
+                const bool s2 = (V.row(a) - V.row(c)).norm() > target_edge_length * kSplitTolerance;
+                const int split_count = (int)s0 + (int)s1 + (int)s2;
+
+                if (split_count == 0)
+                {
+                    faces.emplace_back(a, b, c);
+                    continue;
+                }
+
+                split_any = true;
+                const int m0 = s0 ? get_midpoint(a, b) : -1;
+                const int m1 = s1 ? get_midpoint(b, c) : -1;
+                const int m2 = s2 ? get_midpoint(c, a) : -1;
+
+                if (split_count == 1)
+                {
+                    if (s0)
+                    {
+                        faces.emplace_back(a, m0, c);
+                        faces.emplace_back(m0, b, c);
+                    }
+                    else if (s1)
+                    {
+                        faces.emplace_back(b, m1, a);
+                        faces.emplace_back(m1, c, a);
+                    }
+                    else
+                    {
+                        faces.emplace_back(c, m2, b);
+                        faces.emplace_back(m2, a, b);
+                    }
+                }
+                else if (split_count == 2)
+                {
+                    if (s0 && s1)
+                    {
+                        faces.emplace_back(b, m1, m0);
+                        faces.emplace_back(a, m0, m1);
+                        faces.emplace_back(a, m1, c);
+                    }
+                    else if (s1 && s2)
+                    {
+                        faces.emplace_back(c, m2, m1);
+                        faces.emplace_back(b, m1, m2);
+                        faces.emplace_back(b, m2, a);
+                    }
+                    else
+                    {
+                        faces.emplace_back(a, m0, m2);
+                        faces.emplace_back(c, m2, m0);
+                        faces.emplace_back(c, m0, b);
+                    }
+                }
+                else
+                {
+                    faces.emplace_back(a, m0, m2);
+                    faces.emplace_back(m0, b, m1);
+                    faces.emplace_back(m2, m1, c);
+                    faces.emplace_back(m0, m1, m2);
+                }
+            }
+
+            if (!split_any)
+                break;
+            if ((int)vertices.size() > kMaxVertices || (int)faces.size() > kMaxFaces)
+            {
+                if (error)
+                    *error = "Fine render detail size would exceed the 2,000,000 element mesh limit.";
+                return false;
+            }
+
+            const int previous_vertex_count = V.rows();
+            V.resize((int)vertices.size(), 3);
+            for (int vi = 0; vi < (int)vertices.size(); ++vi)
+                V.row(vi) = vertices[(size_t)vi];
+
+            F.resize((int)faces.size(), 3);
+            for (int fi = 0; fi < (int)faces.size(); ++fi)
+                F.row(fi) = faces[(size_t)fi];
+
+            added_vertices += V.rows() - previous_vertex_count;
+        }
+
+        const double max_after = max_edge_length(V, F);
+        if (max_after > target_edge_length * kSplitTolerance)
+        {
+            if (error)
+                *error = "Target detail size could not be reached within the fine-render mesh limits.";
+            return false;
+        }
+
+        out_V = std::move(V);
+        out_F = std::move(F);
+        if (result)
+        {
+            result->passes = passes;
+            result->added_vertices = added_vertices;
+            result->output_faces = out_F.rows();
+            result->max_edge_before = max_before;
+            result->max_edge_after = max_after;
+        }
+        return true;
+    }
 }
