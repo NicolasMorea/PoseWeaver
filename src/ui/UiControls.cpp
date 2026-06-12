@@ -343,92 +343,7 @@ namespace poseweaver
 
                         ImGui::Separator();
 
-                        // Solver selection (kept in SimulationControls so playback UX stays identical).
-                        {
-                            int solver_i = (int)state.controls.solver;
-                            const char* solver_items[] = { "Projective Dynamics", "XPBD" };
-                            if (ImGui::Combo("Solver", &solver_i, solver_items, IM_ARRAYSIZE(solver_items)))
-                                state.controls.solver = (SimulationSolver)std::clamp(solver_i, 0, 1);
-                        }
-
-                        if (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                        {
-                            ImGui::InputFloat("dt", &state.params.dt, 0.001f, 0.01f, "%.6f");
-                            state.params.dt = std::max(state.params.dt, 1e-6f);
-
-                            ImGui::InputFloat("Simulation time (s)", &state.params.duration_seconds, 0.1f, 1.0f, "%.3f");
-                            state.params.duration_seconds = std::max(state.params.duration_seconds, 0.0f);
-
-                            ImGui::InputInt("Iterations", &state.params.solver_iterations);
-                            state.params.solver_iterations = std::max(state.params.solver_iterations, 1);
-
-                            ImGui::InputFloat("Gravity", &state.params.gravity, 0.5f, 5.0f, "%.3f");
-
-                            if (ImGui::TreeNodeEx("Constraints", ImGuiTreeNodeFlags_DefaultOpen))
-                            {
-                                ImGui::Checkbox("Stretch", &state.params.stretch_enabled);
-                                ImGui::BeginDisabled(!state.params.stretch_enabled);
-                                ImGui::InputFloat("Stretch stiffness", &state.params.stretch_stiffness, 0.1f, 1.0f, "%.6f");
-                                ImGui::EndDisabled();
-                                state.params.stretch_stiffness = std::max(state.params.stretch_stiffness, 0.0f);
-
-                                ImGui::BeginDisabled(!state.params.stretch_enabled);
-                                ImGui::SliderFloat("Base stretch mult", &state.params.base_stretch_mult, 0.0f, 2.0f, "%.3f");
-                                ImGui::EndDisabled();
-                                state.params.base_stretch_mult = std::clamp(state.params.base_stretch_mult, 0.0f, 2.0f);
-
-                                ImGui::Checkbox("Bend (dihedral)", &state.params.bend_enabled);
-                                ImGui::BeginDisabled(!state.params.bend_enabled);
-                                ImGui::InputFloat("Dihedral stiffness", &state.params.bend_stiffness, 0.1f, 1.0f, "%.6f");
-                                state.params.bend_stiffness = std::max(state.params.bend_stiffness, 0.0f);
-
-                                ImGui::Checkbox("Iso bend", &state.params.iso_bend_enabled);
-                                ImGui::BeginDisabled(!state.params.iso_bend_enabled);
-                                ImGui::InputFloat("Iso bend stiffness", &state.params.iso_bend_stiffness, 0.1f, 1.0f, "%.6f");
-                                ImGui::EndDisabled();
-                                state.params.iso_bend_stiffness = std::max(state.params.iso_bend_stiffness, 0.0f);
-                                ImGui::EndDisabled();
-
-                                ImGui::Checkbox("Collision", &state.params.collision_enabled);
-                                ImGui::BeginDisabled(!state.params.collision_enabled);
-                                ImGui::InputFloat("Collision stiffness", &state.params.collision_stiffness, 0.1f, 1.0f, "%.6f");
-                                ImGui::InputFloat("Thickness", &state.params.collision_thickness, 0.0005f, 0.002f, "%.6f");
-                                ImGui::EndDisabled();
-                                state.params.collision_stiffness = std::max(state.params.collision_stiffness, 0.0f);
-                                state.params.collision_thickness = std::max(state.params.collision_thickness, 0.0f);
-
-                                ImGui::TreePop();
-                            }
-
-                            if (ImGui::TreeNodeEx("Wind", ImGuiTreeNodeFlags_DefaultOpen))
-                            {
-                                ImGui::InputFloat("Wind force", &state.params.wind_force, 0.1f, 1.0f, "%.6f");
-                                state.params.wind_force = std::max(state.params.wind_force, 0.0f);
-
-                                ImGui::InputFloat("Wind yaw (deg)", &state.params.wind_yaw_deg, 1.0f, 5.0f, "%.3f");
-                                ImGui::InputFloat("Wind pitch (deg)", &state.params.wind_pitch_deg, 1.0f, 5.0f, "%.3f");
-
-                                ImGui::InputFloat("Random space", &state.params.wind_random_space, 0.05f, 0.25f, "%.6f");
-                                ImGui::InputFloat("Random time", &state.params.wind_random_time, 0.05f, 0.25f, "%.6f");
-                                state.params.wind_random_space = std::max(state.params.wind_random_space, 0.0f);
-                                state.params.wind_random_time = std::max(state.params.wind_random_time, 0.0f);
-
-                                ImGui::TreePop();
-                            }
-
-                            ImGui::Checkbox("Friction", &state.params.enable_friction);
-                            if (state.params.enable_friction)
-                            {
-                                ImGui::InputFloat("mu", &state.params.friction_mu, 0.01f, 0.1f, "%.6f");
-                                state.params.friction_mu = std::max(state.params.friction_mu, 0.0f);
-                            }
-
-                            ImGui::InputFloat("Damping", &state.params.damping, 0.001f, 0.01f, "%.6f");
-                            state.params.damping = std::clamp(state.params.damping, 0.0f, 0.99f);
-                        }
-                        else
-                        {
-                            auto& p = state.xpbd_params;
+                        auto& p = state.xpbd_params;
 
                             ImGui::InputFloat("dt", &p.dt, 0.001f, 0.01f, "%.6f");
                             p.dt = std::max(p.dt, 1e-6f);
@@ -508,9 +423,8 @@ namespace poseweaver
                                 p.friction_mu = std::max(p.friction_mu, 0.0f);
                             }
 
-                            ImGui::InputFloat("Damping", &p.damping, 0.001f, 0.01f, "%.6f");
-                            p.damping = std::clamp(p.damping, 0.0f, 0.99f);
-                        }
+                        ImGui::InputFloat("Damping", &p.damping, 0.001f, 0.01f, "%.6f");
+                        p.damping = std::clamp(p.damping, 0.0f, 0.99f);
 
                         ImGui::InputInt("Max Frames (cap)", &state.controls.max_frames);
                         state.controls.max_frames = std::clamp(state.controls.max_frames, 1, 1000000);

@@ -132,8 +132,6 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/collision/TriangleBvh.cpp
 		src/simulation/collision/TriangleBvh.h
 		src/simulation/collision/ClothContacts.h
-		src/simulation/pd/ClothProjectiveDynamics.cpp
-		src/simulation/pd/ClothProjectiveDynamics.h
 		src/simulation/xpbd/ClothXpbd.cpp
 		src/simulation/xpbd/ClothXpbd.h
 		src/simulation/ClothToSmplMapping.cpp

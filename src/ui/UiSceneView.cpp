@@ -683,12 +683,8 @@ namespace poseweaver
                     }
                     else if (state.scene_view_active_gizmo == 0)
                     {
-                        float* wind_yaw_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                            ? &state.params.wind_yaw_deg
-                            : &state.xpbd_params.wind_yaw_deg;
-                        float* wind_pitch_deg = (state.controls.solver == SimulationSolver::ProjectiveDynamics)
-                            ? &state.params.wind_pitch_deg
-                            : &state.xpbd_params.wind_pitch_deg;
+                        float* wind_yaw_deg = &state.xpbd_params.wind_yaw_deg;
+                        float* wind_pitch_deg = &state.xpbd_params.wind_pitch_deg;
 
                         Eigen::Matrix4f T = make_wind_transform(
                             state.wind_arrow_pivot,

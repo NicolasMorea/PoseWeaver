@@ -9,12 +9,6 @@ namespace poseweaver
 {
     class Sketch2RigService;
 
-    enum class SimulationSolver
-    {
-        ProjectiveDynamics = 0,
-        Xpbd = 1,
-    };
-
     struct ViewportRect
     {
         int x = 0;
@@ -33,8 +27,6 @@ namespace poseweaver
 
     struct SimulationControls
     {
-        SimulationSolver solver = SimulationSolver::Xpbd;
-
         bool simulating = false;
         bool playing = false;
         bool preview = true;
@@ -49,39 +41,6 @@ namespace poseweaver
 
         bool smooth_sequence = true;
         float smooth_sequence_length = 0.5f;
-    };
-
-    struct SimulationParams
-    {
-        float dt = 1.0f / 60.0f;
-        float duration_seconds = 2.0f;
-        int solver_iterations = 10;
-        float gravity = -9.81f;
-
-        bool stretch_enabled = true;
-        float stretch_stiffness = 1.0f;
-        float base_stretch_mult = 1.0f;
-
-        bool bend_enabled = true;
-        float bend_stiffness = 0.5f; // dihedral-angle bending (PD)
-
-        bool iso_bend_enabled = false;
-        float iso_bend_stiffness = 0.5f; // isometric bending (PD)
-
-        bool collision_enabled = true;
-        float collision_stiffness = 1.0f;
-        float collision_thickness = 0.003f;
-
-        bool enable_friction = false;
-        float friction_mu = 0.30f;
-        float damping = 0.01f;
-
-        float wind_force = 0.0f;
-        float wind_yaw_deg = 0.0f;
-        float wind_pitch_deg = 0.0f;
-
-        float wind_random_space = 0.0f;
-        float wind_random_time = 0.0f;
     };
 
     // Compliance values are >= 0, where 0 is perfectly rigid.
@@ -189,7 +148,6 @@ namespace poseweaver
     struct AppState
     {
         SimulationControls controls;
-        SimulationParams params;
         SimulationXpbdParams xpbd_params;
         SelectionState selection;
         ViewportRect cloth_view;
@@ -219,6 +177,10 @@ namespace poseweaver
         std::array<float, 3> scene_view_raw_rig_root{ 0.0f, 0.0f, 0.0f };
         bool scene_view_raw_rig_height_valid = false;
         float scene_view_raw_rig_height = 0.0f;
+        bool scene_view_smpl_fit_valid = false;
+        std::array<float, 3> scene_view_smpl_fit_scale{ 1.0f, 1.0f, 1.0f };
+        std::array<float, 3> scene_view_smpl_fit_translation{ 0.0f, 0.0f, 0.0f };
+        float scene_view_smpl_fit_rms = 0.0f;
         std::uint64_t scene_view_snapshot_request_id = 0;
         std::uint64_t scene_view_snapshot_completed_id = 0;
         std::string scene_view_snapshot_pose_name;
@@ -251,12 +213,20 @@ namespace poseweaver
         std::uint64_t cloth_render_request_id = 0;
         std::uint64_t cloth_render_completed_id = 0;
         std::string cloth_render_path;
+        std::string cloth_render_stroke_reference_path;
+        bool cloth_render_fine = false;
+        bool cloth_render_use_current_camera = false;
+        float cloth_render_target_detail_size = 0.01f;
+        int cloth_render_source_vertex_count = 0;
+        int cloth_render_vertex_count = 0;
+        int cloth_render_face_count = 0;
 
         std::uint64_t canva_displacement_request_id = 0;
         std::uint64_t canva_displacement_completed_id = 0;
         std::string canva_displacement_uv_json_path;
         std::string canva_displacement_model_input_path;
         std::string canva_displacement_path;
+        std::string canva_manual_uv_png_path;
 
         float garment_min_cloth_skin_distance = 0.001f;
         float garment_ease_amount = 0.20f;
@@ -276,6 +246,7 @@ namespace poseweaver
 
         float canva_brush_radius = 8.0f;
         std::array<float, 4> canva_brush_color{ 0.0f, 0.0f, 0.0f, 1.0f };
+        float cloth_fitting_depth_margin = 0.0015f;
 
         bool canva_tab_active = false;
         std::uint64_t canva_undo_request_id = 0;

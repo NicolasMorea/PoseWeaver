@@ -4,7 +4,6 @@
 #include "simulation/ClothMeshProcessor.h"
 #include "simulation/SmplSimplifier.h"
 #include "simulation/collision/TriangleBvh.h"
-#include "simulation/pd/ClothProjectiveDynamics.h"
 #include "simulation/xpbd/ClothXpbd.h"
 
 #include <igl/signed_distance.h>
@@ -17,7 +16,6 @@
 #include <future>
 #include <iomanip>
 #include <limits>
-#include <optional>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -600,16 +598,9 @@ namespace poseweaver
         if (m_smplh_loaded_pose_mirror_x && body_F.cols() >= 3)
             body_F.col(1).swap(body_F.col(2));
 
-        const SimulationSolver solver = state.controls.solver;
         const int max_frames_for_progress = std::max(1, state.controls.max_frames);
-        const double dt_for_steps =
-            (solver == SimulationSolver::ProjectiveDynamics)
-                ? (double)state.params.dt
-                : (double)state.xpbd_params.dt;
-        const double duration_for_steps =
-            (solver == SimulationSolver::ProjectiveDynamics)
-                ? (double)state.params.duration_seconds
-                : (double)state.xpbd_params.duration_seconds;
+        const double dt_for_steps = (double)state.xpbd_params.dt;
+        const double duration_for_steps = (double)state.xpbd_params.duration_seconds;
         const int steps_target = (duration_for_steps <= 0.0) ? 0 : (int)std::ceil(duration_for_steps / dt_for_steps);
         const int steps = std::min(steps_target, std::max(0, max_frames_for_progress - 1));
 
@@ -617,7 +608,6 @@ namespace poseweaver
         const int dof = 3 * n_joints;
         const bool smooth_sequence_pose_ready =
             state.controls.smooth_sequence
-            && solver == SimulationSolver::Xpbd
             && state.selection.pose_index >= 0
             && m_smplh_loaded
             && n_joints > 0
@@ -698,24 +688,8 @@ namespace poseweaver
             cloth_V0.col(0) *= -1.0;
         }
 
-        if (state.scene_view_raw_rig_root_valid
-            && m_smplh_model.J_regressor.rows() > 0
-            && m_smplh_model.J_regressor.cols() == body_tpose.rows())
-        {
-            const Eigen::MatrixXd tpose_joints = m_smplh_model.J_regressor * body_tpose;
-            if (tpose_joints.rows() > 0 && tpose_joints.cols() == 3)
-            {
-                const Eigen::RowVector3d current_root = tpose_joints.row(0);
-                const Eigen::RowVector3d target_root(
-                    (double)state.scene_view_raw_rig_root[0],
-                    (double)state.scene_view_raw_rig_root[1],
-                    (double)state.scene_view_raw_rig_root[2]);
-                body_tpose.rowwise() -= current_root;
-                body_tpose.rowwise() += target_root;
-                cloth_V0.rowwise() -= current_root;
-                cloth_V0.rowwise() += target_root;
-            }
-        }
+        apply_smpl_scene_transform(state, body_tpose);
+        apply_smpl_scene_transform(state, cloth_V0);
 
         {
             ClothPushOutResult push_res;
@@ -798,70 +772,37 @@ namespace poseweaver
             return Eigen::Vector3d(sy * cp, -sp, cy * cp);
         };
 
-        std::optional<ClothPdParams> pd_params;
-        std::optional<ClothXpbdParams> xpbd_params;
+        ClothXpbdParams xpbd_params;
+        xpbd_params.dt = (double)state.xpbd_params.dt;
+        xpbd_params.duration_seconds = (double)state.xpbd_params.duration_seconds;
+        xpbd_params.solver_iterations = state.xpbd_params.solver_iterations;
+        xpbd_params.gravity_y = (double)state.xpbd_params.gravity;
+        xpbd_params.damping = (double)state.xpbd_params.damping;
 
-        if (solver == SimulationSolver::ProjectiveDynamics)
-        {
-            ClothPdParams p;
-            p.dt = (double)state.params.dt;
-            p.duration_seconds = (double)state.params.duration_seconds;
-            p.local_global_iterations = state.params.solver_iterations;
-            p.gravity_y = (double)state.params.gravity;
-            p.stretch_stiffness = state.params.stretch_enabled ? (double)state.params.stretch_stiffness : 0.0;
-            p.base_stretch_mult = (double)state.params.base_stretch_mult;
-            p.bend_stiffness = state.params.bend_enabled ? (double)state.params.bend_stiffness : 0.0;
-            p.iso_bend_stiffness = (state.params.bend_enabled && state.params.iso_bend_enabled) ? (double)state.params.iso_bend_stiffness : 0.0;
-            p.collision_stiffness = state.params.collision_enabled ? (double)state.params.collision_stiffness : 0.0;
-            p.collision_thickness = (double)state.params.collision_thickness;
-            p.enable_friction = state.params.enable_friction;
-            p.friction_mu = (double)state.params.friction_mu;
-            p.damping = (double)state.params.damping;
-            p.max_frames = max_frames_for_progress;
+        xpbd_params.stretch_enabled = state.xpbd_params.stretch_enabled;
+        xpbd_params.stretch_compliance = std::max(0.0, (double)state.xpbd_params.stretch_compliance);
+        xpbd_params.base_stretch_mult = (double)state.xpbd_params.base_stretch_mult;
+        xpbd_params.substeps = std::max(1, state.xpbd_params.substeps);
+        xpbd_params.bend_enabled = state.xpbd_params.bend_enabled;
+        xpbd_params.bend_compliance = std::max(0.0, (double)state.xpbd_params.bend_compliance);
+        xpbd_params.collision_enabled = state.xpbd_params.collision_enabled;
+        xpbd_params.collision_compliance = std::max(0.0, (double)state.xpbd_params.collision_compliance);
+        xpbd_params.collision_thickness = (double)state.xpbd_params.collision_thickness;
+        xpbd_params.self_collision_enabled = state.xpbd_params.self_collision_enabled;
+        xpbd_params.self_collision_compliance = std::max(0.0, (double)state.xpbd_params.self_collision_compliance);
+        xpbd_params.self_collision_thickness = (double)state.xpbd_params.self_collision_thickness;
 
-            p.wind_dir = wind_dir_from_angles((double)state.params.wind_yaw_deg, (double)state.params.wind_pitch_deg);
-            p.wind_force = std::max(0.0, (double)state.params.wind_force);
-            p.wind_random_space = std::max(0.0, (double)state.params.wind_random_space);
-            p.wind_random_time = std::max(0.0, (double)state.params.wind_random_time);
+        xpbd_params.enable_friction = state.xpbd_params.enable_friction;
+        xpbd_params.friction_mu = (double)state.xpbd_params.friction_mu;
 
-            pd_params = p;
-        }
-        else
-        {
-            ClothXpbdParams p;
-            p.dt = (double)state.xpbd_params.dt;
-            p.duration_seconds = (double)state.xpbd_params.duration_seconds;
-            p.solver_iterations = state.xpbd_params.solver_iterations;
-            p.gravity_y = (double)state.xpbd_params.gravity;
-            p.damping = (double)state.xpbd_params.damping;
+        xpbd_params.wind_dir = wind_dir_from_angles((double)state.xpbd_params.wind_yaw_deg, (double)state.xpbd_params.wind_pitch_deg);
+        xpbd_params.wind_force = std::max(0.0, (double)state.xpbd_params.wind_force);
+        xpbd_params.wind_random_space = std::max(0.0, (double)state.xpbd_params.wind_random_space);
+        xpbd_params.wind_random_time = std::max(0.0, (double)state.xpbd_params.wind_random_time);
 
-            p.stretch_enabled = state.xpbd_params.stretch_enabled;
-            p.stretch_compliance = std::max(0.0, (double)state.xpbd_params.stretch_compliance);
-            p.base_stretch_mult = (double)state.xpbd_params.base_stretch_mult;
-            p.substeps = std::max(1, state.xpbd_params.substeps);
-            p.bend_enabled = state.xpbd_params.bend_enabled;
-            p.bend_compliance = std::max(0.0, (double)state.xpbd_params.bend_compliance);
-            p.collision_enabled = state.xpbd_params.collision_enabled;
-            p.collision_compliance = std::max(0.0, (double)state.xpbd_params.collision_compliance);
-            p.collision_thickness = (double)state.xpbd_params.collision_thickness;
-            p.self_collision_enabled = state.xpbd_params.self_collision_enabled;
-            p.self_collision_compliance = std::max(0.0, (double)state.xpbd_params.self_collision_compliance);
-            p.self_collision_thickness = (double)state.xpbd_params.self_collision_thickness;
-
-            p.enable_friction = state.xpbd_params.enable_friction;
-            p.friction_mu = (double)state.xpbd_params.friction_mu;
-
-            p.wind_dir = wind_dir_from_angles((double)state.xpbd_params.wind_yaw_deg, (double)state.xpbd_params.wind_pitch_deg);
-            p.wind_force = std::max(0.0, (double)state.xpbd_params.wind_force);
-            p.wind_random_space = std::max(0.0, (double)state.xpbd_params.wind_random_space);
-            p.wind_random_time = std::max(0.0, (double)state.xpbd_params.wind_random_time);
-
-            p.max_frames = max_frames_for_progress;
-            xpbd_params = p;
-        }
+        xpbd_params.max_frames = max_frames_for_progress;
 
         if (state.controls.smooth_sequence
-            && xpbd_params.has_value()
             && state.selection.pose_index >= 0
             && m_smplh_loaded
             && m_smplh_model.joint_count() > 0
@@ -882,29 +823,12 @@ namespace poseweaver
             const Eigen::Quaterniond q_root_target = aa_to_quat(target_aa.segment<3>(0));
 
             const bool mirror_display_x = m_smplh_loaded_pose_mirror_x;
-            const bool align_display_root =
-                state.scene_view_raw_rig_root_valid
-                && m_smplh_model.J_regressor.rows() > 0
-                && m_smplh_model.J_regressor.cols() == m_smplh_model.vertex_count();
-            const Eigen::RowVector3d display_root_target(
-                (double)state.scene_view_raw_rig_root[0],
-                (double)state.scene_view_raw_rig_root[1],
-                (double)state.scene_view_raw_rig_root[2]);
 
             const auto to_display_space_body = [&](Eigen::MatrixXd& V_body)
             {
                 if (mirror_display_x && V_body.cols() >= 1)
                     V_body.col(0) *= -1.0;
-                if (align_display_root)
-                {
-                    const Eigen::MatrixXd joints = m_smplh_model.J_regressor * V_body;
-                    if (joints.rows() > 0 && joints.cols() == 3)
-                    {
-                        const Eigen::RowVector3d current_root = joints.row(0);
-                        V_body.rowwise() -= current_root;
-                        V_body.rowwise() += display_root_target;
-                    }
-                }
+                apply_smpl_scene_transform(state, V_body);
             };
 
             const int seq_steps = smooth_sequence_steps;
@@ -919,7 +843,7 @@ namespace poseweaver
                 interp_params.betas = m_smplh_params.betas;
                 interp_params.pose_axis_angle.resize(dof);
 
-                auto& body_seq = xpbd_params->body_sequence;
+                auto& body_seq = xpbd_params.body_sequence;
                 body_seq.reserve(static_cast<size_t>(seq_steps));
 
                 bool seq_ok = true;
@@ -973,48 +897,33 @@ namespace poseweaver
             if (m_smplh_loaded_pose_mirror_x && body_rest_for_targets.cols() >= 1)
                 body_rest_for_targets.col(0) *= -1.0;
 
-            if (pd_params.has_value())
-            {
-                pd_params->fixed_vertex_indices = fixed_vertex_indices;
-                pd_params->fixed_vertex_targets = compute_cloth_smpl_targets(
-                    fixed_vertex_indices,
-                    cloth_V0,
-                    constraint_attachment_mapping,
-                    body_V,
-                    body_F,
-                    body_rest_for_targets);
-            }
+            xpbd_params.fixed_vertex_indices = fixed_vertex_indices;
+            auto& target_seq = xpbd_params.fixed_vertex_target_sequence;
+            target_seq.clear();
 
-            if (xpbd_params.has_value())
+            if (!xpbd_params.body_sequence.empty())
             {
-                xpbd_params->fixed_vertex_indices = fixed_vertex_indices;
-                auto& target_seq = xpbd_params->fixed_vertex_target_sequence;
-                target_seq.clear();
-
-                if (!xpbd_params->body_sequence.empty())
-                {
-                    target_seq.reserve(xpbd_params->body_sequence.size());
-                    for (const Eigen::MatrixXd& body_frame : xpbd_params->body_sequence)
-                    {
-                        target_seq.push_back(compute_cloth_smpl_targets(
-                            fixed_vertex_indices,
-                            cloth_V0,
-                            constraint_attachment_mapping,
-                            body_frame,
-                            body_F,
-                            body_rest_for_targets));
-                    }
-                }
-                else
+                target_seq.reserve(xpbd_params.body_sequence.size());
+                for (const Eigen::MatrixXd& body_frame : xpbd_params.body_sequence)
                 {
                     target_seq.push_back(compute_cloth_smpl_targets(
                         fixed_vertex_indices,
                         cloth_V0,
                         constraint_attachment_mapping,
-                        body_V,
+                        body_frame,
                         body_F,
                         body_rest_for_targets));
                 }
+            }
+            else
+            {
+                target_seq.push_back(compute_cloth_smpl_targets(
+                    fixed_vertex_indices,
+                    cloth_V0,
+                    constraint_attachment_mapping,
+                    body_V,
+                    body_F,
+                    body_rest_for_targets));
             }
 
             console_add_line(state,
@@ -1022,7 +931,6 @@ namespace poseweaver
                 " vertices pinned to SMPL-relative targets");
         }
 
-        if (xpbd_params.has_value())
         {
             const double keep_percent = std::clamp((double)state.xpbd_params.smpl_geometry_percent, 1.0, 100.0);
             if (keep_percent < 99.5)
@@ -1043,10 +951,10 @@ namespace poseweaver
                     && apply_smpl_simplification(body_V, simplification, simplified_body_V, &simpl_err);
 
                 std::vector<Eigen::MatrixXd> simplified_body_sequence;
-                if (simpl_ok && !xpbd_params->body_sequence.empty())
+                if (simpl_ok && !xpbd_params.body_sequence.empty())
                 {
-                    simplified_body_sequence.reserve(xpbd_params->body_sequence.size());
-                    for (const Eigen::MatrixXd& frame : xpbd_params->body_sequence)
+                    simplified_body_sequence.reserve(xpbd_params.body_sequence.size());
+                    for (const Eigen::MatrixXd& frame : xpbd_params.body_sequence)
                     {
                         Eigen::MatrixXd simplified_frame;
                         if (!apply_smpl_simplification(frame, simplification, simplified_frame, &simpl_err))
@@ -1064,8 +972,8 @@ namespace poseweaver
                     const int raw_faces = (int)body_F.rows();
                     body_V = std::move(simplified_body_V);
                     body_F = simplification.F;
-                    if (!xpbd_params->body_sequence.empty())
-                        xpbd_params->body_sequence = std::move(simplified_body_sequence);
+                    if (!xpbd_params.body_sequence.empty())
+                        xpbd_params.body_sequence = std::move(simplified_body_sequence);
 
                     const auto elapsed = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t0).count();
@@ -1085,12 +993,12 @@ namespace poseweaver
                 }
             }
 
-            if (xpbd_params->collision_enabled && body_V.rows() > 0 && body_F.rows() > 0)
+            if (xpbd_params.collision_enabled && body_V.rows() > 0 && body_F.rows() > 0)
             {
                 state.controls.sim_stage = "Preparing SMPL proxy";
                 const auto t0 = std::chrono::steady_clock::now();
 
-                const double collision_thickness = std::max(0.0, xpbd_params->collision_thickness);
+                const double collision_thickness = std::max(0.0, xpbd_params.collision_thickness);
                 const double inflation_margin = std::clamp(
                     std::max(0.0015, 0.5 * collision_thickness),
                     0.0015,
@@ -1114,7 +1022,7 @@ namespace poseweaver
                     proxy_stats.self_collision_contacts += frame_stats.self_collision_contacts;
                 }
 
-                for (Eigen::MatrixXd& frame : xpbd_params->body_sequence)
+                for (Eigen::MatrixXd& frame : xpbd_params.body_sequence)
                 {
                     const BodyProxyPrepStats frame_stats = prepare_xpbd_body_proxy_frame(
                         frame,
@@ -1171,18 +1079,14 @@ namespace poseweaver
 
         m_cloth_sim_job_running = true;
         state.controls.simulating = true;
-        state.controls.sim_stage = (solver == SimulationSolver::ProjectiveDynamics) ? "Simulating PD" : "Simulating XPBD";
-        console_add_line(state,
-            (solver == SimulationSolver::ProjectiveDynamics)
-                ? "Starting cloth simulation (Projective Dynamics)…"
-                : "Starting cloth simulation (XPBD)…");
+        state.controls.sim_stage = "Simulating XPBD";
+        console_add_line(state, "Starting cloth simulation (XPBD)…");
 
         m_cloth_sim_future = std::async(std::launch::async,
             [cloth_V0 = std::move(cloth_V0),
                 cloth_F = std::move(cloth_F),
                 body_V = std::move(body_V),
                 body_F = std::move(body_F),
-                pd_params,
                 xpbd_params,
                 cancel_flag,
                 progress_steps_done,
@@ -1191,7 +1095,6 @@ namespace poseweaver
             {
                 ClothSimJobResult jr;
                 std::string err;
-                ClothPdResult pd_res;
                 ClothXpbdResult xpbd_res;
 
                 struct PreviewCb
@@ -1201,27 +1104,6 @@ namespace poseweaver
                     Eigen::MatrixXi body_F;
                     std::chrono::steady_clock::time_point last;
                     std::chrono::milliseconds min_interval{ 100 }; // low-FPS preview
-                };
-
-                auto on_frame_pd = [](const Eigen::MatrixXd& frame_V, int /*steps_simulated*/, void* user)
-                {
-                    auto* pcb = static_cast<PreviewCb*>(user);
-                    if (!pcb || !pcb->state || !pcb->enabled)
-                        return;
-                    if (!pcb->enabled->load())
-                        return;
-
-                    const auto now = std::chrono::steady_clock::now();
-                    if (pcb->last.time_since_epoch().count() != 0 && (now - pcb->last) < pcb->min_interval)
-                        return;
-                    pcb->last = now;
-
-                    {
-                        std::lock_guard<std::mutex> lk(pcb->state->mutex);
-                        pcb->state->V = frame_V;
-                        pcb->state->valid = true;
-                        pcb->state->seq.fetch_add(1, std::memory_order_release);
-                    }
                 };
 
                 auto on_frame_xpbd = [](const Eigen::MatrixXd& frame_V, const Eigen::MatrixXd* body_V, int /*steps_simulated*/, void* user)
@@ -1262,94 +1144,50 @@ namespace poseweaver
                 preview_cb.enabled = preview_enabled;
                 preview_cb.body_F = body_F;
 
-                bool ok = false;
-                if (pd_params.has_value())
+                bool ok = run_cloth_xpbd(
+                    cloth_V0, cloth_F,
+                    body_V, body_F,
+                    xpbd_params,
+                    &xpbd_res,
+                    &err,
+                    cancel_flag.get(),
+                    progress_steps_done.get(),
+                    on_frame_xpbd,
+                    &preview_cb);
+                if (ok)
                 {
-                    ok = run_cloth_projective_dynamics(
-                        cloth_V0, cloth_F,
-                        body_V, body_F,
-                        *pd_params,
-                        &pd_res,
-                        &err,
-                        cancel_flag.get(),
-                        progress_steps_done.get(),
-                        on_frame_pd,
-                        &preview_cb);
-                    if (ok)
+                    jr.frames = std::move(xpbd_res.frames);
+                    jr.steps_simulated = xpbd_res.stats.steps_simulated;
+                    jr.last_step_contacts = xpbd_res.stats.last_step_contacts + xpbd_res.stats.last_step_self_contacts;
+
+                    const ClothXpbdStats& s = xpbd_res.stats;
+                    std::ostringstream oss;
+                    oss << std::fixed << std::setprecision(2);
+                    const auto pct = [&](double ms)
                     {
-                        jr.frames = std::move(pd_res.frames);
-                        jr.steps_simulated = pd_res.stats.steps_simulated;
-                        jr.last_step_contacts = pd_res.stats.last_step_contacts;
+                        return (s.ms_total > 0.0) ? (100.0 * ms / s.ms_total) : 0.0;
+                    };
 
-                        const ClothPdStats& s = pd_res.stats;
-                        std::ostringstream oss;
-                        oss << std::fixed << std::setprecision(2);
-                        oss << "PD timing breakdown (ms)\n";
-                        oss << "  total: " << s.ms_total << "\n";
-                        oss << "  bvh build: " << s.ms_bvh_build << " (" << (s.ms_total > 0 ? 100.0 * s.ms_bvh_build / s.ms_total : 0.0) << "%)\n";
-                        oss << "  predict: " << s.ms_predict << " (" << (s.ms_total > 0 ? 100.0 * s.ms_predict / s.ms_total : 0.0) << "%)\n";
-                        oss << "  wind: " << s.ms_wind << " (" << (s.ms_total > 0 ? 100.0 * s.ms_wind / s.ms_total : 0.0) << "%)\n";
-                        oss << "  collision contacts total: " << s.ms_contacts_bvh << " (" << (s.ms_total > 0 ? 100.0 * s.ms_contacts_bvh / s.ms_total : 0.0) << "%)\n";
-                        oss << "    narrow phase (BVH query): " << s.ms_contacts_query << " (" << (s.ms_total > 0 ? 100.0 * s.ms_contacts_query / s.ms_total : 0.0) << "%)\n";
-                        oss << "    broad phase (filters): " << s.ms_contacts_other << " (" << (s.ms_total > 0 ? 100.0 * s.ms_contacts_other / s.ms_total : 0.0) << "%)\n";
-                        oss << "  assemble: " << s.ms_assemble << " (" << (s.ms_total > 0 ? 100.0 * s.ms_assemble / s.ms_total : 0.0) << "%)\n";
-                        oss << "  factor: " << s.ms_factor << " (" << (s.ms_total > 0 ? 100.0 * s.ms_factor / s.ms_total : 0.0) << "%)\n";
-                        oss << "  local stretch: " << s.ms_local_stretch << " (" << (s.ms_total > 0 ? 100.0 * s.ms_local_stretch / s.ms_total : 0.0) << "%)\n";
-                        oss << "  local bend: " << s.ms_local_bend << " (" << (s.ms_total > 0 ? 100.0 * s.ms_local_bend / s.ms_total : 0.0) << "%)\n";
-                        oss << "  local collision: " << s.ms_local_collision << " (" << (s.ms_total > 0 ? 100.0 * s.ms_local_collision / s.ms_total : 0.0) << "%)\n";
-                        oss << "  global solve: " << s.ms_global_solve << " (" << (s.ms_total > 0 ? 100.0 * s.ms_global_solve / s.ms_total : 0.0) << "%)\n";
-                        oss << "  post pushout: " << s.ms_post_pushout << " (" << (s.ms_total > 0 ? 100.0 * s.ms_post_pushout / s.ms_total : 0.0) << "%)\n";
-                        oss << "  friction: " << s.ms_friction << " (" << (s.ms_total > 0 ? 100.0 * s.ms_friction / s.ms_total : 0.0) << "%)";
-                        jr.timing_report = oss.str();
-                    }
-                }
-                else if (xpbd_params.has_value())
-                {
-                    ok = run_cloth_xpbd(
-                        cloth_V0, cloth_F,
-                        body_V, body_F,
-                        *xpbd_params,
-                        &xpbd_res,
-                        &err,
-                        cancel_flag.get(),
-                        progress_steps_done.get(),
-                        on_frame_xpbd,
-                        &preview_cb);
-                    if (ok)
-                    {
-                        jr.frames = std::move(xpbd_res.frames);
-                        jr.steps_simulated = xpbd_res.stats.steps_simulated;
-                        jr.last_step_contacts = xpbd_res.stats.last_step_contacts + xpbd_res.stats.last_step_self_contacts;
+                    const double ms_collision_broadphase = s.ms_candidates + s.ms_collision_broad;
+                    const double ms_collision_narrowphase = s.ms_collision_narrow;
 
-                        const ClothXpbdStats& s = xpbd_res.stats;
-                        std::ostringstream oss;
-                        oss << std::fixed << std::setprecision(2);
-                        const auto pct = [&](double ms)
-                        {
-                            return (s.ms_total > 0.0) ? (100.0 * ms / s.ms_total) : 0.0;
-                        };
-
-                        const double ms_collision_broadphase = s.ms_candidates + s.ms_collision_broad;
-                        const double ms_collision_narrowphase = s.ms_collision_narrow;
-
-                        oss << "XPBD timing breakdown (ms)\n";
-                        oss << "  total: " << s.ms_total << "\n";
-                        oss << "  bvh build: " << s.ms_bvh_build << " (" << pct(s.ms_bvh_build) << "%)\n";
-                        oss << "  predict: " << s.ms_predict << " (" << pct(s.ms_predict) << "%)\n";
-                        oss << "  wind: " << s.ms_wind << " (" << pct(s.ms_wind) << "%)\n";
-                        oss << "  stretch: " << s.ms_stretch << " (" << pct(s.ms_stretch) << "%)\n";
-                        oss << "  bend: " << s.ms_bend << " (" << pct(s.ms_bend) << "%)\n";
-                        oss << "  collision contacts total: " << s.ms_collision_bvh << " (" << pct(s.ms_collision_bvh) << "%)\n";
-                        oss << "    broad phase: " << ms_collision_broadphase << " (" << pct(ms_collision_broadphase) << "%)\n";
-                        oss << "      candidates (AABB): " << s.ms_candidates << " (" << pct(s.ms_candidates) << "%)\n";
-                        oss << "      filters/bookkeeping: " << s.ms_collision_broad << " (" << pct(s.ms_collision_broad) << "%)\n";
-                        oss << "    narrow phase (BVH query): " << ms_collision_narrowphase << " (" << pct(ms_collision_narrowphase) << "%)\n";
-                        oss << "  collision solve: " << s.ms_collision_solve << " (" << pct(s.ms_collision_solve) << "%)\n";
-                        oss << "  self collision contacts: " << s.ms_self_collision_bvh << " (" << pct(s.ms_self_collision_bvh) << "%)\n";
-                        oss << "  self collision solve: " << s.ms_self_collision_solve << " (" << pct(s.ms_self_collision_solve) << "%)\n";
-                        oss << "  friction: " << s.ms_friction << " (" << pct(s.ms_friction) << "%)";
-                        jr.timing_report = oss.str();
-                    }
+                    oss << "XPBD timing breakdown (ms)\n";
+                    oss << "  total: " << s.ms_total << "\n";
+                    oss << "  bvh build: " << s.ms_bvh_build << " (" << pct(s.ms_bvh_build) << "%)\n";
+                    oss << "  predict: " << s.ms_predict << " (" << pct(s.ms_predict) << "%)\n";
+                    oss << "  wind: " << s.ms_wind << " (" << pct(s.ms_wind) << "%)\n";
+                    oss << "  stretch: " << s.ms_stretch << " (" << pct(s.ms_stretch) << "%)\n";
+                    oss << "  bend: " << s.ms_bend << " (" << pct(s.ms_bend) << "%)\n";
+                    oss << "  collision contacts total: " << s.ms_collision_bvh << " (" << pct(s.ms_collision_bvh) << "%)\n";
+                    oss << "    broad phase: " << ms_collision_broadphase << " (" << pct(ms_collision_broadphase) << "%)\n";
+                    oss << "      candidates (AABB): " << s.ms_candidates << " (" << pct(s.ms_candidates) << "%)\n";
+                    oss << "      filters/bookkeeping: " << s.ms_collision_broad << " (" << pct(s.ms_collision_broad) << "%)\n";
+                    oss << "    narrow phase (BVH query): " << ms_collision_narrowphase << " (" << pct(ms_collision_narrowphase) << "%)\n";
+                    oss << "  collision solve: " << s.ms_collision_solve << " (" << pct(s.ms_collision_solve) << "%)\n";
+                    oss << "  self collision contacts: " << s.ms_self_collision_bvh << " (" << pct(s.ms_self_collision_bvh) << "%)\n";
+                    oss << "  self collision solve: " << s.ms_self_collision_solve << " (" << pct(s.ms_self_collision_solve) << "%)\n";
+                    oss << "  friction: " << s.ms_friction << " (" << pct(s.ms_friction) << "%)";
+                    jr.timing_report = oss.str();
                 }
 
                 jr.ok = ok;
