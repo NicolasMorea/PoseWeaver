@@ -384,14 +384,25 @@ namespace poseweaver
     void Renderer::ensure_sketch2rig_rig_loaded(AppState& state)
     {
         auto& data = m_viewer.data(m_sketch2rig_rig_mesh_index);
+        const auto clear_smpl_fit = [&]()
+        {
+            state.scene_view_smpl_fit_valid = false;
+            state.scene_view_smpl_fit_scale = { 1.0f, 1.0f, 1.0f };
+            state.scene_view_smpl_fit_translation = { 0.0f, 0.0f, 0.0f };
+            state.scene_view_smpl_fit_rms = 0.0f;
+        };
 
         const std::string desired = state.sketch2rig.last_output_path;
         if (desired.empty())
         {
             data.set_visible(false);
+            if (state.scene_view_smpl_fit_valid)
+                m_smplh_deform_dirty = true;
+            m_sketch2rig_rig_scene_joints.resize(0, 0);
             state.scene_view_target_valid = false;
             state.scene_view_raw_rig_root_valid = false;
             state.scene_view_raw_rig_height_valid = false;
+            clear_smpl_fit();
             return;
         }
 
@@ -401,7 +412,10 @@ namespace poseweaver
             m_sketch2rig_rig_source_valid = false;
             m_sketch2rig_rig_last_error.clear();
             m_sketch2rig_rig_source_joints.resize(0, 0);
+            m_sketch2rig_rig_scene_joints.resize(0, 0);
             m_sketch2rig_rig_parents.clear();
+            m_smplh_deform_dirty = true;
+            clear_smpl_fit();
 
             std::string text;
             std::string err;
@@ -426,9 +440,13 @@ namespace poseweaver
         if (!m_sketch2rig_rig_source_valid || m_sketch2rig_rig_source_joints.rows() <= 0)
         {
             data.set_visible(false);
+            if (state.scene_view_smpl_fit_valid)
+                m_smplh_deform_dirty = true;
+            m_sketch2rig_rig_scene_joints.resize(0, 0);
             state.scene_view_target_valid = false;
             state.scene_view_raw_rig_root_valid = false;
             state.scene_view_raw_rig_height_valid = false;
+            clear_smpl_fit();
             return;
         }
 
@@ -475,6 +493,15 @@ namespace poseweaver
         {
             state.scene_view_raw_rig_root_valid = false;
             state.scene_view_raw_rig_height_valid = false;
+        }
+
+        if (m_sketch2rig_rig_scene_joints.rows() != centered_camera_joints.rows()
+            || m_sketch2rig_rig_scene_joints.cols() != centered_camera_joints.cols()
+            || !m_sketch2rig_rig_scene_joints.isApprox(centered_camera_joints, 1e-10))
+        {
+            m_sketch2rig_rig_scene_joints = centered_camera_joints;
+            m_smplh_deform_dirty = true;
+            clear_smpl_fit();
         }
 
         state.scene_view_target_eye = {

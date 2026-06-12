@@ -67,6 +67,7 @@ namespace poseweaver
 
         void init(GLFWwindow* window);
         void render(AppState& state, int fb_width, int fb_height);
+        void reset_computed_state(AppState& state);
 
         SceneCameraInfo scene_camera_info() const;
 
@@ -83,7 +84,11 @@ namespace poseweaver
             int width,
             int height,
             const std::string& uv_json_path,
+            float uv_from_cloth_scale,
+            float uv_from_cloth_offset_x,
+            float uv_from_cloth_offset_y,
             std::vector<unsigned char>& out_rgba,
+            std::vector<unsigned char>& out_debug_rgba,
             int& out_tested_count,
             int& out_removed_count,
             std::string* out_error);
@@ -121,6 +126,8 @@ namespace poseweaver
         void ensure_garment_mesh_loaded(AppState& state);
         void ensure_smplh_mesh_loaded(AppState& state);
         void ensure_sketch2rig_rig_loaded(AppState& state);
+        bool fit_smpl_to_sketch_rig(AppState& state, const Eigen::MatrixXd& vertices);
+        void apply_smpl_scene_transform(const AppState& state, Eigen::MatrixXd& vertices) const;
 
         bool ensure_smplh_model_loaded(AppState& state, SmplType gender);
         void ensure_garment_to_smpl_mapping(AppState& state);
@@ -165,6 +172,7 @@ namespace poseweaver
         int m_smplh_mesh_index = 3;
         int m_wind_arrow_mesh_index = 4;
         int m_sketch2rig_rig_mesh_index = 5;
+        int m_cloth_render_mesh_index = 6;
 
         // Indexed by mesh index in m_viewer.data_list.
         std::array<MeshShaderVariant, 8> m_mesh_shader_variant{};
@@ -186,16 +194,13 @@ namespace poseweaver
         Eigen::MatrixXd m_smplh_vertices;
 
         Eigen::MatrixXd m_sketch2rig_rig_source_joints;
+        Eigen::MatrixXd m_sketch2rig_rig_scene_joints;
         std::vector<int> m_sketch2rig_rig_parents;
         int m_sketch2rig_rig_image_size = 512;
         bool m_sketch2rig_rig_source_valid = false;
 
         bool m_smplh_deform_dirty = true;
         bool m_smplh_last_show_character = true;
-        bool m_smplh_last_raw_rig_root_valid = false;
-        Eigen::Vector3d m_smplh_last_raw_rig_root = Eigen::Vector3d::Zero();
-        bool m_smplh_last_raw_rig_height_valid = false;
-        double m_smplh_last_raw_rig_height = 0.0;
         bool m_garment_last_show_mesh = false;
 
         bool m_garment_vertex_merge_settings_valid = false;

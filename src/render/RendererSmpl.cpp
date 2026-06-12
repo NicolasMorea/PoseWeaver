@@ -2,12 +2,138 @@
 #include "core/Paths.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <string>
 
 namespace poseweaver
 {
+    bool Renderer::fit_smpl_to_sketch_rig(AppState& state, const Eigen::MatrixXd& vertices)
+    {
+        state.scene_view_smpl_fit_valid = false;
+        state.scene_view_smpl_fit_scale = { 1.0f, 1.0f, 1.0f };
+        state.scene_view_smpl_fit_translation = { 0.0f, 0.0f, 0.0f };
+        state.scene_view_smpl_fit_rms = 0.0f;
+
+        if (!m_smplh_loaded_pose_mirror_x
+            || vertices.cols() != 3
+            || m_sketch2rig_rig_scene_joints.cols() != 3
+            || m_smplh_model.J_regressor.cols() != vertices.rows())
+            return false;
+
+        const Eigen::MatrixXd smpl_joints = m_smplh_model.J_regressor * vertices;
+        const int joint_count = std::min<int>(
+            22,
+            std::min<int>(smpl_joints.rows(), m_sketch2rig_rig_scene_joints.rows()));
+        if (joint_count < 2)
+            return false;
+
+        Eigen::VectorXd weights = Eigen::VectorXd::Zero(joint_count);
+        for (int child = 0; child < joint_count && child < (int)m_sketch2rig_rig_parents.size(); ++child)
+        {
+            const int parent = m_sketch2rig_rig_parents[(size_t)child];
+            if (parent >= 0 && parent < joint_count)
+            {
+                weights[child] += 1.0;
+                weights[parent] += 1.0;
+            }
+        }
+
+        const double weight_sum = weights.sum();
+        if (!(weight_sum > 0.0) || !std::isfinite(weight_sum))
+            return false;
+
+        Eigen::Vector3d source_mean = Eigen::Vector3d::Zero();
+        Eigen::Vector3d target_mean = Eigen::Vector3d::Zero();
+        for (int i = 0; i < joint_count; ++i)
+        {
+            const Eigen::Vector3d source = smpl_joints.row(i).transpose();
+            const Eigen::Vector3d target = m_sketch2rig_rig_scene_joints.row(i).transpose();
+            if (!source.allFinite() || !target.allFinite())
+                return false;
+            source_mean.noalias() += weights[i] * source;
+            target_mean.noalias() += weights[i] * target;
+        }
+        source_mean /= weight_sum;
+        target_mean /= weight_sum;
+
+        double xy_numerator = 0.0;
+        double xy_denominator = 0.0;
+        double z_numerator = 0.0;
+        double z_denominator = 0.0;
+        for (int i = 0; i < joint_count; ++i)
+        {
+            const Eigen::Vector3d source = smpl_joints.row(i).transpose() - source_mean;
+            const Eigen::Vector3d target = m_sketch2rig_rig_scene_joints.row(i).transpose() - target_mean;
+            const double weight = weights[i];
+            xy_numerator += weight * (source.x() * target.x() + source.y() * target.y());
+            xy_denominator += weight * (source.x() * source.x() + source.y() * source.y());
+            z_numerator += weight * source.z() * target.z();
+            z_denominator += weight * source.z() * source.z();
+        }
+
+        if (!(xy_denominator > 1e-12) || !std::isfinite(xy_denominator))
+            return false;
+
+        const double scale_xy = std::clamp(xy_numerator / xy_denominator, 0.05, 20.0);
+        const double scale_z = (z_denominator > 1e-12 && std::isfinite(z_denominator))
+            ? std::clamp(z_numerator / z_denominator, 0.05, 20.0)
+            : scale_xy;
+        if (!std::isfinite(scale_xy) || !std::isfinite(scale_z))
+            return false;
+
+        const Eigen::Vector3d scale(scale_xy, scale_xy, scale_z);
+        const Eigen::Vector3d translation = target_mean - scale.cwiseProduct(source_mean);
+        if (!translation.allFinite())
+            return false;
+
+        double squared_error = 0.0;
+        for (int i = 0; i < joint_count; ++i)
+        {
+            const Eigen::Vector3d fitted =
+                scale.cwiseProduct(smpl_joints.row(i).transpose()) + translation;
+            const Eigen::Vector3d delta =
+                fitted - m_sketch2rig_rig_scene_joints.row(i).transpose();
+            squared_error += weights[i] * delta.squaredNorm();
+        }
+        const double rms = std::sqrt(squared_error / weight_sum);
+
+        state.scene_view_smpl_fit_scale = {
+            (float)scale_xy,
+            (float)scale_xy,
+            (float)scale_z
+        };
+        state.scene_view_smpl_fit_translation = {
+            (float)translation.x(),
+            (float)translation.y(),
+            (float)translation.z()
+        };
+        state.scene_view_smpl_fit_rms = std::isfinite(rms) ? (float)rms : 0.0f;
+        state.scene_view_smpl_fit_valid = true;
+        return true;
+    }
+
+    void Renderer::apply_smpl_scene_transform(const AppState& state, Eigen::MatrixXd& vertices) const
+    {
+        if (!state.scene_view_smpl_fit_valid || vertices.cols() != 3)
+            return;
+
+        const Eigen::RowVector3d scale(
+            (double)state.scene_view_smpl_fit_scale[0],
+            (double)state.scene_view_smpl_fit_scale[1],
+            (double)state.scene_view_smpl_fit_scale[2]);
+        const Eigen::RowVector3d translation(
+            (double)state.scene_view_smpl_fit_translation[0],
+            (double)state.scene_view_smpl_fit_translation[1],
+            (double)state.scene_view_smpl_fit_translation[2]);
+        if (!scale.allFinite() || !translation.allFinite())
+            return;
+
+        vertices.array().rowwise() *= scale.array();
+        vertices.rowwise() += translation;
+    }
+
     bool Renderer::ensure_smplh_model_loaded(AppState& state, SmplType gender)
     {
         if (m_smplh_loaded && m_smplh_loaded_gender == gender)
@@ -192,30 +318,6 @@ namespace poseweaver
         }
 
         bool recomputed_vertices = false;
-        const bool align_to_raw_rig =
-            m_smplh_loaded_pose_mirror_x && state.scene_view_raw_rig_root_valid;
-        const bool scale_to_raw_rig =
-            align_to_raw_rig && state.scene_view_raw_rig_height_valid;
-        const Eigen::Vector3d raw_rig_root(
-            (double)state.scene_view_raw_rig_root[0],
-            (double)state.scene_view_raw_rig_root[1],
-            (double)state.scene_view_raw_rig_root[2]);
-        const double raw_rig_height = (double)state.scene_view_raw_rig_height;
-        if (align_to_raw_rig != m_smplh_last_raw_rig_root_valid
-            || (align_to_raw_rig && (raw_rig_root - m_smplh_last_raw_rig_root).squaredNorm() > 1e-12))
-        {
-            m_smplh_deform_dirty = true;
-            m_smplh_last_raw_rig_root_valid = align_to_raw_rig;
-            m_smplh_last_raw_rig_root = raw_rig_root;
-        }
-        if (scale_to_raw_rig != m_smplh_last_raw_rig_height_valid
-            || (scale_to_raw_rig && std::abs(raw_rig_height - m_smplh_last_raw_rig_height) > 1e-9))
-        {
-            m_smplh_deform_dirty = true;
-            m_smplh_last_raw_rig_height_valid = scale_to_raw_rig;
-            m_smplh_last_raw_rig_height = raw_rig_height;
-        }
-
         if (m_smplh_deform_dirty || m_smplh_vertices.rows() == 0)
         {
             MatrixX3dRM V_skinned;
@@ -230,29 +332,10 @@ namespace poseweaver
             }
             if (m_smplh_loaded_pose_mirror_x)
                 V_skinned.col(0) *= -1.0;
-            if (align_to_raw_rig
-                && m_smplh_model.J_regressor.rows() > 0
-                && m_smplh_model.J_regressor.cols() == V_skinned.rows())
-            {
-                const Eigen::MatrixXd joints = m_smplh_model.J_regressor * V_skinned;
-                if (joints.rows() > 0)
-                {
-                    const Eigen::Vector3d current_root = joints.row(0).transpose();
-                    double scale = 1.0;
-                    if (scale_to_raw_rig)
-                    {
-                        const double smpl_height = joints.col(1).maxCoeff() - joints.col(1).minCoeff();
-                        if (smpl_height > 1e-6 && std::isfinite(smpl_height)
-                            && raw_rig_height > 1e-6 && std::isfinite(raw_rig_height))
-                            scale = std::clamp(raw_rig_height / smpl_height, 0.05, 20.0);
-                    }
-
-                    V_skinned.rowwise() -= current_root.transpose();
-                    V_skinned *= scale;
-                    V_skinned.rowwise() += raw_rig_root.transpose();
-                }
-            }
-            m_smplh_vertices = V_skinned;
+            Eigen::MatrixXd display_vertices = V_skinned;
+            (void)fit_smpl_to_sketch_rig(state, display_vertices);
+            apply_smpl_scene_transform(state, display_vertices);
+            m_smplh_vertices = std::move(display_vertices);
             recomputed_vertices = true;
             m_smplh_deform_dirty = false;
         }

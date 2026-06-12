@@ -15,6 +15,7 @@
 #include <glad/glad.h>
 #include <igl/frustum.h>
 #include <igl/look_at.h>
+#include <stb_image.h>
 #include <stb_image_write.h>
 
 namespace poseweaver
@@ -148,6 +149,161 @@ namespace poseweaver
             return false;
         }
 
+        struct UvSourceData
+        {
+            int width = 0;
+            int height = 0;
+            std::vector<float> uv;   // [2, height, width]
+            std::vector<float> mask; // [height, width]
+        };
+
+        static std::string lowercase_extension(const std::filesystem::path& path)
+        {
+            std::string ext = path.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                [](unsigned char c) { return (char)std::tolower(c); });
+            return ext;
+        }
+
+        static bool load_uv_source_png(
+            const std::filesystem::path& path,
+            UvSourceData& out,
+            std::string* out_error)
+        {
+            int iw = 0, ih = 0, comp = 0;
+            stbi_uc* data = stbi_load(path.string().c_str(), &iw, &ih, &comp, 4);
+            if (!data)
+            {
+                if (out_error)
+                    *out_error = "could not load UV PNG: " + path.string();
+                return false;
+            }
+
+            if (iw <= 0 || ih <= 0)
+            {
+                stbi_image_free(data);
+                if (out_error)
+                    *out_error = "invalid UV PNG dimensions: " + path.string();
+                return false;
+            }
+
+            const size_t count = (size_t)iw * (size_t)ih;
+            out.width = iw;
+            out.height = ih;
+            out.uv.assign(count * 2u, 0.0f);
+            out.mask.assign(count, 0.0f);
+
+            const bool has_alpha = comp >= 4;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const unsigned char r = data[i * 4u + 0u];
+                const unsigned char g = data[i * 4u + 1u];
+                const unsigned char b = data[i * 4u + 2u];
+                const unsigned char a = data[i * 4u + 3u];
+                out.uv[i] = (float)r / 255.0f;
+                out.uv[count + i] = (float)g / 255.0f;
+                out.mask[i] = has_alpha
+                    ? (float)a / 255.0f
+                    : ((r != 0u || g != 0u || b != 0u) ? 1.0f : 0.0f);
+            }
+
+            stbi_image_free(data);
+            return true;
+        }
+
+        static bool load_uv_source_json(
+            const std::filesystem::path& path,
+            UvSourceData& out,
+            std::string* out_error)
+        {
+            const std::string uv_json = read_text_file_displacement(path);
+            if (uv_json.empty())
+            {
+                if (out_error)
+                    *out_error = "could not read " + path.string();
+                return false;
+            }
+
+            std::filesystem::path uv_npz_path = parse_json_string_field_displacement(uv_json, "uv_npz_path");
+            if (uv_npz_path.empty())
+                uv_npz_path = path.parent_path() / (path.stem().string() + "_uv.npz");
+            if (uv_npz_path.is_relative())
+                uv_npz_path = path.parent_path() / uv_npz_path;
+
+            cnpy::NpyArray uv_arr;
+            cnpy::NpyArray mask_arr;
+            try
+            {
+                uv_arr = cnpy::npz_load(uv_npz_path.string(), "uv");
+                mask_arr = cnpy::npz_load(uv_npz_path.string(), "mask");
+            }
+            catch (const std::exception& e)
+            {
+                if (out_error)
+                    *out_error = std::string("could not load UV NPZ: ") + e.what();
+                return false;
+            }
+
+            if (uv_arr.shape.size() != 3 || uv_arr.shape[0] < 2 || mask_arr.shape.size() != 2)
+            {
+                if (out_error)
+                    *out_error = "unexpected UV NPZ shape";
+                return false;
+            }
+
+            const int uv_h = (int)uv_arr.shape[1];
+            const int uv_w = (int)uv_arr.shape[2];
+            if (uv_w <= 0 || uv_h <= 0 || (int)mask_arr.shape[0] != uv_h || (int)mask_arr.shape[1] != uv_w)
+            {
+                if (out_error)
+                    *out_error = "UV and mask dimensions do not match";
+                return false;
+            }
+            if (!((uv_arr.word_size == sizeof(float) || uv_arr.word_size == sizeof(double))
+                    && (mask_arr.word_size == sizeof(float) || mask_arr.word_size == sizeof(double))))
+            {
+                if (out_error)
+                    *out_error = "UV NPZ arrays are not float arrays";
+                return false;
+            }
+
+            const size_t count = (size_t)uv_w * (size_t)uv_h;
+            out.width = uv_w;
+            out.height = uv_h;
+            out.uv.assign(count * 2u, 0.0f);
+            out.mask.assign(count, 0.0f);
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (!npy_float_at(mask_arr, i, &out.mask[i])
+                    || !npy_float_at(uv_arr, i, &out.uv[i])
+                    || !npy_float_at(uv_arr, count + i, &out.uv[count + i]))
+                {
+                    if (out_error)
+                        *out_error = "failed to read UV NPZ arrays";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static bool load_uv_source(
+            const std::filesystem::path& path,
+            UvSourceData& out,
+            std::string* out_error)
+        {
+            if (path.empty())
+            {
+                if (out_error)
+                    *out_error = "missing UV source path";
+                return false;
+            }
+
+            const std::string ext = lowercase_extension(path);
+            if (ext == ".png")
+                return load_uv_source_png(path, out, out_error);
+            return load_uv_source_json(path, out, out_error);
+        }
+
         static bool make_target_camera_matrices(
             const AppState& state,
             float dnear,
@@ -256,6 +412,96 @@ namespace poseweaver
             if (loc >= 0)
                 glUniform1i(loc, value);
         }
+
+        static void insert_depth_layer(float depth, float& first, float& second)
+        {
+            if (!std::isfinite(depth) || depth < 0.0f || depth > 1.0f)
+                return;
+
+            constexpr float kSameLayerEps = 1e-5f;
+            if (std::abs(depth - first) <= kSameLayerEps || std::abs(depth - second) <= kSameLayerEps)
+                return;
+
+            if (depth < first)
+            {
+                second = first;
+                first = depth;
+                return;
+            }
+            if (depth < second)
+                second = depth;
+        }
+
+        static void rasterize_depth_layers(
+            const Eigen::MatrixXd& vertices,
+            const Eigen::MatrixXi& faces,
+            const Eigen::Matrix4f& view,
+            const Eigen::Matrix4f& proj,
+            int width,
+            int height,
+            std::vector<float>& first_depth,
+            std::vector<float>& second_depth)
+        {
+            first_depth.assign((size_t)width * (size_t)height, 1.0f);
+            second_depth.assign((size_t)width * (size_t)height, 1.0f);
+
+            if (width <= 0 || height <= 0 || vertices.rows() <= 0 || faces.rows() <= 0)
+                return;
+
+            for (int fi = 0; fi < faces.rows(); ++fi)
+            {
+                const int i0 = faces(fi, 0);
+                const int i1 = faces(fi, 1);
+                const int i2 = faces(fi, 2);
+                if (i0 < 0 || i1 < 0 || i2 < 0
+                    || i0 >= vertices.rows()
+                    || i1 >= vertices.rows()
+                    || i2 >= vertices.rows())
+                    continue;
+
+                float x0 = 0.0f;
+                float y0 = 0.0f;
+                float z0 = 1.0f;
+                float x1 = 0.0f;
+                float y1 = 0.0f;
+                float z1 = 1.0f;
+                float x2 = 0.0f;
+                float y2 = 0.0f;
+                float z2 = 1.0f;
+                if (!project_to_image_depth(view, proj, vertices.row(i0).transpose(), width, height, x0, y0, z0)
+                    || !project_to_image_depth(view, proj, vertices.row(i1).transpose(), width, height, x1, y1, z1)
+                    || !project_to_image_depth(view, proj, vertices.row(i2).transpose(), width, height, x2, y2, z2))
+                    continue;
+
+                const float area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+                if (!(std::abs(area) > 1e-8f) || !std::isfinite(area))
+                    continue;
+
+                const int min_x = std::clamp((int)std::floor(std::min({ x0, x1, x2 })), 0, width - 1);
+                const int max_x = std::clamp((int)std::ceil(std::max({ x0, x1, x2 })), 0, width - 1);
+                const int min_y = std::clamp((int)std::floor(std::min({ y0, y1, y2 })), 0, height - 1);
+                const int max_y = std::clamp((int)std::ceil(std::max({ y0, y1, y2 })), 0, height - 1);
+
+                for (int py = min_y; py <= max_y; ++py)
+                {
+                    const float sy = (float)py + 0.5f;
+                    for (int px = min_x; px <= max_x; ++px)
+                    {
+                        const float sx = (float)px + 0.5f;
+                        const float w0 = ((x1 - sx) * (y2 - sy) - (y1 - sy) * (x2 - sx)) / area;
+                        const float w1 = ((x2 - sx) * (y0 - sy) - (y2 - sy) * (x0 - sx)) / area;
+                        const float w2 = 1.0f - w0 - w1;
+                        constexpr float kEdgeEps = -1e-5f;
+                        if (w0 < kEdgeEps || w1 < kEdgeEps || w2 < kEdgeEps)
+                            continue;
+
+                        const float depth = w0 * z0 + w1 * z1 + w2 * z2;
+                        const size_t idx = (size_t)(height - 1 - py) * (size_t)width + (size_t)px;
+                        insert_depth_layer(depth, first_depth[idx], second_depth[idx]);
+                    }
+                }
+            }
+        }
     }
 
     void Renderer::process_canva_displacement_map(AppState& state)
@@ -294,58 +540,23 @@ namespace poseweaver
             return;
         }
 
-        std::filesystem::path uv_json_path = state.canva_displacement_uv_json_path;
-        if (uv_json_path.empty())
+        std::filesystem::path uv_source_path = state.canva_displacement_uv_json_path;
+        if (uv_source_path.empty())
         {
-            fail("missing Sketch2UV result path");
+            fail("missing UV source path");
             return;
         }
 
-        const std::string uv_json = read_text_file_displacement(uv_json_path);
-        if (uv_json.empty())
+        UvSourceData uv_source;
+        std::string uv_source_error;
+        if (!load_uv_source(uv_source_path, uv_source, &uv_source_error))
         {
-            fail("could not read " + uv_json_path.string());
+            fail(uv_source_error.empty() ? "could not load UV source" : uv_source_error);
             return;
         }
 
-        std::filesystem::path uv_npz_path = parse_json_string_field_displacement(uv_json, "uv_npz_path");
-        if (uv_npz_path.empty())
-            uv_npz_path = uv_json_path.parent_path() / (uv_json_path.stem().string() + "_uv.npz");
-        if (uv_npz_path.is_relative())
-            uv_npz_path = uv_json_path.parent_path() / uv_npz_path;
-
-        cnpy::NpyArray uv_arr;
-        cnpy::NpyArray mask_arr;
-        try
-        {
-            uv_arr = cnpy::npz_load(uv_npz_path.string(), "uv");
-            mask_arr = cnpy::npz_load(uv_npz_path.string(), "mask");
-        }
-        catch (const std::exception& e)
-        {
-            fail(std::string("could not load UV NPZ: ") + e.what());
-            return;
-        }
-
-        if (uv_arr.shape.size() != 3 || uv_arr.shape[0] < 2 || mask_arr.shape.size() != 2)
-        {
-            fail("unexpected Sketch2UV NPZ shape");
-            return;
-        }
-
-        const int uv_h = (int)uv_arr.shape[1];
-        const int uv_w = (int)uv_arr.shape[2];
-        if (uv_w <= 0 || uv_h <= 0 || (int)mask_arr.shape[0] != uv_h || (int)mask_arr.shape[1] != uv_w)
-        {
-            fail("UV and mask dimensions do not match");
-            return;
-        }
-        if (!((uv_arr.word_size == sizeof(float) || uv_arr.word_size == sizeof(double))
-                && (mask_arr.word_size == sizeof(float) || mask_arr.word_size == sizeof(double))))
-        {
-            fail("UV NPZ arrays are not float arrays");
-            return;
-        }
+        const int uv_h = uv_source.height;
+        const int uv_w = uv_source.width;
 
         Eigen::Matrix4f view;
         Eigen::Matrix4f proj;
@@ -416,10 +627,9 @@ namespace poseweaver
                 float mask = 0.0f;
                 float u = 0.0f;
                 float v = 0.0f;
-                if (!npy_float_at(mask_arr, pix, &mask)
-                    || !npy_float_at(uv_arr, pix, &u)
-                    || !npy_float_at(uv_arr, (size_t)uv_h * (size_t)uv_w + pix, &v))
-                    continue;
+                mask = uv_source.mask[pix];
+                u = uv_source.uv[pix];
+                v = uv_source.uv[(size_t)uv_h * (size_t)uv_w + pix];
                 if (!(mask > 0.5f) || !std::isfinite(u) || !std::isfinite(v))
                     continue;
 
@@ -516,12 +726,17 @@ namespace poseweaver
         int width,
         int height,
         const std::string& uv_json_path_string,
+        float uv_from_cloth_scale,
+        float uv_from_cloth_offset_x,
+        float uv_from_cloth_offset_y,
         std::vector<unsigned char>& out_rgba,
+        std::vector<unsigned char>& out_debug_rgba,
         int& out_tested_count,
         int& out_removed_count,
         std::string* out_error)
     {
         out_rgba.clear();
+        out_debug_rgba.clear();
         out_tested_count = 0;
         out_removed_count = 0;
 
@@ -536,6 +751,11 @@ namespace poseweaver
             return fail("invalid cloth layer size");
         if (cloth_rgba.size() < (size_t)width * (size_t)height * 4u)
             return fail("cloth layer pixel buffer is incomplete");
+        if (!(uv_from_cloth_scale > 1e-6f)
+            || !std::isfinite(uv_from_cloth_scale)
+            || !std::isfinite(uv_from_cloth_offset_x)
+            || !std::isfinite(uv_from_cloth_offset_y))
+            return fail("invalid UV-to-cloth layer transform");
         if (!state.scene_view_target_valid)
             return fail("predicted camera view is not available");
 
@@ -553,43 +773,19 @@ namespace poseweaver
         auto& garment = m_viewer.data(m_garment_mesh_index);
         if (garment.V.rows() <= 0 || garment.F.rows() <= 0)
             return fail("cloth mesh is not ready");
+        auto& smpl = m_viewer.data(m_smplh_mesh_index);
 
-        std::filesystem::path uv_json_path = uv_json_path_string;
-        if (uv_json_path.empty())
-            return fail("missing displacement UV prediction path");
+        std::filesystem::path uv_source_path = uv_json_path_string;
+        if (uv_source_path.empty())
+            return fail("missing UV source path");
 
-        const std::string uv_json = read_text_file_displacement(uv_json_path);
-        if (uv_json.empty())
-            return fail("could not read " + uv_json_path.string());
+        UvSourceData uv_source;
+        std::string uv_source_error;
+        if (!load_uv_source(uv_source_path, uv_source, &uv_source_error))
+            return fail(uv_source_error.empty() ? "could not load UV source" : uv_source_error);
 
-        std::filesystem::path uv_npz_path = parse_json_string_field_displacement(uv_json, "uv_npz_path");
-        if (uv_npz_path.empty())
-            uv_npz_path = uv_json_path.parent_path() / (uv_json_path.stem().string() + "_uv.npz");
-        if (uv_npz_path.is_relative())
-            uv_npz_path = uv_json_path.parent_path() / uv_npz_path;
-
-        cnpy::NpyArray uv_arr;
-        cnpy::NpyArray mask_arr;
-        try
-        {
-            uv_arr = cnpy::npz_load(uv_npz_path.string(), "uv");
-            mask_arr = cnpy::npz_load(uv_npz_path.string(), "mask");
-        }
-        catch (const std::exception& e)
-        {
-            return fail(std::string("could not load displacement UV NPZ: ") + e.what());
-        }
-
-        if (uv_arr.shape.size() != 3 || uv_arr.shape[0] < 2 || mask_arr.shape.size() != 2)
-            return fail("unexpected displacement UV NPZ shape");
-
-        const int uv_h = (int)uv_arr.shape[1];
-        const int uv_w = (int)uv_arr.shape[2];
-        if (uv_w <= 0 || uv_h <= 0 || (int)mask_arr.shape[0] != uv_h || (int)mask_arr.shape[1] != uv_w)
-            return fail("UV and mask dimensions do not match");
-        if (!((uv_arr.word_size == sizeof(float) || uv_arr.word_size == sizeof(double))
-                && (mask_arr.word_size == sizeof(float) || mask_arr.word_size == sizeof(double))))
-            return fail("UV NPZ arrays are not float arrays");
+        const int uv_h = uv_source.height;
+        const int uv_w = uv_source.width;
 
         Eigen::Matrix4f view;
         Eigen::Matrix4f proj;
@@ -691,6 +887,7 @@ namespace poseweaver
         const Eigen::Matrix4f old_norm = core.norm;
         const Eigen::Vector4f old_background = core.background_color;
         const bool old_garment_visible = garment.is_visible;
+        const bool old_smpl_visible = smpl.is_visible;
 
         core.viewport = Eigen::Vector4f(0.0f, 0.0f, (float)width, (float)height);
         core.view = view;
@@ -735,7 +932,35 @@ namespace poseweaver
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, cloth_depth_gl.data());
 
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        if (smpl.dirty)
+        {
+            smpl.updateGL(smpl, smpl.invert_normals, smpl.meshgl);
+            smpl.dirty = igl::opengl::MeshGL::DIRTY_NONE;
+        }
+
+        smpl.set_visible(true);
+        if (smpl.meshgl.is_initialized)
+        {
+            smpl.meshgl.bind_mesh();
+            const GLuint prog = smpl.meshgl.shader_mesh;
+            set_uniform_matrix4_if_present(prog, "view", core.view);
+            set_uniform_matrix4_if_present(prog, "proj", core.proj);
+            set_uniform_matrix4_if_present(prog, "normal_matrix", core.norm);
+            set_uniform_1f_if_present(prog, "texture_factor", 0.0f);
+            set_uniform_1f_if_present(prog, "matcap_factor", 0.0f);
+            set_uniform_1f_if_present(prog, "double_sided", 1.0f);
+            set_uniform_1i_if_present(prog, "toon_outline_pass", 0);
+            set_uniform_1f_if_present(prog, "toon_outline_width", 0.0f);
+            smpl.meshgl.draw_mesh(true);
+        }
+
+        std::vector<float> smpl_depth_gl((size_t)width * (size_t)height, 1.0f);
+        glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT, smpl_depth_gl.data());
+
         garment.is_visible = old_garment_visible;
+        smpl.is_visible = old_smpl_visible;
         core.viewport = old_core_viewport;
         core.view = old_view;
         core.proj = old_proj;
@@ -767,36 +992,80 @@ namespace poseweaver
         glDeleteFramebuffers(1, &fbo);
 
         out_rgba = cloth_rgba;
-        constexpr float kDepthEps = 0.0015f;
+        out_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
+        const float depth_margin = std::clamp(state.cloth_fitting_depth_margin, 0.0f, 0.05f);
         const size_t uv_count = (size_t)uv_w * (size_t)uv_h;
+        std::vector<float> cloth_depth_cpu;
+        std::vector<float> cloth_second_depth_cpu;
+        rasterize_depth_layers(
+            garment.V,
+            garment.F,
+            view,
+            proj,
+            width,
+            height,
+            cloth_depth_cpu,
+            cloth_second_depth_cpu);
 
+        auto set_debug_pixel = [&](size_t pix, unsigned char r, unsigned char g, unsigned char b)
+        {
+            unsigned char* dst = out_debug_rgba.data() + pix * 4u;
+            dst[0] = r;
+            dst[1] = g;
+            dst[2] = b;
+            dst[3] = 255u;
+        };
+
+        // Cloth fitting debug colors:
+        // grey=no UV, blue=UV miss, cyan=projection miss,
+        // black=UV pixel outside source cloth with no cloth over match,
+        // dark grey=UV pixel outside source cloth with cloth over match,
+        // red=no cloth, orange=matching SMPL occludes cloth,
+        // crimson=other SMPL occludes cloth but source cloth remains visible,
+        // green=cloth on match, yellow=cloth over other SMPL, magenta=two cloth layers,
+        // purple=two cloth layers over another SMPL layer.
         for (int y = 0; y < height; ++y)
         {
-            const int uv_y = std::clamp(
-                (int)std::floor((((float)y + 0.5f) / (float)height) * (float)uv_h),
-                0,
-                uv_h - 1);
+            const float uv_layer_y =
+                uv_from_cloth_scale * ((float)y + 0.5f) + uv_from_cloth_offset_y;
+            const bool uv_y_valid = uv_layer_y >= 0.0f && uv_layer_y < (float)height;
+            const int uv_y = uv_y_valid
+                ? std::clamp(
+                    (int)std::floor((uv_layer_y / (float)height) * (float)uv_h),
+                    0,
+                    uv_h - 1)
+                : 0;
             for (int x = 0; x < width; ++x)
             {
                 const size_t out_pix = (size_t)y * (size_t)width + (size_t)x;
-                if (out_rgba[out_pix * 4u + 3u] == 0u)
-                    continue;
+                const bool source_cloth_pixel = out_rgba[out_pix * 4u + 3u] != 0u;
 
-                const int uv_x = std::clamp(
-                    (int)std::floor((((float)x + 0.5f) / (float)width) * (float)uv_w),
-                    0,
-                    uv_w - 1);
+                const float uv_layer_x =
+                    uv_from_cloth_scale * ((float)x + 0.5f) + uv_from_cloth_offset_x;
+                const bool uv_x_valid = uv_layer_x >= 0.0f && uv_layer_x < (float)width;
+                const int uv_x = uv_x_valid
+                    ? std::clamp(
+                        (int)std::floor((uv_layer_x / (float)width) * (float)uv_w),
+                        0,
+                        uv_w - 1)
+                    : 0;
                 const size_t uv_pix = (size_t)uv_y * (size_t)uv_w + (size_t)uv_x;
 
                 float mask = 0.0f;
                 float u = 0.0f;
                 float v = 0.0f;
-                if (!npy_float_at(mask_arr, uv_pix, &mask)
-                    || !npy_float_at(uv_arr, uv_pix, &u)
-                    || !npy_float_at(uv_arr, uv_count + uv_pix, &v))
-                    continue;
+                if (uv_x_valid && uv_y_valid)
+                {
+                    mask = uv_source.mask[uv_pix];
+                    u = uv_source.uv[uv_pix];
+                    v = uv_source.uv[uv_count + uv_pix];
+                }
                 if (!(mask > 0.5f) || !std::isfinite(u) || !std::isfinite(v))
+                {
+                    if (source_cloth_pixel)
+                        set_debug_pixel(out_pix, 128u, 128u, 128u);
                     continue;
+                }
 
                 u = std::clamp(u, 0.0f, 1.0f);
                 v = std::clamp(v, 0.0f, 1.0f);
@@ -818,7 +1087,10 @@ namespace poseweaver
                     }
                 }
                 if (face_idx < 0)
+                {
+                    set_debug_pixel(out_pix, 0u, 96u, 255u);
                     continue;
+                }
 
                 const int ia = m_smplh_model.F(face_idx, 0);
                 const int ib = m_smplh_model.F(face_idx, 1);
@@ -827,7 +1099,10 @@ namespace poseweaver
                     || ia >= m_smplh_vertices.rows()
                     || ib >= m_smplh_vertices.rows()
                     || ic >= m_smplh_vertices.rows())
+                {
+                    set_debug_pixel(out_pix, 0u, 96u, 255u);
                     continue;
+                }
 
                 const Eigen::Vector3d p =
                     bc.x() * m_smplh_vertices.row(ia).transpose()
@@ -838,22 +1113,77 @@ namespace poseweaver
                 float py = 0.0f;
                 float body_depth = 1.0f;
                 if (!project_to_image_depth(view, proj, p, width, height, px, py, body_depth))
+                {
+                    set_debug_pixel(out_pix, 0u, 200u, 220u);
                     continue;
+                }
 
                 const int sx = (int)std::floor(px);
                 const int sy = (int)std::floor(py);
                 if (sx < 0 || sy < 0 || sx >= width || sy >= height)
+                {
+                    set_debug_pixel(out_pix, 0u, 200u, 220u);
                     continue;
+                }
 
-                ++out_tested_count;
+                if (source_cloth_pixel)
+                    ++out_tested_count;
                 const size_t depth_idx = (size_t)(height - 1 - sy) * (size_t)width + (size_t)sx;
                 const float cloth_depth = cloth_depth_gl[depth_idx];
-                const bool cloth_missing_at_body = !(cloth_depth < 0.999999f);
-                const bool body_visible_on_top = cloth_missing_at_body || body_depth <= cloth_depth + kDepthEps;
-                if (body_visible_on_top)
+                const float cloth_second_depth = cloth_second_depth_cpu.size() == (size_t)width * (size_t)height
+                    ? cloth_second_depth_cpu[depth_idx]
+                    : 1.0f;
+                const bool cloth_present_at_body = cloth_depth < 0.999999f;
+                const bool cloth_on_top_of_match =
+                    cloth_present_at_body
+                    && cloth_depth + depth_margin < body_depth;
+                const float nearest_smpl_depth = smpl_depth_gl[depth_idx] < 0.999999f
+                    ? smpl_depth_gl[depth_idx]
+                    : body_depth;
+                const bool other_smpl_layer_on_top = nearest_smpl_depth + depth_margin < body_depth;
+                const bool two_cloth_layers_on_top =
+                    cloth_second_depth < 0.999999f
+                    && cloth_second_depth + depth_margin < body_depth;
+                const bool smpl_visible_on_top = !cloth_present_at_body
+                    || nearest_smpl_depth + depth_margin < cloth_depth;
+                if (!source_cloth_pixel)
                 {
-                    out_rgba[out_pix * 4u + 3u] = 0u;
-                    ++out_removed_count;
+                    if (cloth_on_top_of_match)
+                        set_debug_pixel(out_pix, 48u, 48u, 48u);
+                    else
+                        set_debug_pixel(out_pix, 0u, 0u, 0u);
+                }
+                else if (smpl_visible_on_top)
+                {
+                    if (other_smpl_layer_on_top)
+                    {
+                        set_debug_pixel(out_pix, 190u, 0u, 32u);
+                    }
+                    else
+                    {
+                        out_rgba[out_pix * 4u + 3u] = 0u;
+                        if (!cloth_present_at_body)
+                            set_debug_pixel(out_pix, 255u, 32u, 32u);
+                        else
+                            set_debug_pixel(out_pix, 255u, 144u, 0u);
+                        ++out_removed_count;
+                    }
+                }
+                else if (other_smpl_layer_on_top && two_cloth_layers_on_top)
+                {
+                    set_debug_pixel(out_pix, 160u, 64u, 255u);
+                }
+                else if (other_smpl_layer_on_top)
+                {
+                    set_debug_pixel(out_pix, 255u, 224u, 0u);
+                }
+                else if (two_cloth_layers_on_top)
+                {
+                    set_debug_pixel(out_pix, 255u, 0u, 255u);
+                }
+                else
+                {
+                    set_debug_pixel(out_pix, 32u, 220u, 80u);
                 }
             }
         }
