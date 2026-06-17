@@ -73,10 +73,18 @@ namespace poseweaver
 
         UvDebugTextureInfo uv_debug_texture_info() const;
         UvDebugTextureInfo sketch2uv_prediction_texture_info() const;
+        UvDebugTextureInfo sketch2iso_prediction_texture_info() const;
         bool sketch2uv_prediction_uv_at(int x, int y, float& out_u, float& out_v) const;
+        bool sketch2iso_prediction_match_at(
+            int x,
+            int y,
+            float distance_threshold,
+            int& out_vertex,
+            float& out_distance) const;
         const std::vector<UvSegment>& smpl_uv_wireframe_segments() const;
         SmplBodyPreviewInfo render_smpl_body_preview(AppState& state, int width, int height);
         bool smpl_body_point_for_uv(float u, float v, Eigen::Vector3f& out_point) const;
+        bool smpl_body_point_for_vertex(int vertex, Eigen::Vector3f& out_point) const;
         bool smpl_body_preview_project(const Eigen::Vector3f& point, float& out_x01, float& out_y01) const;
         bool fit_cloth_render_to_smpl_visibility(
             AppState& state,
@@ -147,6 +155,17 @@ namespace poseweaver
         void update_garment_constraint_visualization(AppState& state);
         void generate_uv_debug_image(AppState& state);
         void ensure_sketch2uv_prediction_texture(AppState& state);
+        void ensure_sketch2iso_prediction_texture(AppState& state);
+        bool ensure_iso_vertex_descriptors(AppState& state);
+        bool find_nearest_iso_vertex(
+            const float* descriptor,
+            int& out_vertex,
+            float& out_distance_squared) const;
+        void search_iso_kd_node(
+            int node_index,
+            const float* descriptor,
+            int& best_vertex,
+            float& best_distance_squared) const;
         void release_smpl_body_preview();
 
         void process_cloth_simulate(AppState& state);
@@ -157,6 +176,7 @@ namespace poseweaver
         void capture_scene_view_snapshot_if_requested(AppState& state, const ViewportRect& view);
         void capture_generated_cloth_render_if_requested(AppState& state);
         void process_canva_displacement_map(AppState& state);
+        void process_canva_iso_displacement_map(AppState& state);
 
         void regenerate_uv_wireframe_segments();
         bool try_load_smpl_uv_layout_once();
@@ -234,6 +254,29 @@ namespace poseweaver
         std::vector<float> m_sketch2uv_prediction_uv;
         std::vector<float> m_sketch2uv_prediction_mask;
 
+        unsigned int m_sketch2iso_prediction_texture_id = 0;
+        int m_sketch2iso_prediction_texture_w = 0;
+        int m_sketch2iso_prediction_texture_h = 0;
+        int m_sketch2iso_prediction_channels = 0;
+        std::string m_sketch2iso_prediction_npz_path;
+        std::string m_sketch2iso_prediction_sketch_path;
+        std::uint64_t m_sketch2iso_prediction_request_id = 0;
+        std::vector<float> m_sketch2iso_prediction_values;
+        std::vector<float> m_sketch2iso_prediction_mask;
+        std::vector<float> m_iso_vertex_descriptors;
+        int m_iso_vertex_descriptor_count = 0;
+        int m_iso_vertex_descriptor_dimensions = 0;
+        bool m_iso_vertex_descriptors_load_attempted = false;
+        struct IsoKdNode
+        {
+            int vertex = -1;
+            int left = -1;
+            int right = -1;
+            int axis = 0;
+        };
+        std::vector<IsoKdNode> m_iso_kd_nodes;
+        int m_iso_kd_root = -1;
+
         unsigned int m_smpl_body_preview_fbo = 0;
         unsigned int m_smpl_body_preview_texture_id = 0;
         unsigned int m_smpl_body_preview_depth = 0;
@@ -250,6 +293,7 @@ namespace poseweaver
         std::uint64_t m_last_scene_view_snapshot_request_id = 0;
         std::uint64_t m_last_cloth_render_request_id = 0;
         std::uint64_t m_last_canva_displacement_request_id = 0;
+        std::uint64_t m_last_canva_iso_displacement_request_id = 0;
 
         std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
         std::uint64_t m_cloth_sim_pose_version = 0;

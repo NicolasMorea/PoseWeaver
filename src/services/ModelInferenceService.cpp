@@ -1,4 +1,4 @@
-#include "sketch2rig/Sketch2RigService.h"
+#include "services/ModelInferenceService.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -20,32 +20,32 @@ namespace poseweaver
     {
         constexpr const char* kWorkerPrefix = "POSEWEAVER_JSON ";
 
-        std::string sketch_status_label(Sketch2RigStatus status)
+        std::string model_status_label(ModelInferenceStatus status)
         {
             switch (status)
             {
-            case Sketch2RigStatus::NotStarted: return "Model not started";
-            case Sketch2RigStatus::Loading: return "Model loading";
-            case Sketch2RigStatus::Ready: return "Model loaded";
-            case Sketch2RigStatus::Busy: return "Processing";
-            case Sketch2RigStatus::Error: return "Model error";
-            case Sketch2RigStatus::Stopped: return "Model stopped";
+            case ModelInferenceStatus::NotStarted: return "Model not started";
+            case ModelInferenceStatus::Loading: return "Model loading";
+            case ModelInferenceStatus::Ready: return "Model loaded";
+            case ModelInferenceStatus::Busy: return "Processing";
+            case ModelInferenceStatus::Error: return "Model error";
+            case ModelInferenceStatus::Stopped: return "Model stopped";
             }
             return "Unknown";
         }
     }
 
-    Sketch2RigService::Sketch2RigService(std::string label)
+    ModelInferenceService::ModelInferenceService(std::string label)
         : m_label(std::move(label))
     {
     }
 
-    Sketch2RigService::~Sketch2RigService()
+    ModelInferenceService::~ModelInferenceService()
     {
         stop();
     }
 
-    void Sketch2RigService::start(
+    void ModelInferenceService::start(
         const std::filesystem::path& model_dir,
         const std::filesystem::path& worker_script)
     {
@@ -64,13 +64,7 @@ namespace poseweaver
     #else
         std::filesystem::path script = worker_script;
         if (script.empty())
-        {
-    #ifdef POSEWEAVER_SKETCH2RIG_WORKER
-            script = std::filesystem::path(POSEWEAVER_SKETCH2RIG_WORKER);
-    #else
             script = model_dir / "inference_worker.py";
-    #endif
-        }
         const std::filesystem::path checkpoint = model_dir / "best.pth";
 
         if (!std::filesystem::exists(script))
@@ -190,11 +184,11 @@ namespace poseweaver
                 ? ("Starting " + m_label + " model worker with " + python + "...")
                 : ("Starting " + m_label + " model worker with conda env '" + conda_env + "'..."),
             "" });
-        m_reader = std::thread(&Sketch2RigService::reader_loop, this);
+        m_reader = std::thread(&ModelInferenceService::reader_loop, this);
     #endif
     }
 
-    bool Sketch2RigService::request_inference(
+    bool ModelInferenceService::request_inference(
         std::uint64_t request_id,
         const std::filesystem::path& sketch_path,
         const std::filesystem::path& output_path,
@@ -232,12 +226,7 @@ namespace poseweaver
         return true;
     }
 
-    void Sketch2RigService::drain_events(AppState& state)
-    {
-        drain_events(state, state.sketch2rig);
-    }
-
-    void Sketch2RigService::drain_events(AppState& state, Sketch2RigUiState& ui_state)
+    void ModelInferenceService::drain_events(AppState& state, ModelInferenceUiState& ui_state)
     {
         std::vector<Event> events;
         {
@@ -254,45 +243,45 @@ namespace poseweaver
                     console_add_line(state, m_label + ": " + event.message);
                 break;
             case EventKind::Loading:
-                ui_state.status = Sketch2RigStatus::Loading;
-                ui_state.message = event.message.empty() ? sketch_status_label(ui_state.status) : event.message;
+                ui_state.status = ModelInferenceStatus::Loading;
+                ui_state.message = event.message.empty() ? model_status_label(ui_state.status) : event.message;
                 console_add_line(state, m_label + ": " + ui_state.message);
                 break;
             case EventKind::Ready:
-                ui_state.status = Sketch2RigStatus::Ready;
-                ui_state.message = event.message.empty() ? sketch_status_label(ui_state.status) : event.message;
+                ui_state.status = ModelInferenceStatus::Ready;
+                ui_state.message = event.message.empty() ? model_status_label(ui_state.status) : event.message;
                 console_add_line(state, m_label + ": " + ui_state.message);
                 break;
             case EventKind::Busy:
-                ui_state.status = Sketch2RigStatus::Busy;
+                ui_state.status = ModelInferenceStatus::Busy;
                 ui_state.active_request_id = event.request_id;
-                ui_state.message = event.message.empty() ? sketch_status_label(ui_state.status) : event.message;
+                ui_state.message = event.message.empty() ? model_status_label(ui_state.status) : event.message;
                 console_add_line(state, m_label + ": " + ui_state.message);
                 break;
             case EventKind::Result:
                 ui_state.completed_request_id = event.request_id;
                 ui_state.active_request_id = 0;
                 ui_state.last_output_path = event.output_path;
-                ui_state.status = event.ok ? Sketch2RigStatus::Ready : Sketch2RigStatus::Error;
+                ui_state.status = event.ok ? ModelInferenceStatus::Ready : ModelInferenceStatus::Error;
                 ui_state.message = event.message.empty()
                     ? (event.ok ? "Inference complete" : "Inference failed")
                     : event.message;
                 console_add_line(state, m_label + ": " + ui_state.message);
                 if (event.ok && !event.output_path.empty())
-                    console_add_line(state, m_label + ": Output JSON: " + event.output_path);
+                    console_add_line(state, m_label + ": Output: " + event.output_path);
                 break;
             case EventKind::Error:
                 ui_state.active_request_id = 0;
-                ui_state.status = Sketch2RigStatus::Error;
-                ui_state.message = event.message.empty() ? sketch_status_label(ui_state.status) : event.message;
+                ui_state.status = ModelInferenceStatus::Error;
+                ui_state.message = event.message.empty() ? model_status_label(ui_state.status) : event.message;
                 console_add_line(state, m_label + ": " + ui_state.message);
                 break;
             case EventKind::Stopped:
                 ui_state.active_request_id = 0;
-                if (ui_state.status != Sketch2RigStatus::Error)
+                if (ui_state.status != ModelInferenceStatus::Error)
                 {
-                    ui_state.status = Sketch2RigStatus::Stopped;
-                    ui_state.message = event.message.empty() ? sketch_status_label(ui_state.status) : event.message;
+                    ui_state.status = ModelInferenceStatus::Stopped;
+                    ui_state.message = event.message.empty() ? model_status_label(ui_state.status) : event.message;
                 }
                 if (!event.message.empty())
                     console_add_line(state, m_label + ": " + event.message);
@@ -301,7 +290,7 @@ namespace poseweaver
         }
     }
 
-    void Sketch2RigService::stop()
+    void ModelInferenceService::stop()
     {
     #if defined(_WIN32)
         m_running.store(false);
@@ -338,13 +327,13 @@ namespace poseweaver
     #endif
     }
 
-    void Sketch2RigService::push_event(Event event)
+    void ModelInferenceService::push_event(Event event)
     {
         std::lock_guard<std::mutex> lock(m_event_mutex);
         m_events.emplace_back(std::move(event));
     }
 
-    void Sketch2RigService::reader_loop()
+    void ModelInferenceService::reader_loop()
     {
     #if !defined(_WIN32)
         FILE* stream = fdopen(m_child_stdout, "r");
@@ -375,7 +364,7 @@ namespace poseweaver
     #endif
     }
 
-    bool Sketch2RigService::send_line(const std::string& line)
+    bool ModelInferenceService::send_line(const std::string& line)
     {
     #if defined(_WIN32)
         (void)line;
@@ -399,7 +388,7 @@ namespace poseweaver
     #endif
     }
 
-    std::string Sketch2RigService::json_escape(const std::string& s)
+    std::string ModelInferenceService::json_escape(const std::string& s)
     {
         std::string out;
         out.reserve(s.size() + 8);
@@ -420,7 +409,7 @@ namespace poseweaver
         return out;
     }
 
-    std::string Sketch2RigService::json_string_field(const std::string& line, const char* key)
+    std::string ModelInferenceService::json_string_field(const std::string& line, const char* key)
     {
         const std::string needle = std::string("\"") + key + "\":\"";
         const size_t start = line.find(needle);
@@ -458,7 +447,7 @@ namespace poseweaver
         return out;
     }
 
-    std::uint64_t Sketch2RigService::json_u64_field(const std::string& line, const char* key)
+    std::uint64_t ModelInferenceService::json_u64_field(const std::string& line, const char* key)
     {
         const std::string needle = std::string("\"") + key + "\":";
         const size_t start = line.find(needle);
@@ -478,7 +467,7 @@ namespace poseweaver
         return value;
     }
 
-    bool Sketch2RigService::json_bool_field(const std::string& line, const char* key, bool fallback)
+    bool ModelInferenceService::json_bool_field(const std::string& line, const char* key, bool fallback)
     {
         const std::string needle = std::string("\"") + key + "\":";
         const size_t start = line.find(needle);
@@ -495,7 +484,7 @@ namespace poseweaver
         return fallback;
     }
 
-    Sketch2RigService::Event Sketch2RigService::parse_worker_line(const std::string& line)
+    ModelInferenceService::Event ModelInferenceService::parse_worker_line(const std::string& line)
     {
         const std::string event = json_string_field(line, "event");
         Event out;

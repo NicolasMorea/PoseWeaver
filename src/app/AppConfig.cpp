@@ -132,6 +132,11 @@ namespace
             if (std::isfinite(v))
                 state->cloth_fitting_depth_margin = std::clamp(v, 0.0f, 0.05f);
         }
+        if (std::sscanf(line, "IsoDistanceThreshold=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->iso_distance_threshold = std::clamp(v, 0.0f, 10.0f);
+        }
         if (std::sscanf(line, "ClothRenderTargetDetailSize=%f", &v) == 1)
         {
             if (std::isfinite(v))
@@ -298,6 +303,7 @@ namespace
         buf->appendf("CanvaBrushColor=%.6f,%.6f,%.6f,%.6f\n",
             state->canva_brush_color[0], state->canva_brush_color[1], state->canva_brush_color[2], state->canva_brush_color[3]);
         buf->appendf("ClothFittingDepthMargin=%.9f\n", state->cloth_fitting_depth_margin);
+        buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
 
         buf->appendf("XpbdDt=%.9f\n", state->xpbd_params.dt);

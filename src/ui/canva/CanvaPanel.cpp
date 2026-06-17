@@ -2,7 +2,7 @@
 
 #include "ui/canva/CanvaPreprocess.h"
 #include "ui/canva/SketchPose.h"
-#include "sketch2rig/Sketch2RigService.h"
+#include "services/ModelInferenceService.h"
 #include "core/Paths.h"
 #include "render/Renderer.h"
 
@@ -32,6 +32,7 @@
 #include <stb_image_write.h>
 
 #include <tinyfiledialogs.h>
+#include <cnpy.h>
 
 #ifndef POSEWEAVER_RIG_OPTIMIZER_WORKER
 #define POSEWEAVER_RIG_OPTIMIZER_WORKER "src/rigopt/optimize_rig.py"
@@ -52,9 +53,11 @@ namespace poseweaver::ui_canva
             Generic,
             Smpl,
             Sketch2UV,
+            Sketch2ISO,
             ManualUV,
             GeneratedCloth,
             Displacement,
+            IsoDisplacement,
             ClothFitting,
             ClothFittingDebug
         };
@@ -140,9 +143,11 @@ namespace poseweaver::ui_canva
             std::uint64_t last_sketch2rig_import_request_id = 0;
             std::uint64_t last_sketch2betas_import_request_id = 0;
             std::uint64_t last_sketch2uv_import_request_id = 0;
+            std::uint64_t last_sketch2iso_import_request_id = 0;
             std::uint64_t ignore_sketch2rig_request_id = 0;
             std::uint64_t ignore_sketch2betas_request_id = 0;
             std::uint64_t ignore_sketch2uv_request_id = 0;
+            std::uint64_t ignore_sketch2iso_request_id = 0;
             std::uint64_t last_scene_view_snapshot_completed_id = 0;
             std::uint64_t pending_scene_view_snapshot_request_id = 0;
 
@@ -185,6 +190,16 @@ namespace poseweaver::ui_canva
             std::filesystem::path generate_displacement_model_input_path;
             std::filesystem::path generate_displacement_uv_json_path;
             std::string generate_displacement_status = "Idle";
+
+            bool generate_iso_displacement_active = false;
+            bool generate_iso_displacement_waiting_iso = false;
+            bool generate_iso_displacement_waiting_render = false;
+            std::uint64_t generate_iso_displacement_iso_request_id = 0;
+            std::uint64_t generate_iso_displacement_render_request_id = 0;
+            std::uint64_t last_iso_displacement_completed_id = 0;
+            std::filesystem::path generate_iso_displacement_model_input_path;
+            std::filesystem::path generate_iso_displacement_npz_path;
+            std::string generate_iso_displacement_status = "Idle";
 
             bool cloth_fitting_active = false;
             bool cloth_fitting_waiting_uv = false;
@@ -242,30 +257,30 @@ namespace poseweaver::ui_canva
             bool valid = false;
         };
 
-        static const char* sketch2rig_status_text(Sketch2RigStatus status)
+        static const char* model_inference_status_text(ModelInferenceStatus status)
         {
             switch (status)
             {
-            case Sketch2RigStatus::NotStarted: return "Not started";
-            case Sketch2RigStatus::Loading: return "Loading";
-            case Sketch2RigStatus::Ready: return "Loaded";
-            case Sketch2RigStatus::Busy: return "Processing";
-            case Sketch2RigStatus::Error: return "Error";
-            case Sketch2RigStatus::Stopped: return "Stopped";
+            case ModelInferenceStatus::NotStarted: return "Not started";
+            case ModelInferenceStatus::Loading: return "Loading";
+            case ModelInferenceStatus::Ready: return "Loaded";
+            case ModelInferenceStatus::Busy: return "Processing";
+            case ModelInferenceStatus::Error: return "Error";
+            case ModelInferenceStatus::Stopped: return "Stopped";
             }
             return "Unknown";
         }
 
-        static ImVec4 sketch2rig_status_color(Sketch2RigStatus status)
+        static ImVec4 model_inference_status_color(ModelInferenceStatus status)
         {
             switch (status)
             {
-            case Sketch2RigStatus::Ready: return ImVec4(0.20f, 0.85f, 0.38f, 1.0f);
-            case Sketch2RigStatus::Busy: return ImVec4(0.95f, 0.72f, 0.20f, 1.0f);
-            case Sketch2RigStatus::Loading: return ImVec4(0.30f, 0.62f, 1.0f, 1.0f);
-            case Sketch2RigStatus::Error: return ImVec4(1.0f, 0.32f, 0.28f, 1.0f);
-            case Sketch2RigStatus::Stopped: return ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
-            case Sketch2RigStatus::NotStarted: return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
+            case ModelInferenceStatus::Ready: return ImVec4(0.20f, 0.85f, 0.38f, 1.0f);
+            case ModelInferenceStatus::Busy: return ImVec4(0.95f, 0.72f, 0.20f, 1.0f);
+            case ModelInferenceStatus::Loading: return ImVec4(0.30f, 0.62f, 1.0f, 1.0f);
+            case ModelInferenceStatus::Error: return ImVec4(1.0f, 0.32f, 0.28f, 1.0f);
+            case ModelInferenceStatus::Stopped: return ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
+            case ModelInferenceStatus::NotStarted: return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
             }
             return ImVec4(0.60f, 0.60f, 0.60f, 1.0f);
         }
@@ -1212,6 +1227,159 @@ namespace poseweaver::ui_canva
             return true;
         }
 
+        static bool canva_add_iso_debug_layer(
+            CanvaState& canva,
+            const std::filesystem::path& npz_path,
+            const std::filesystem::path& model_input_path,
+            const std::string& layer_name,
+            bool enabled,
+            std::string* out_error)
+        {
+            cnpy::NpyArray isomap;
+            try
+            {
+                isomap = cnpy::npz_load(npz_path.string(), "isomap");
+            }
+            catch (const std::exception& e)
+            {
+                if (out_error)
+                    *out_error = "Failed to load isomap from " + npz_path.string() + ": " + e.what();
+                return false;
+            }
+
+            if (isomap.shape.size() != 3 || (isomap.word_size != sizeof(float) && isomap.word_size != sizeof(double)))
+            {
+                if (out_error)
+                    *out_error = "ISO NPZ must contain a float isomap array shaped [H,W,C] or [C,H,W]";
+                return false;
+            }
+
+            const bool hwc = isomap.shape[2] >= 3 && isomap.shape[2] <= 256;
+            const bool chw = !hwc && isomap.shape[0] >= 3 && isomap.shape[0] <= 256;
+            if (!hwc && !chw)
+            {
+                if (out_error)
+                    *out_error = "Could not identify the isomap channel dimension";
+                return false;
+            }
+
+            const int ih = (int)(hwc ? isomap.shape[0] : isomap.shape[1]);
+            const int iw = (int)(hwc ? isomap.shape[1] : isomap.shape[2]);
+            const int channels = (int)(hwc ? isomap.shape[2] : isomap.shape[0]);
+            if (iw <= 0 || ih <= 0 || channels < 3)
+            {
+                if (out_error)
+                    *out_error = "ISO NPZ has an invalid isomap shape";
+                return false;
+            }
+
+            cnpy::NpyArray mask;
+            bool have_mask = false;
+            try
+            {
+                mask = cnpy::npz_load(npz_path.string(), "mask");
+                have_mask = mask.shape.size() == 2
+                    && (int)mask.shape[0] == ih
+                    && (int)mask.shape[1] == iw;
+            }
+            catch (const std::exception&)
+            {
+            }
+
+            cnpy::NpyArray descriptor_min;
+            cnpy::NpyArray descriptor_max;
+            bool have_descriptor_range = false;
+            try
+            {
+                descriptor_min = cnpy::npz_load(npz_path.string(), "descriptor_min");
+                descriptor_max = cnpy::npz_load(npz_path.string(), "descriptor_max");
+                have_descriptor_range =
+                    descriptor_min.shape.size() == 1
+                    && descriptor_max.shape.size() == 1
+                    && descriptor_min.shape[0] >= 3
+                    && descriptor_max.shape[0] >= 3
+                    && (descriptor_min.word_size == sizeof(float) || descriptor_min.word_size == sizeof(double))
+                    && (descriptor_max.word_size == sizeof(float) || descriptor_max.word_size == sizeof(double));
+            }
+            catch (const std::exception&)
+            {
+            }
+
+            const auto float_value = [](const cnpy::NpyArray& array, size_t index) -> float
+            {
+                if (array.word_size == sizeof(float))
+                    return array.data<float>()[index];
+                return (float)array.data<double>()[index];
+            };
+            const auto mask_value = [](const cnpy::NpyArray& array, size_t index) -> float
+            {
+                if (array.word_size == sizeof(float))
+                    return array.data<float>()[index];
+                if (array.word_size == sizeof(double))
+                    return (float)array.data<double>()[index];
+                if (array.word_size == sizeof(std::uint8_t))
+                    return array.data<std::uint8_t>()[index] != 0 ? 1.0f : 0.0f;
+                return 1.0f;
+            };
+
+            std::vector<unsigned char> rgba((size_t)iw * (size_t)ih * 4u, 0u);
+            for (int y = 0; y < ih; ++y)
+            {
+                for (int x = 0; x < iw; ++x)
+                {
+                    const size_t pixel = (size_t)y * (size_t)iw + (size_t)x;
+                    unsigned char* dst = rgba.data() + pixel * 4u;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const size_t source = hwc
+                            ? (pixel * (size_t)channels + (size_t)c)
+                            : ((size_t)c * (size_t)ih * (size_t)iw + pixel);
+                        float value = float_value(isomap, source);
+                        if (have_descriptor_range)
+                        {
+                            const float lo = float_value(descriptor_min, (size_t)c);
+                            const float hi = float_value(descriptor_max, (size_t)c);
+                            value = (value - lo) / std::max(1e-8f, hi - lo);
+                        }
+                        dst[c] = (unsigned char)std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f);
+                    }
+                    const float alpha = have_mask ? mask_value(mask, pixel) : 1.0f;
+                    dst[3] = (unsigned char)std::lround(std::clamp(alpha, 0.0f, 1.0f) * 255.0f);
+                }
+            }
+
+            CanvaLayer layer = canva_make_layer(canva.width, canva.height, canva.next_layer_id++, layer_name);
+            layer.kind = CanvaLayerKind::Sketch2ISO;
+            layer.pixels = canva_resample_bilinear_rgba(rgba.data(), iw, ih, canva.width, canva.height);
+
+            if (!model_input_path.empty())
+            {
+                CanvaPreprocessTransform preprocess_transform;
+                std::string transform_error;
+                if (!canva_load_preprocess_transform(model_input_path, &preprocess_transform, &transform_error))
+                {
+                    if (out_error)
+                        *out_error = transform_error.empty() ? "Missing preprocessing transform" : transform_error;
+                    return false;
+                }
+                const float inv_scale = 1.0f / std::max(1e-6f, preprocess_transform.scale);
+                layer.scale = inv_scale;
+                layer.offset = ImVec2(
+                    preprocess_transform.src_center.x - preprocess_transform.dst_center.x * inv_scale,
+                    preprocess_transform.src_center.y - preprocess_transform.dst_center.y * inv_scale);
+            }
+
+            layer.enabled = enabled;
+            layer.dirty = true;
+            layer.bounds_dirty = true;
+            canva.layers.insert(canva.layers.begin(), std::move(layer));
+            canva.active_layer = 0;
+            if (!enabled && canva.layers.size() > 1)
+                canva.active_layer = 1;
+            canva_cancel_interactions(canva);
+            return true;
+        }
+
         static int canva_find_layer_index_by_id(const CanvaState& canva, int layer_id)
         {
             for (int i = 0; i < (int)canva.layers.size(); ++i)
@@ -1233,6 +1401,23 @@ namespace poseweaver::ui_canva
                 if (std::filesystem::exists(p, ec))
                 {
                     *out_path = p;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static bool canva_manual_iso_source_path(const AppState& state, std::filesystem::path* out_path)
+        {
+            if (!out_path)
+                return false;
+            std::error_code ec;
+            if (!state.canva_manual_iso_npz_path.empty())
+            {
+                const std::filesystem::path path = state.canva_manual_iso_npz_path;
+                if (std::filesystem::exists(path, ec))
+                {
+                    *out_path = path;
                     return true;
                 }
             }
@@ -2097,10 +2282,10 @@ namespace poseweaver::ui_canva
 
             state.sketch2rig.last_sketch_path = sketch_path.string();
             state.sketch2betas.last_sketch_path = sketch_path.string();
-            state.sketch2rig.status = Sketch2RigStatus::Busy;
+            state.sketch2rig.status = ModelInferenceStatus::Busy;
             state.sketch2rig.active_request_id = rig_request_id;
             state.sketch2rig.message = "Processing sketch with Sketch2Rig...";
-            state.sketch2betas.status = Sketch2RigStatus::Busy;
+            state.sketch2betas.status = ModelInferenceStatus::Busy;
             state.sketch2betas.active_request_id = betas_request_id;
             state.sketch2betas.message = "Processing sketch with Sketch2Betas...";
 
@@ -2161,7 +2346,7 @@ namespace poseweaver::ui_canva
                 return true;
             }
 
-            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != Sketch2RigStatus::Ready)
+            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != ModelInferenceStatus::Ready)
             {
                 if (out_error)
                     *out_error = "Sketch2UV is not ready";
@@ -2190,7 +2375,7 @@ namespace poseweaver::ui_canva
             }
 
             state.sketch2uv.last_sketch_path = sketch_path.string();
-            state.sketch2uv.status = Sketch2RigStatus::Busy;
+            state.sketch2uv.status = ModelInferenceStatus::Busy;
             state.sketch2uv.active_request_id = request_id;
             state.sketch2uv.message = "Processing sketch UVs for displacement...";
 
@@ -2208,13 +2393,106 @@ namespace poseweaver::ui_canva
             return true;
         }
 
+        static bool canva_queue_generate_iso_displacement(
+            AppState& state,
+            CanvaState& canva,
+            std::string* out_error)
+        {
+            if (!state.scene_view_target_valid
+                || state.scene_view_snapshot_completed_id == 0
+                || state.scene_view_snapshot_path.empty())
+            {
+                if (out_error)
+                    *out_error = "predicted camera view is not available";
+                return false;
+            }
+
+            std::filesystem::path manual_iso_path;
+            if (canva_manual_iso_source_path(state, &manual_iso_path))
+            {
+                canva.generate_iso_displacement_active = true;
+                canva.generate_iso_displacement_waiting_iso = false;
+                canva.generate_iso_displacement_waiting_render = true;
+                canva.generate_iso_displacement_iso_request_id = 0;
+                canva.generate_iso_displacement_render_request_id =
+                    ++state.canva_iso_displacement_request_id;
+                canva.generate_iso_displacement_model_input_path.clear();
+                canva.generate_iso_displacement_npz_path = manual_iso_path;
+                canva.generate_iso_displacement_status = "Projecting ISO displacement";
+
+                state.canva_iso_displacement_npz_path = manual_iso_path.string();
+                state.canva_iso_displacement_model_input_path.clear();
+                state.canva_iso_displacement_path.clear();
+
+                console_add_line(
+                    state,
+                    "Canva: Create ISO Displacement Map using loaded ISO NPZ: "
+                        + manual_iso_path.string());
+                return true;
+            }
+
+            if (state.sketch2iso.service == nullptr
+                || state.sketch2iso.status != ModelInferenceStatus::Ready)
+            {
+                if (out_error)
+                    *out_error = "Sketch2ISO is not ready";
+                return false;
+            }
+
+            std::filesystem::path sketch_path;
+            std::string error;
+            if (!canva_save_model_input_png(canva, &sketch_path, &error))
+            {
+                if (out_error)
+                    *out_error = error.empty() ? "preprocessing failed" : error;
+                return false;
+            }
+
+            const std::filesystem::path output_path =
+                sketch_path.parent_path() / "sketch_iso_displacement.npz";
+            const std::uint64_t request_id = state.sketch2iso.next_request_id++;
+            std::string request_error;
+            if (!state.sketch2iso.service->request_inference(
+                    request_id,
+                    sketch_path,
+                    output_path,
+                    &request_error))
+            {
+                if (out_error)
+                    *out_error = request_error.empty()
+                        ? "failed to queue Sketch2ISO"
+                        : request_error;
+                return false;
+            }
+
+            state.sketch2iso.last_sketch_path = sketch_path.string();
+            state.sketch2iso.status = ModelInferenceStatus::Busy;
+            state.sketch2iso.active_request_id = request_id;
+            state.sketch2iso.message = "Processing sketch ISO values for displacement...";
+
+            canva.generate_iso_displacement_active = true;
+            canva.generate_iso_displacement_waiting_iso = true;
+            canva.generate_iso_displacement_waiting_render = false;
+            canva.generate_iso_displacement_iso_request_id = request_id;
+            canva.generate_iso_displacement_render_request_id = 0;
+            canva.generate_iso_displacement_model_input_path = sketch_path;
+            canva.generate_iso_displacement_npz_path = output_path;
+            canva.generate_iso_displacement_status = "Generating ISO";
+
+            console_add_line(
+                state,
+                "Canva: Create ISO Displacement Map queued Sketch2ISO from sketch: "
+                    + sketch_path.string());
+            return true;
+        }
+
         static bool canva_queue_cloth_fitting_uv(
             AppState& state,
             CanvaState& canva,
             const CanvaLayer& source_layer,
             std::string* out_error)
         {
-            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != Sketch2RigStatus::Ready)
+            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != ModelInferenceStatus::Ready)
             {
                 if (out_error)
                     *out_error = "Sketch2UV is not ready";
@@ -2243,7 +2521,7 @@ namespace poseweaver::ui_canva
             }
 
             state.sketch2uv.last_sketch_path = sketch_path.string();
-            state.sketch2uv.status = Sketch2RigStatus::Busy;
+            state.sketch2uv.status = ModelInferenceStatus::Busy;
             state.sketch2uv.active_request_id = request_id;
             state.sketch2uv.message = "Processing sketch UVs for cloth fitting...";
 
@@ -2550,7 +2828,7 @@ namespace poseweaver::ui_canva
                     out_error);
             }
 
-            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != Sketch2RigStatus::Ready)
+            if (state.sketch2uv.service == nullptr || state.sketch2uv.status != ModelInferenceStatus::Ready)
             {
                 if (out_error)
                     *out_error = "Sketch2UV is not ready";
@@ -2577,7 +2855,7 @@ namespace poseweaver::ui_canva
             }
 
             state.sketch2uv.last_sketch_path = sketch_path.string();
-            state.sketch2uv.status = Sketch2RigStatus::Busy;
+            state.sketch2uv.status = ModelInferenceStatus::Busy;
             state.sketch2uv.active_request_id = request_id;
             state.sketch2uv.message = "Processing sketch UVs for Rig Optimization...";
 
@@ -2938,6 +3216,7 @@ namespace poseweaver::ui_canva
             const std::uint64_t rig_active = state.sketch2rig.active_request_id;
             const std::uint64_t betas_active = state.sketch2betas.active_request_id;
             const std::uint64_t uv_active = state.sketch2uv.active_request_id;
+            const std::uint64_t iso_active = state.sketch2iso.active_request_id;
 
             CanvaState fresh;
             fresh.brush_radius = state.canva_brush_radius;
@@ -2953,11 +3232,15 @@ namespace poseweaver::ui_canva
                 std::max(state.sketch2betas.completed_request_id, betas_active);
             fresh.last_sketch2uv_import_request_id =
                 std::max(state.sketch2uv.completed_request_id, uv_active);
+            fresh.last_sketch2iso_import_request_id =
+                std::max(state.sketch2iso.completed_request_id, iso_active);
             fresh.ignore_sketch2rig_request_id = rig_active;
             fresh.ignore_sketch2betas_request_id = betas_active;
             fresh.ignore_sketch2uv_request_id = uv_active;
+            fresh.ignore_sketch2iso_request_id = iso_active;
             fresh.last_scene_view_snapshot_completed_id = state.scene_view_snapshot_request_id;
             fresh.last_displacement_completed_id = state.canva_displacement_request_id;
+            fresh.last_iso_displacement_completed_id = state.canva_iso_displacement_request_id;
             fresh.last_cloth_render_completed_id = state.cloth_render_request_id;
             fresh.rig_optimization_future = std::move(optimizer_future);
             fresh.rig_optimization_job_running = optimizer_pending;
@@ -2974,6 +3257,8 @@ namespace poseweaver::ui_canva
             state.sketch2betas.last_output_path.clear();
             state.sketch2uv.last_sketch_path.clear();
             state.sketch2uv.last_output_path.clear();
+            state.sketch2iso.last_sketch_path.clear();
+            state.sketch2iso.last_output_path.clear();
 
             state.selection.pose_index = -1;
             state.pending_pose_selection.clear();
@@ -3005,6 +3290,10 @@ namespace poseweaver::ui_canva
             state.canva_displacement_model_input_path.clear();
             state.canva_displacement_path.clear();
             state.canva_manual_uv_png_path.clear();
+            state.canva_manual_iso_npz_path.clear();
+            state.canva_iso_displacement_npz_path.clear();
+            state.canva_iso_displacement_model_input_path.clear();
+            state.canva_iso_displacement_path.clear();
 
             state.uv_view_zoom = 1.0f;
             state.uv_view_pan_x = 0.0f;
@@ -3043,7 +3332,7 @@ namespace poseweaver::ui_canva
         }
         canva.active_layer = std::clamp(canva.active_layer, 0, std::max(0, (int)canva.layers.size() - 1));
 
-        const auto discard_reset_result = [](Sketch2RigUiState& ui, std::uint64_t& ignored_request_id)
+        const auto discard_reset_result = [](ModelInferenceUiState& ui, std::uint64_t& ignored_request_id)
         {
             if (ignored_request_id == 0 || ui.completed_request_id != ignored_request_id)
                 return;
@@ -3054,6 +3343,7 @@ namespace poseweaver::ui_canva
         discard_reset_result(state.sketch2rig, canva.ignore_sketch2rig_request_id);
         discard_reset_result(state.sketch2betas, canva.ignore_sketch2betas_request_id);
         discard_reset_result(state.sketch2uv, canva.ignore_sketch2uv_request_id);
+        discard_reset_result(state.sketch2iso, canva.ignore_sketch2iso_request_id);
 
         // Consume undo requests routed from the GLFW key callback.
         while (canva.last_undo_request_id < state.canva_undo_request_id)
@@ -3100,7 +3390,7 @@ namespace poseweaver::ui_canva
                 && state.sketch2rig.completed_request_id == canva.extract_pose_rig_request_id)
             {
                 canva.extract_pose_rig_done =
-                    state.sketch2rig.status == Sketch2RigStatus::Ready
+                    state.sketch2rig.status == ModelInferenceStatus::Ready
                     && !state.sketch2rig.last_output_path.empty();
                 if (!canva.extract_pose_rig_done)
                 {
@@ -3113,7 +3403,7 @@ namespace poseweaver::ui_canva
                     canva.generate_cloth_failed_step = 0;
                 }
             }
-            if (state.sketch2rig.status == Sketch2RigStatus::Ready && !state.sketch2rig.last_output_path.empty())
+            if (state.sketch2rig.status == ModelInferenceStatus::Ready && !state.sketch2rig.last_output_path.empty())
             {
                 std::string err;
                 const bool hide_rig_layer =
@@ -3147,7 +3437,7 @@ namespace poseweaver::ui_canva
                 && state.sketch2betas.completed_request_id == canva.extract_pose_betas_request_id)
             {
                 canva.extract_pose_betas_done =
-                    state.sketch2betas.status == Sketch2RigStatus::Ready
+                    state.sketch2betas.status == ModelInferenceStatus::Ready
                     && !state.sketch2betas.last_output_path.empty();
                 if (!canva.extract_pose_betas_done)
                 {
@@ -3160,7 +3450,7 @@ namespace poseweaver::ui_canva
                     canva.generate_cloth_failed_step = 0;
                 }
             }
-            if (state.sketch2betas.status == Sketch2RigStatus::Ready && !state.sketch2betas.last_output_path.empty())
+            if (state.sketch2betas.status == ModelInferenceStatus::Ready && !state.sketch2betas.last_output_path.empty())
             {
                 std::string err;
                 if (canva_apply_sketch2betas_result(state, state.sketch2betas.last_output_path, &err))
@@ -3193,7 +3483,7 @@ namespace poseweaver::ui_canva
                 && state.sketch2uv.completed_request_id == canva.cloth_fitting_uv_request_id;
             const bool is_internal_uv = is_displacement_uv || is_rig_optimization_uv || is_cloth_fitting_uv;
 
-            if (state.sketch2uv.status == Sketch2RigStatus::Ready && !state.sketch2uv.last_output_path.empty())
+            if (state.sketch2uv.status == ModelInferenceStatus::Ready && !state.sketch2uv.last_output_path.empty())
             {
                 std::string err;
                 const bool added_uv = canva_add_sketch2uv_layer(
@@ -3317,6 +3607,74 @@ namespace poseweaver::ui_canva
             }
         }
 
+        if (state.sketch2iso.completed_request_id > canva.last_sketch2iso_import_request_id)
+        {
+            canva.last_sketch2iso_import_request_id = state.sketch2iso.completed_request_id;
+            const bool is_iso_displacement =
+                canva.generate_iso_displacement_active
+                && canva.generate_iso_displacement_waiting_iso
+                && state.sketch2iso.completed_request_id
+                    == canva.generate_iso_displacement_iso_request_id;
+            if (state.sketch2iso.status == ModelInferenceStatus::Ready
+                && !state.sketch2iso.last_output_path.empty())
+            {
+                std::string err;
+                if (canva_add_iso_debug_layer(
+                        canva,
+                        state.sketch2iso.last_output_path,
+                        state.sketch2iso.last_sketch_path,
+                        is_iso_displacement ? "Sketch2ISO (hidden)" : "Sketch2ISO Debug",
+                        !is_iso_displacement,
+                        &err))
+                {
+                    console_add_line(
+                        state,
+                        std::string(is_iso_displacement
+                                ? "Canva: Added hidden Sketch2ISO layer from "
+                                : "Canva: Added Sketch2ISO debug layer from ")
+                            + state.sketch2iso.last_output_path);
+                    if (is_iso_displacement)
+                    {
+                        canva.generate_iso_displacement_waiting_iso = false;
+                        canva.generate_iso_displacement_waiting_render = true;
+                        canva.generate_iso_displacement_status = "Projecting ISO displacement";
+                        canva.generate_iso_displacement_npz_path =
+                            state.sketch2iso.last_output_path;
+                        state.canva_iso_displacement_npz_path =
+                            state.sketch2iso.last_output_path;
+                        state.canva_iso_displacement_model_input_path =
+                            canva.generate_iso_displacement_model_input_path.string();
+                        state.canva_iso_displacement_path.clear();
+                        canva.generate_iso_displacement_render_request_id =
+                            ++state.canva_iso_displacement_request_id;
+                        console_add_line(
+                            state,
+                            "Canva: Create ISO Displacement Map queued renderer projection");
+                    }
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Failed to load Sketch2ISO result: ")
+                        + (err.empty() ? "(unknown error)" : err));
+                    if (is_iso_displacement)
+                    {
+                        canva.generate_iso_displacement_active = false;
+                        canva.generate_iso_displacement_waiting_iso = false;
+                        canva.generate_iso_displacement_status = "Failed";
+                    }
+                }
+            }
+            else if (is_iso_displacement)
+            {
+                canva.generate_iso_displacement_active = false;
+                canva.generate_iso_displacement_waiting_iso = false;
+                canva.generate_iso_displacement_status = "Failed";
+                console_add_line(
+                    state,
+                    "Canva: Create ISO Displacement Map cancelled because Sketch2ISO failed");
+            }
+        }
+
         (void)canva_try_finish_extract_pose(state, canva);
 
         if (canva.rig_optimization_job_running && canva.rig_optimization_future.valid())
@@ -3408,6 +3766,62 @@ namespace poseweaver::ui_canva
                 {
                     canva.generate_displacement_status = "Failed";
                     console_add_line(state, "Canva: Generate Displacement projection failed");
+                }
+            }
+        }
+
+        if (state.canva_iso_displacement_completed_id
+            > canva.last_iso_displacement_completed_id)
+        {
+            canva.last_iso_displacement_completed_id =
+                state.canva_iso_displacement_completed_id;
+            if (canva.generate_iso_displacement_waiting_render
+                && state.canva_iso_displacement_completed_id
+                    >= canva.generate_iso_displacement_render_request_id)
+            {
+                canva.generate_iso_displacement_waiting_render = false;
+                canva.generate_iso_displacement_active = false;
+
+                if (!state.canva_iso_displacement_path.empty())
+                {
+                    std::string error;
+                    const bool added_layer =
+                        canva.generate_iso_displacement_model_input_path.empty()
+                        ? canva_add_canvas_filled_png_layer(
+                            canva,
+                            state.canva_iso_displacement_path,
+                            "ISO Displacement",
+                            CanvaLayerKind::IsoDisplacement,
+                            true,
+                            &error)
+                        : canva_add_preprocess_aligned_png_layer(
+                            canva,
+                            state.canva_iso_displacement_path,
+                            canva.generate_iso_displacement_model_input_path,
+                            "ISO Displacement",
+                            CanvaLayerKind::IsoDisplacement,
+                            true,
+                            &error);
+                    if (added_layer)
+                    {
+                        canva.generate_iso_displacement_status = "Done";
+                        console_add_line(state, "Canva: Added ISO Displacement layer");
+                    }
+                    else
+                    {
+                        canva.generate_iso_displacement_status = "Failed";
+                        console_add_line(
+                            state,
+                            "Canva: Failed to add ISO Displacement layer: "
+                                + (error.empty() ? std::string("(unknown error)") : error));
+                    }
+                }
+                else
+                {
+                    canva.generate_iso_displacement_status = "Failed";
+                    console_add_line(
+                        state,
+                        "Canva: Create ISO Displacement Map projection failed");
                 }
             }
         }
@@ -4082,15 +4496,15 @@ namespace poseweaver::ui_canva
             ImGui::Separator();
             ImGui::TextUnformatted("Sketch2Rig");
             ImGui::SameLine();
-            ImGui::TextColored(sketch2rig_status_color(state.sketch2rig.status), "%s",
-                sketch2rig_status_text(state.sketch2rig.status));
+            ImGui::TextColored(model_inference_status_color(state.sketch2rig.status), "%s",
+                model_inference_status_text(state.sketch2rig.status));
 
             if (!state.sketch2rig.message.empty())
                 ImGui::TextWrapped("%s", state.sketch2rig.message.c_str());
 
             const bool can_process =
                 state.sketch2rig.service != nullptr &&
-                state.sketch2rig.status == Sketch2RigStatus::Ready;
+                state.sketch2rig.status == ModelInferenceStatus::Ready;
             ImGui::BeginDisabled(!can_process);
             if (ImGui::Button("Extract Rig"))
             {
@@ -4108,13 +4522,13 @@ namespace poseweaver::ui_canva
                     std::string request_err;
                     if (state.sketch2rig.service->request_inference(request_id, sketch_path, output_path, &request_err))
                     {
-                        state.sketch2rig.status = Sketch2RigStatus::Busy;
+                        state.sketch2rig.status = ModelInferenceStatus::Busy;
                         state.sketch2rig.active_request_id = request_id;
                         state.sketch2rig.message = "Processing sketch with Sketch2Rig...";
                     }
                     else
                     {
-                        state.sketch2rig.status = Sketch2RigStatus::Error;
+                        state.sketch2rig.status = ModelInferenceStatus::Error;
                         state.sketch2rig.message = request_err.empty() ? "Failed to queue inference" : request_err;
                         console_add_line(state, "Sketch2Rig: " + state.sketch2rig.message);
                     }
@@ -4132,15 +4546,15 @@ namespace poseweaver::ui_canva
             ImGui::Separator();
             ImGui::TextUnformatted("Sketch2Betas");
             ImGui::SameLine();
-            ImGui::TextColored(sketch2rig_status_color(state.sketch2betas.status), "%s",
-                sketch2rig_status_text(state.sketch2betas.status));
+            ImGui::TextColored(model_inference_status_color(state.sketch2betas.status), "%s",
+                model_inference_status_text(state.sketch2betas.status));
 
             if (!state.sketch2betas.message.empty())
                 ImGui::TextWrapped("%s", state.sketch2betas.message.c_str());
 
             const bool can_extract_betas =
                 state.sketch2betas.service != nullptr &&
-                state.sketch2betas.status == Sketch2RigStatus::Ready;
+                state.sketch2betas.status == ModelInferenceStatus::Ready;
             ImGui::BeginDisabled(!can_extract_betas);
             if (ImGui::Button("Extract betas"))
             {
@@ -4158,13 +4572,13 @@ namespace poseweaver::ui_canva
                     std::string request_err;
                     if (state.sketch2betas.service->request_inference(request_id, sketch_path, output_path, &request_err))
                     {
-                        state.sketch2betas.status = Sketch2RigStatus::Busy;
+                        state.sketch2betas.status = ModelInferenceStatus::Busy;
                         state.sketch2betas.active_request_id = request_id;
                         state.sketch2betas.message = "Processing sketch with Sketch2Betas...";
                     }
                     else
                     {
-                        state.sketch2betas.status = Sketch2RigStatus::Error;
+                        state.sketch2betas.status = ModelInferenceStatus::Error;
                         state.sketch2betas.message = request_err.empty() ? "Failed to queue inference" : request_err;
                         console_add_line(state, "Sketch2Betas: " + state.sketch2betas.message);
                     }
@@ -4182,15 +4596,15 @@ namespace poseweaver::ui_canva
             ImGui::Separator();
             ImGui::TextUnformatted("Sketch2UV");
             ImGui::SameLine();
-            ImGui::TextColored(sketch2rig_status_color(state.sketch2uv.status), "%s",
-                sketch2rig_status_text(state.sketch2uv.status));
+            ImGui::TextColored(model_inference_status_color(state.sketch2uv.status), "%s",
+                model_inference_status_text(state.sketch2uv.status));
 
             if (!state.sketch2uv.message.empty())
                 ImGui::TextWrapped("%s", state.sketch2uv.message.c_str());
 
             const bool can_predict_uv =
                 state.sketch2uv.service != nullptr &&
-                state.sketch2uv.status == Sketch2RigStatus::Ready;
+                state.sketch2uv.status == ModelInferenceStatus::Ready;
             ImGui::BeginDisabled(!can_predict_uv);
             if (ImGui::Button("Predict UV"))
             {
@@ -4208,13 +4622,13 @@ namespace poseweaver::ui_canva
                     std::string request_err;
                     if (state.sketch2uv.service->request_inference(request_id, sketch_path, output_path, &request_err))
                     {
-                        state.sketch2uv.status = Sketch2RigStatus::Busy;
+                        state.sketch2uv.status = ModelInferenceStatus::Busy;
                         state.sketch2uv.active_request_id = request_id;
                         state.sketch2uv.message = "Processing sketch with Sketch2UV...";
                     }
                     else
                     {
-                        state.sketch2uv.status = Sketch2RigStatus::Error;
+                        state.sketch2uv.status = ModelInferenceStatus::Error;
                         state.sketch2uv.message = request_err.empty() ? "Failed to queue inference" : request_err;
                         console_add_line(state, "Sketch2UV: " + state.sketch2uv.message);
                     }
@@ -4288,6 +4702,110 @@ namespace poseweaver::ui_canva
             }
 
             ImGui::Separator();
+            ImGui::TextUnformatted("Sketch2ISO");
+            ImGui::SameLine();
+            ImGui::TextColored(model_inference_status_color(state.sketch2iso.status), "%s",
+                model_inference_status_text(state.sketch2iso.status));
+
+            if (!state.sketch2iso.message.empty())
+                ImGui::TextWrapped("%s", state.sketch2iso.message.c_str());
+
+            const bool can_predict_iso =
+                state.sketch2iso.service != nullptr
+                && state.sketch2iso.status == ModelInferenceStatus::Ready;
+            ImGui::BeginDisabled(!can_predict_iso);
+            if (ImGui::Button("Predict ISO"))
+            {
+                std::filesystem::path sketch_path;
+                std::string err;
+                if (canva_save_model_input_png(canva, &sketch_path, &err))
+                {
+                    const std::filesystem::path output_path =
+                        sketch_path.parent_path() / "sketch_iso.npz";
+                    const std::uint64_t request_id = state.sketch2iso.next_request_id++;
+
+                    state.sketch2iso.last_sketch_path = sketch_path.string();
+                    console_add_line(state, "Canva: Saved normalized sketch for Sketch2ISO: "
+                        + sketch_path.string());
+
+                    std::string request_err;
+                    if (state.sketch2iso.service->request_inference(
+                            request_id, sketch_path, output_path, &request_err))
+                    {
+                        state.sketch2iso.status = ModelInferenceStatus::Busy;
+                        state.sketch2iso.active_request_id = request_id;
+                        state.sketch2iso.message = "Processing sketch with Sketch2ISO...";
+                    }
+                    else
+                    {
+                        state.sketch2iso.status = ModelInferenceStatus::Error;
+                        state.sketch2iso.message =
+                            request_err.empty() ? "Failed to queue inference" : request_err;
+                        console_add_line(state, "Sketch2ISO: " + state.sketch2iso.message);
+                    }
+                }
+                else
+                {
+                    console_add_line(state, std::string("Canva: Predict ISO preprocessing failed: ")
+                        + (err.empty() ? "(unknown error)" : err));
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Load ISO##canva_load_iso"))
+            {
+                const char* patterns[] = { "*.npz", "*.NPZ" };
+                const std::filesystem::path initial_dir =
+                    assets_dir() / "sketches" / "sketches_iso";
+                std::error_code ec;
+                const std::string initial_dir_string =
+                    std::filesystem::exists(initial_dir, ec) ? initial_dir.string() : std::string();
+
+                const char* path = tinyfd_openFileDialog(
+                    "Load ISO NPZ",
+                    initial_dir_string.c_str(),
+                    (int)(sizeof(patterns) / sizeof(patterns[0])),
+                    patterns,
+                    "ISO NPZ files (*.npz)",
+                    0);
+
+                state.cursor_restore_request = true;
+                if (path && path[0] != '\0')
+                {
+                    std::string err;
+                    const std::string layer_name =
+                        std::string("Loaded ISO Debug: ") + canva_basename(path);
+                    if (canva_add_iso_debug_layer(canva, path, {}, layer_name, true, &err))
+                    {
+                        state.canva_manual_iso_npz_path = path;
+                        console_add_line(state, std::string("Canva: Loaded ISO NPZ: ") + path);
+                    }
+                    else
+                    {
+                        console_add_line(state, std::string("Canva: ISO NPZ load failed: ")
+                            + (err.empty() ? "(unknown error)" : err));
+                    }
+                }
+                else
+                {
+                    console_add_line(state, "Canva: Load ISO cancelled");
+                }
+            }
+
+            if (!state.sketch2iso.last_output_path.empty())
+                ImGui::TextWrapped("Output: %s", state.sketch2iso.last_output_path.c_str());
+            if (!state.canva_manual_iso_npz_path.empty())
+            {
+                ImGui::TextWrapped("Loaded ISO: %s", state.canva_manual_iso_npz_path.c_str());
+                ImGui::SameLine();
+                if (ImGui::Button("Clear##canva_clear_loaded_iso"))
+                {
+                    state.canva_manual_iso_npz_path.clear();
+                    console_add_line(state, "Canva: Cleared loaded ISO NPZ");
+                }
+            }
+
+            ImGui::Separator();
             ImGui::TextUnformatted("Rig Optimization");
             std::string rig_opt_pose_error;
             std::filesystem::path rig_opt_pose_path;
@@ -4299,7 +4817,7 @@ namespace poseweaver::ui_canva
                 && std::filesystem::exists(std::filesystem::path(state.sketch2uv.last_output_path), rig_opt_ec);
             const bool rig_opt_can_queue_uv =
                 state.sketch2uv.service != nullptr
-                && state.sketch2uv.status == Sketch2RigStatus::Ready;
+                && state.sketch2uv.status == ModelInferenceStatus::Ready;
             const bool can_optimize_rig =
                 rig_opt_pose_available
                 && !canva.rig_optimization_active
@@ -4365,9 +4883,10 @@ namespace poseweaver::ui_canva
                 canva_manual_uv_source_path(state, &displacement_loaded_uv_path);
             const bool displacement_can_queue_uv =
                 state.sketch2uv.service != nullptr
-                && state.sketch2uv.status == Sketch2RigStatus::Ready;
+                && state.sketch2uv.status == ModelInferenceStatus::Ready;
             const bool can_generate_displacement =
                 !canva.generate_displacement_active
+                && !canva.generate_iso_displacement_active
                 && displacement_camera_available
                 && (displacement_have_loaded_uv || displacement_can_queue_uv);
             ImGui::BeginDisabled(!can_generate_displacement);
@@ -4393,13 +4912,60 @@ namespace poseweaver::ui_canva
             if (canva.generate_displacement_waiting_render)
                 ImGui::TextUnformatted("Generate Displacement: projecting offsets...");
 
+            ImGui::SetNextItemWidth(140.0f);
+            ImGui::InputFloat(
+                "ISO distance threshold##canva_iso_distance",
+                &state.iso_distance_threshold,
+                0.01f,
+                0.05f,
+                "%.4f");
+            state.iso_distance_threshold =
+                std::clamp(state.iso_distance_threshold, 0.0f, 10.0f);
+
+            std::filesystem::path displacement_loaded_iso_path;
+            const bool displacement_have_loaded_iso =
+                canva_manual_iso_source_path(state, &displacement_loaded_iso_path);
+            const bool displacement_can_queue_iso =
+                state.sketch2iso.service != nullptr
+                && state.sketch2iso.status == ModelInferenceStatus::Ready;
+            const bool can_generate_iso_displacement =
+                !canva.generate_iso_displacement_active
+                && !canva.generate_displacement_active
+                && displacement_camera_available
+                && (displacement_have_loaded_iso || displacement_can_queue_iso);
+            ImGui::BeginDisabled(!can_generate_iso_displacement);
+            if (ImGui::Button("Create ISO Displacement Map"))
+            {
+                std::string error;
+                if (!canva_queue_generate_iso_displacement(state, canva, &error))
+                {
+                    canva.generate_iso_displacement_active = false;
+                    canva.generate_iso_displacement_status = "Failed";
+                    console_add_line(
+                        state,
+                        "Canva: Create ISO Displacement Map failed to queue: "
+                            + (error.empty() ? std::string("(unknown error)") : error));
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::Text(
+                "Status: %s",
+                !displacement_camera_available ? "Predict camera view first"
+                : !displacement_have_loaded_iso && !displacement_can_queue_iso ? "Need ISO"
+                : canva.generate_iso_displacement_status.c_str());
+            if (canva.generate_iso_displacement_waiting_iso)
+                ImGui::TextUnformatted("ISO displacement: generating ISO map...");
+            if (canva.generate_iso_displacement_waiting_render)
+                ImGui::TextUnformatted("ISO displacement: projecting offsets...");
+
             ImGui::Separator();
             const bool can_extract_pose =
                 !canva.extract_pose_active &&
                 state.sketch2rig.service != nullptr &&
                 state.sketch2betas.service != nullptr &&
-                state.sketch2rig.status == Sketch2RigStatus::Ready &&
-                state.sketch2betas.status == Sketch2RigStatus::Ready;
+                state.sketch2rig.status == ModelInferenceStatus::Ready &&
+                state.sketch2betas.status == ModelInferenceStatus::Ready;
             ImGui::BeginDisabled(!can_extract_pose);
             if (ImGui::Button("Extract Pose"))
             {
@@ -4536,13 +5102,14 @@ namespace poseweaver::ui_canva
             const bool cloth_fitting_have_uv = canva_current_uv_source_path(state, &cloth_fitting_uv_path);
             const bool cloth_fitting_can_queue_uv =
                 state.sketch2uv.service != nullptr
-                && state.sketch2uv.status == Sketch2RigStatus::Ready;
+                && state.sketch2uv.status == ModelInferenceStatus::Ready;
             const bool can_fit_cloth =
                 cloth_layer_selected
                 && (cloth_fitting_have_uv || cloth_fitting_can_queue_uv)
                 && !canva.cloth_fitting_active
                 && !canva.generate_cloth_active
-                && !canva.generate_displacement_active;
+                && !canva.generate_displacement_active
+                && !canva.generate_iso_displacement_active;
             ImGui::BeginDisabled(!can_fit_cloth);
             if (ImGui::Button("cloth Fitting"))
             {

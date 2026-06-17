@@ -151,6 +151,14 @@ namespace poseweaver
             bool valid = false;
         };
 
+        struct IsoHoverPoint
+        {
+            int vertex = -1;
+            float distance = 0.0f;
+            bool sampled = false;
+            bool mapped = false;
+        };
+
         static UvPanePlacement draw_uv_projection_pane(
             AppState& state,
             Renderer& renderer,
@@ -386,7 +394,8 @@ namespace poseweaver
         static UvPanePlacement draw_smpl_body_preview_pane(
             AppState& state,
             Renderer& renderer,
-            const ImVec2& pane_size)
+            const ImVec2& pane_size,
+            bool square_camera = false)
         {
             UvPanePlacement placement;
             if (pane_size.x <= 1.0f || pane_size.y <= 1.0f)
@@ -399,8 +408,13 @@ namespace poseweaver
             if (!dl)
                 return placement;
 
-            const int render_w = std::max(32, (int)std::floor(pane_size.x));
-            const int render_h = std::max(32, (int)std::floor(pane_size.y));
+            const float render_extent = std::min(pane_size.x, pane_size.y);
+            const int render_w = std::max(
+                32,
+                (int)std::floor(square_camera ? render_extent : pane_size.x));
+            const int render_h = std::max(
+                32,
+                (int)std::floor(square_camera ? render_extent : pane_size.y));
             const Renderer::SmplBodyPreviewInfo info = renderer.render_smpl_body_preview(state, render_w, render_h);
             if (!info.valid)
                 return placement;
@@ -486,6 +500,128 @@ namespace poseweaver
             dl->AddCircleFilled(p, 5.0f, IM_COL32(255, 235, 40, 235), 18);
             dl->AddCircle(p, 9.0f, IM_COL32(0, 0, 0, 235), 20, 1.6f);
             dl->AddCircle(p, 14.0f, IM_COL32(255, 235, 40, 120), 24, 1.2f);
+            dl->PopClipRect();
+        }
+
+        static UvPanePlacement draw_sketch2iso_prediction_pane(
+            Renderer& renderer,
+            const Renderer::UvDebugTextureInfo& info,
+            float distance_threshold,
+            const ImVec2& pane_size,
+            IsoHoverPoint& hover_point)
+        {
+            UvPanePlacement placement;
+            if (pane_size.x <= 1.0f || pane_size.y <= 1.0f || !info.valid)
+                return placement;
+
+            const ImVec2 pane_pos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("iso_prediction_canvas", pane_size,
+                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+            const bool hovered = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return placement;
+
+            const float tex_w = (float)info.width;
+            const float tex_h = (float)info.height;
+            const float fit_scale = (tex_w > 0.0f && tex_h > 0.0f)
+                ? std::min(pane_size.x / tex_w, pane_size.y / tex_h)
+                : 1.0f;
+            const ImVec2 image_size(tex_w * fit_scale, tex_h * fit_scale);
+            const ImVec2 origin(
+                pane_pos.x + (pane_size.x - image_size.x) * 0.5f,
+                pane_pos.y + (pane_size.y - image_size.y) * 0.5f);
+
+            dl->PushClipRect(
+                pane_pos,
+                ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y),
+                true);
+            dl->AddImage(
+                (ImTextureID)(intptr_t)info.texture_id,
+                origin,
+                ImVec2(origin.x + image_size.x, origin.y + image_size.y));
+            dl->AddRect(
+                origin,
+                ImVec2(origin.x + image_size.x, origin.y + image_size.y),
+                IM_COL32(0, 0, 0, 100));
+
+            if (hovered && image_size.x > 0.0f && image_size.y > 0.0f)
+            {
+                const ImVec2 mouse = ImGui::GetIO().MousePos;
+                if (mouse.x >= origin.x && mouse.x < origin.x + image_size.x
+                    && mouse.y >= origin.y && mouse.y < origin.y + image_size.y)
+                {
+                    const int px = std::clamp(
+                        (int)std::floor(((mouse.x - origin.x) / image_size.x) * tex_w),
+                        0,
+                        std::max(0, info.width - 1));
+                    const int py = std::clamp(
+                        (int)std::floor(((mouse.y - origin.y) / image_size.y) * tex_h),
+                        0,
+                        std::max(0, info.height - 1));
+                    int vertex = -1;
+                    float distance = 0.0f;
+                    const bool mapped = renderer.sketch2iso_prediction_match_at(
+                        px,
+                        py,
+                        distance_threshold,
+                        vertex,
+                        distance);
+                    if (vertex >= 0)
+                    {
+                        hover_point.vertex = vertex;
+                        hover_point.distance = distance;
+                        hover_point.sampled = true;
+                        hover_point.mapped = mapped;
+                        const ImVec2 point(
+                            origin.x + (((float)px + 0.5f) / tex_w) * image_size.x,
+                            origin.y + (((float)py + 0.5f) / tex_h) * image_size.y);
+                        const ImU32 color = mapped
+                            ? IM_COL32(255, 235, 40, 240)
+                            : IM_COL32(30, 110, 255, 245);
+                        dl->AddCircle(point, 6.0f, color, 18, 2.0f);
+                        dl->AddCircle(point, 2.0f, IM_COL32(0, 0, 0, 220), 12, 1.0f);
+                    }
+                }
+            }
+            dl->PopClipRect();
+
+            placement.origin = origin;
+            placement.image_size = image_size;
+            placement.clip_min = pane_pos;
+            placement.clip_max = ImVec2(pane_pos.x + pane_size.x, pane_pos.y + pane_size.y);
+            placement.valid = image_size.x > 0.0f && image_size.y > 0.0f;
+            return placement;
+        }
+
+        static void draw_smpl_body_iso_hover_indicator(
+            Renderer& renderer,
+            const UvPanePlacement& preview,
+            const IsoHoverPoint& hover_point)
+        {
+            if (!preview.valid || !hover_point.mapped || hover_point.vertex < 0)
+                return;
+
+            Eigen::Vector3f body_point;
+            if (!renderer.smpl_body_point_for_vertex(hover_point.vertex, body_point))
+                return;
+
+            float x01 = 0.0f;
+            float y01 = 0.0f;
+            if (!renderer.smpl_body_preview_project(body_point, x01, y01))
+                return;
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (!dl)
+                return;
+
+            const ImVec2 point(
+                preview.origin.x + x01 * preview.image_size.x,
+                preview.origin.y + y01 * preview.image_size.y);
+            dl->PushClipRect(preview.clip_min, preview.clip_max, true);
+            dl->AddCircleFilled(point, 5.0f, IM_COL32(255, 235, 40, 235), 18);
+            dl->AddCircle(point, 9.0f, IM_COL32(0, 0, 0, 235), 20, 1.6f);
+            dl->AddCircle(point, 14.0f, IM_COL32(255, 235, 40, 120), 24, 1.2f);
             dl->PopClipRect();
         }
 
@@ -795,6 +931,82 @@ namespace poseweaver
                             ImGui::PopID();
                             draw_smpl_body_hover_indicator(renderer, body_preview, hover_point);
                         }
+                    }
+                }
+            }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Iso projection"))
+        {
+            state.cloth_view = ViewportRect{ 0, 0, 0, 0, true };
+
+            ImGui::SetNextItemWidth(140.0f);
+            ImGui::InputFloat(
+                "ISO distance threshold",
+                &state.iso_distance_threshold,
+                0.01f,
+                0.05f,
+                "%.4f");
+            state.iso_distance_threshold =
+                std::clamp(state.iso_distance_threshold, 0.0f, 10.0f);
+            ImGui::SameLine();
+            ImGui::TextDisabled("Blue hover = unmapped");
+
+            const auto prediction_info = renderer.sketch2iso_prediction_texture_info();
+            if (!prediction_info.valid)
+            {
+                ImGui::TextUnformatted("ISO sketch is not available yet.");
+                ImGui::TextUnformatted("Generate or load an ISO map from the canva tab.");
+            }
+            else
+            {
+                const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+                if (canvas_size.x > 1.0f && canvas_size.y > 1.0f)
+                {
+                    const bool show_body_preview =
+                        predicted_pose_camera_available(state)
+                        && canvas_size.x > 420.0f;
+                    const float gap = show_body_preview ? 10.0f : 0.0f;
+                    const float sketch_width = show_body_preview
+                        ? std::max(1.0f, std::floor((canvas_size.x - gap) * 0.5f))
+                        : canvas_size.x;
+                    const float body_width = show_body_preview
+                        ? std::max(1.0f, canvas_size.x - gap - sketch_width)
+                        : 0.0f;
+
+                    IsoHoverPoint hover_point;
+                    ImGui::PushID("sketch2iso_prediction_pane");
+                    draw_sketch2iso_prediction_pane(
+                        renderer,
+                        prediction_info,
+                        state.iso_distance_threshold,
+                        ImVec2(sketch_width, canvas_size.y),
+                        hover_point);
+                    ImGui::PopID();
+
+                    if (show_body_preview)
+                    {
+                        ImGui::SameLine(0.0f, gap);
+                        ImGui::PushID("iso_smpl_body_preview_pane");
+                        const UvPanePlacement body_preview = draw_smpl_body_preview_pane(
+                            state,
+                            renderer,
+                            ImVec2(body_width, canvas_size.y),
+                            true);
+                        ImGui::PopID();
+                        draw_smpl_body_iso_hover_indicator(renderer, body_preview, hover_point);
+                    }
+
+                    if (hover_point.sampled)
+                    {
+                        ImGui::SetTooltip(
+                            hover_point.mapped
+                                ? "Vertex %d, ISO distance %.5f"
+                                : "Unmapped, nearest vertex %d, ISO distance %.5f",
+                            hover_point.vertex,
+                            hover_point.distance);
                     }
                 }
             }

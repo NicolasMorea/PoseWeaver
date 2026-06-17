@@ -11,14 +11,14 @@
 
 namespace poseweaver
 {
-    class Sketch2RigService
+    class ModelInferenceService
     {
     public:
-        explicit Sketch2RigService(std::string label = "Sketch2Rig");
-        ~Sketch2RigService();
+        explicit ModelInferenceService(std::string label = "Model");
+        ~ModelInferenceService();
 
-        Sketch2RigService(const Sketch2RigService&) = delete;
-        Sketch2RigService& operator=(const Sketch2RigService&) = delete;
+        ModelInferenceService(const ModelInferenceService&) = delete;
+        ModelInferenceService& operator=(const ModelInferenceService&) = delete;
 
         void start(
             const std::filesystem::path& model_dir,
@@ -28,8 +28,7 @@ namespace poseweaver
             const std::filesystem::path& sketch_path,
             const std::filesystem::path& output_path,
             std::string* out_error);
-        void drain_events(AppState& state);
-        void drain_events(AppState& state, Sketch2RigUiState& ui_state);
+        void drain_events(AppState& state, ModelInferenceUiState& ui_state);
         void stop();
 
     private:

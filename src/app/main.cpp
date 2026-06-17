@@ -3,7 +3,7 @@
 #include "core/Assets.h"
 #include "core/Paths.h"
 #include "render/Renderer.h"
-#include "sketch2rig/Sketch2RigService.h"
+#include "services/ModelInferenceService.h"
 #include "ui/Ui.h"
 
 #include <algorithm>
@@ -457,14 +457,16 @@ int main(int, char**)
     poseweaver::AssetIndex assets(poseweaver::assets_dir());
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
-    poseweaver::Sketch2RigService sketch2rig("Sketch2Rig");
-    poseweaver::Sketch2RigService sketch2betas("Sketch2Betas");
-    poseweaver::Sketch2RigService sketch2uv("Sketch2UV");
+    poseweaver::ModelInferenceService sketch2rig("Sketch2Rig");
+    poseweaver::ModelInferenceService sketch2betas("Sketch2Betas");
+    poseweaver::ModelInferenceService sketch2uv("Sketch2UV");
+    poseweaver::ModelInferenceService sketch2iso("Sketch2ISO");
     NativeCursorGuard cursor_guard;
     cursor_guard.init(window);
     state.sketch2rig.service = &sketch2rig;
     state.sketch2betas.service = &sketch2betas;
     state.sketch2uv.service = &sketch2uv;
+    state.sketch2iso.service = &sketch2iso;
 
     poseweaver::install_imgui_state_settings_handler(state);
 
@@ -501,6 +503,9 @@ int main(int, char**)
     sketch2uv.start(
         poseweaver::assets_dir() / "Sketch2Uv",
         std::filesystem::path(POSEWEAVER_SKETCH2UV_WORKER));
+    sketch2iso.start(
+        poseweaver::assets_dir() / "Sketch2Iso",
+        std::filesystem::path(POSEWEAVER_SKETCH2ISO_WORKER));
 
     double last_time = glfwGetTime();
     double play_accum = 0.0;
@@ -539,6 +544,7 @@ int main(int, char**)
         sketch2rig.drain_events(state, state.sketch2rig);
         sketch2betas.drain_events(state, state.sketch2betas);
         sketch2uv.drain_events(state, state.sketch2uv);
+        sketch2iso.drain_events(state, state.sketch2iso);
 
         if (state.asset_refresh_request_id != last_asset_refresh_request_id)
         {
@@ -589,6 +595,7 @@ int main(int, char**)
     sketch2rig.stop();
     sketch2betas.stop();
     sketch2uv.stop();
+    sketch2iso.stop();
 
     poseweaver::save_imgui_settings_to_disk();
 

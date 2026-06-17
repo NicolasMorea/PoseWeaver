@@ -7,7 +7,7 @@
 
 namespace poseweaver
 {
-    class Sketch2RigService;
+    class ModelInferenceService;
 
     struct ViewportRect
     {
@@ -123,7 +123,7 @@ namespace poseweaver
         std::array<float, 16> betas{};
     };
 
-    enum class Sketch2RigStatus
+    enum class ModelInferenceStatus
     {
         NotStarted = 0,
         Loading,
@@ -133,10 +133,10 @@ namespace poseweaver
         Stopped,
     };
 
-    struct Sketch2RigUiState
+    struct ModelInferenceUiState
     {
-        Sketch2RigService* service = nullptr;
-        Sketch2RigStatus status = Sketch2RigStatus::NotStarted;
+        ModelInferenceService* service = nullptr;
+        ModelInferenceStatus status = ModelInferenceStatus::NotStarted;
         std::string message = "Model not started";
         std::string last_sketch_path;
         std::string last_output_path;
@@ -227,6 +227,12 @@ namespace poseweaver
         std::string canva_displacement_model_input_path;
         std::string canva_displacement_path;
         std::string canva_manual_uv_png_path;
+        std::string canva_manual_iso_npz_path;
+        std::uint64_t canva_iso_displacement_request_id = 0;
+        std::uint64_t canva_iso_displacement_completed_id = 0;
+        std::string canva_iso_displacement_npz_path;
+        std::string canva_iso_displacement_model_input_path;
+        std::string canva_iso_displacement_path;
 
         float garment_min_cloth_skin_distance = 0.001f;
         float garment_ease_amount = 0.20f;
@@ -247,6 +253,7 @@ namespace poseweaver
         float canva_brush_radius = 8.0f;
         std::array<float, 4> canva_brush_color{ 0.0f, 0.0f, 0.0f, 1.0f };
         float cloth_fitting_depth_margin = 0.0015f;
+        float iso_distance_threshold = 0.15f;
 
         bool canva_tab_active = false;
         std::uint64_t canva_undo_request_id = 0;
@@ -257,9 +264,10 @@ namespace poseweaver
         std::uint64_t pose_asset_reload_request_id = 0;
         std::string pending_pose_selection;
 
-        Sketch2RigUiState sketch2rig;
-        Sketch2RigUiState sketch2betas;
-        Sketch2RigUiState sketch2uv;
+        ModelInferenceUiState sketch2rig;
+        ModelInferenceUiState sketch2betas;
+        ModelInferenceUiState sketch2uv;
+        ModelInferenceUiState sketch2iso;
 
         SmplShapeState smpl_shape;
         UiLayoutState layout;

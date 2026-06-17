@@ -136,8 +136,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/xpbd/ClothXpbd.h
 		src/simulation/ClothToSmplMapping.cpp
 		src/simulation/ClothToSmplMapping.h
-		src/sketch2rig/Sketch2RigService.cpp
-		src/sketch2rig/Sketch2RigService.h
+		src/services/ModelInferenceService.cpp
+		src/services/ModelInferenceService.h
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
@@ -148,6 +148,7 @@ if(POSEWEAVER_BUILD_APP)
 		src/render/RendererGarmentCommands.cpp
 		src/render/Renderer.h
 		src/render/RendererGarment.cpp
+		src/render/RendererIso.cpp
 		src/render/RendererRig.cpp
 		src/render/RendererSmpl.cpp
 		src/render/RendererSmplPreview.cpp
@@ -178,6 +179,7 @@ if(POSEWEAVER_BUILD_APP)
 		POSEWEAVER_SKETCH2RIG_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2rig/inference_worker.py"
 		POSEWEAVER_SKETCH2BETAS_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2betas/inference_worker.py"
 		POSEWEAVER_SKETCH2UV_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2uv/inference_worker.py"
+		POSEWEAVER_SKETCH2ISO_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2iso/inference_worker.py"
 		POSEWEAVER_RIG_OPTIMIZER_WORKER="${CMAKE_SOURCE_DIR}/src/rigopt/optimize_rig.py"
 	)
 

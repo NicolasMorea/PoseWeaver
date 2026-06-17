@@ -315,6 +315,17 @@ namespace poseweaver
         return true;
     }
 
+    bool Renderer::smpl_body_point_for_vertex(int vertex, Eigen::Vector3f& out_point) const
+    {
+        if (vertex < 0 || vertex >= m_smplh_vertices.rows())
+            return false;
+        const Eigen::Vector3d point = m_smplh_vertices.row(vertex).transpose();
+        if (!point.allFinite())
+            return false;
+        out_point = point.cast<float>();
+        return true;
+    }
+
     bool Renderer::smpl_body_preview_project(const Eigen::Vector3f& point, float& out_x01, float& out_y01) const
     {
         if (!m_smpl_body_preview_camera_valid || !point.allFinite())

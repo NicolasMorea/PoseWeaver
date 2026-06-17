@@ -697,6 +697,7 @@ namespace poseweaver
         m_last_scene_view_snapshot_request_id = state.scene_view_snapshot_request_id;
         m_last_cloth_render_request_id = state.cloth_render_request_id;
         m_last_canva_displacement_request_id = state.canva_displacement_request_id;
+        m_last_canva_iso_displacement_request_id = state.canva_iso_displacement_request_id;
         m_last_uv_image_request_id = state.uv_image_request_id;
 
         m_sketch2rig_rig_source_path.clear();
@@ -728,6 +729,20 @@ namespace poseweaver
         m_sketch2uv_prediction_pixels.clear();
         m_sketch2uv_prediction_uv.clear();
         m_sketch2uv_prediction_mask.clear();
+
+        if (m_sketch2iso_prediction_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_sketch2iso_prediction_texture_id);
+            m_sketch2iso_prediction_texture_id = 0;
+        }
+        m_sketch2iso_prediction_texture_w = 0;
+        m_sketch2iso_prediction_texture_h = 0;
+        m_sketch2iso_prediction_channels = 0;
+        m_sketch2iso_prediction_npz_path.clear();
+        m_sketch2iso_prediction_sketch_path.clear();
+        m_sketch2iso_prediction_request_id = 0;
+        m_sketch2iso_prediction_values.clear();
+        m_sketch2iso_prediction_mask.clear();
 
         if (m_uv_debug_texture_id != 0)
         {
@@ -775,7 +790,8 @@ namespace poseweaver
 
         const bool need_body_for_garment = state.show_garment_mesh && (state.selection.pose_index >= 0);
         const bool need_body_for_displacement =
-            state.canva_displacement_request_id != m_last_canva_displacement_request_id;
+            state.canva_displacement_request_id != m_last_canva_displacement_request_id
+            || state.canva_iso_displacement_request_id != m_last_canva_iso_displacement_request_id;
         const bool need_body_for_smpl_layer =
             state.scene_view_snapshot_request_id != m_last_scene_view_snapshot_request_id;
         if (state.show_smpl || need_body_for_garment || need_body_for_displacement || need_body_for_smpl_layer)
@@ -800,7 +816,9 @@ namespace poseweaver
 
         call_commands_from_state(state);
         ensure_sketch2uv_prediction_texture(state);
+        ensure_sketch2iso_prediction_texture(state);
         process_canva_displacement_map(state);
+        process_canva_iso_displacement_map(state);
 
         update_cloth_simulation_job(state);
         apply_cloth_simulation_frame(state);
@@ -1908,6 +1926,26 @@ namespace poseweaver
         m_sketch2uv_prediction_pixels.clear();
         m_sketch2uv_prediction_uv.clear();
         m_sketch2uv_prediction_mask.clear();
+
+        if (m_sketch2iso_prediction_texture_id != 0)
+        {
+            glDeleteTextures(1, &m_sketch2iso_prediction_texture_id);
+            m_sketch2iso_prediction_texture_id = 0;
+        }
+        m_sketch2iso_prediction_texture_w = 0;
+        m_sketch2iso_prediction_texture_h = 0;
+        m_sketch2iso_prediction_channels = 0;
+        m_sketch2iso_prediction_npz_path.clear();
+        m_sketch2iso_prediction_sketch_path.clear();
+        m_sketch2iso_prediction_request_id = 0;
+        m_sketch2iso_prediction_values.clear();
+        m_sketch2iso_prediction_mask.clear();
+        m_iso_vertex_descriptors.clear();
+        m_iso_vertex_descriptor_count = 0;
+        m_iso_vertex_descriptor_dimensions = 0;
+        m_iso_vertex_descriptors_load_attempted = false;
+        m_iso_kd_nodes.clear();
+        m_iso_kd_root = -1;
 
         release_smpl_body_preview();
 
