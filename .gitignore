@@ -53,6 +53,11 @@ doc
 
 #ignore assets and scripts files
 assets
+!assets/
+assets/*
+!assets/smplh/
+assets/smplh/*
+!assets/smplh/isomap_64d.npz
 scripts
 
 # ImGui runtime settings
