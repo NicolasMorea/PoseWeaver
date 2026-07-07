@@ -338,6 +338,7 @@ namespace poseweaver
                             float pct = state.controls.smooth_sequence_length * 100.0f;
                             if (ImGui::SliderFloat("Sequence length", &pct, 0.0f, 100.0f, "%.0f%%"))
                                 state.controls.smooth_sequence_length = std::clamp(pct / 100.0f, 0.0f, 1.0f);
+                            ImGui::Checkbox("Save SMPL sequence", &state.controls.save_smpl_sequence);
                         }
                         ImGui::EndDisabled();
 
@@ -359,7 +360,10 @@ namespace poseweaver
 
                             ImGui::InputFloat("Gravity", &p.gravity, 0.5f, 5.0f, "%.3f");
 
+                            ImGui::Checkbox("Use simplified SMPL", &p.simplify_smpl);
+                            ImGui::BeginDisabled(!p.simplify_smpl);
                             ImGui::SliderFloat("SMPL geometry kept", &p.smpl_geometry_percent, 1.0f, 100.0f, "%.0f%%");
+                            ImGui::EndDisabled();
                             p.smpl_geometry_percent = std::clamp(p.smpl_geometry_percent, 1.0f, 100.0f);
 
                             if (ImGui::TreeNodeEx("Constraints", ImGuiTreeNodeFlags_DefaultOpen))
@@ -469,7 +473,7 @@ namespace poseweaver
                             state.cloth_cancel_simulation_request_id++;
                         }
                         if (total > 0)
-                            ImGui::Text("%d / %d steps", done, total);
+                            ImGui::Text("%d / %d", done, total);
                         if (!state.controls.sim_stage.empty())
                             ImGui::Text("Step: %s", state.controls.sim_stage.c_str());
                     }
