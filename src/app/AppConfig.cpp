@@ -49,6 +49,18 @@ namespace
         {
             state->cloth_toon_shader = (iv != 0);
         }
+        {
+            float r = 1.0f, g = 1.0f, b = 1.0f;
+            if (std::sscanf(line, "ClothInkColor=%f,%f,%f", &r, &g, &b) == 3)
+            {
+                if (std::isfinite(r) && std::isfinite(g) && std::isfinite(b))
+                {
+                    state->cloth_ink_color[0] = std::clamp(r, 0.0f, 1.0f);
+                    state->cloth_ink_color[1] = std::clamp(g, 0.0f, 1.0f);
+                    state->cloth_ink_color[2] = std::clamp(b, 0.0f, 1.0f);
+                }
+            }
+        }
 
         if (std::sscanf(line, "SimulationPreview=%d", &iv) == 1)
         {
@@ -63,6 +75,10 @@ namespace
         {
             if (std::isfinite(v))
                 state->controls.smooth_sequence_length = std::clamp(v, 0.0f, 1.0f);
+        }
+        if (std::sscanf(line, "SaveSmplSequence=%d", &iv) == 1)
+        {
+            state->controls.save_smpl_sequence = (iv != 0);
         }
 
         if (std::sscanf(line, "SimulationMaxFrames=%d", &iv) == 1)
@@ -131,6 +147,26 @@ namespace
         {
             if (std::isfinite(v))
                 state->cloth_fitting_depth_margin = std::clamp(v, 0.0f, 0.05f);
+        }
+        if (std::sscanf(line, "ClothFittingDepthMarginPred=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->cloth_fitting_depth_margin_pred = std::clamp(v, 0.0f, 1.0f);
+        }
+        if (std::sscanf(line, "ClothFittingBodyDistanceThreshold=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->cloth_fitting_body_distance_threshold = std::clamp(v, 0.0f, 1.0f);
+        }
+        if (std::sscanf(line, "ClothFittingWarpRadius=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->cloth_fitting_warp_radius = std::clamp(v, 0.0f, 512.0f);
+        }
+        if (std::sscanf(line, "ClothFittingWarpForce=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->cloth_fitting_warp_force = std::clamp(v, 0.0f, 4.0f);
         }
         if (std::sscanf(line, "IsoDistanceThreshold=%f", &v) == 1)
         {
@@ -270,6 +306,10 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.wind_random_time = std::clamp(v, 0.0f, 1000.0f);
         }
+        if (std::sscanf(line, "XpbdSimplifySmpl=%d", &iv) == 1)
+        {
+            state->xpbd_params.simplify_smpl = (iv != 0);
+        }
         if (std::sscanf(line, "XpbdSmplGeometryPercent=%f", &v) == 1)
         {
             if (std::isfinite(v))
@@ -289,9 +329,12 @@ namespace
         buf->appendf("GarmentVertexMergeEnabled=%d\n", state->garment_vertex_merge_enabled ? 1 : 0);
         buf->appendf("GarmentVertexMergeDistance=%.9f\n", state->garment_vertex_merge_distance);
         buf->appendf("ClothToonShader=%d\n", state->cloth_toon_shader ? 1 : 0);
+        buf->appendf("ClothInkColor=%.6f,%.6f,%.6f\n",
+            state->cloth_ink_color[0], state->cloth_ink_color[1], state->cloth_ink_color[2]);
         buf->appendf("SimulationPreview=%d\n", state->controls.preview ? 1 : 0);
         buf->appendf("SmoothSequence=%d\n", state->controls.smooth_sequence ? 1 : 0);
         buf->appendf("SmoothSequenceLength=%.6f\n", state->controls.smooth_sequence_length);
+        buf->appendf("SaveSmplSequence=%d\n", state->controls.save_smpl_sequence ? 1 : 0);
 
         buf->appendf("SimulationMaxFrames=%d\n", state->controls.max_frames);
         buf->appendf("SimulationFps=%.9f\n", state->controls.fps);
@@ -303,6 +346,10 @@ namespace
         buf->appendf("CanvaBrushColor=%.6f,%.6f,%.6f,%.6f\n",
             state->canva_brush_color[0], state->canva_brush_color[1], state->canva_brush_color[2], state->canva_brush_color[3]);
         buf->appendf("ClothFittingDepthMargin=%.9f\n", state->cloth_fitting_depth_margin);
+        buf->appendf("ClothFittingDepthMarginPred=%.9f\n", state->cloth_fitting_depth_margin_pred);
+        buf->appendf("ClothFittingBodyDistanceThreshold=%.9f\n", state->cloth_fitting_body_distance_threshold);
+        buf->appendf("ClothFittingWarpRadius=%.6f\n", state->cloth_fitting_warp_radius);
+        buf->appendf("ClothFittingWarpForce=%.6f\n", state->cloth_fitting_warp_force);
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
 
@@ -334,6 +381,7 @@ namespace
         buf->appendf("XpbdWindPitchDeg=%.6f\n", state->xpbd_params.wind_pitch_deg);
         buf->appendf("XpbdWindRandomSpace=%.6f\n", state->xpbd_params.wind_random_space);
         buf->appendf("XpbdWindRandomTime=%.6f\n", state->xpbd_params.wind_random_time);
+        buf->appendf("XpbdSimplifySmpl=%d\n", state->xpbd_params.simplify_smpl ? 1 : 0);
         buf->appendf("XpbdSmplGeometryPercent=%.6f\n", state->xpbd_params.smpl_geometry_percent);
 
         buf->appendf("\n");
