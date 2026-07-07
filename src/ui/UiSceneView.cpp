@@ -660,6 +660,11 @@ namespace poseweaver
             if (scene_toolbar_toggle("Ink Cloth", state.cloth_toon_shader))
                 state.cloth_toon_shader = !state.cloth_toon_shader;
             ImGui::SameLine();
+            ImGui::ColorEdit3(
+                "Ink color",
+                state.cloth_ink_color.data(),
+                ImGuiColorEditFlags_NoInputs);
+            ImGui::SameLine();
             if (ImGui::Button("Snap to Target (A)"))
                 state.scene_view_snap_to_target_request_id++;
             ImGui::PopID();

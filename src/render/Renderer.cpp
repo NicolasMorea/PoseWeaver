@@ -485,7 +485,11 @@ namespace poseweaver
             if (stroke_darkness.empty())
                 return false;
 
-            const float target_darkness = 1.0f - std::clamp(target_mean, 0.02f, 0.98f);
+            // Keep the sketch-matched value, but pull it halfway back toward
+            // the raw ink value (black) so the rendered folds retain contrast.
+            const float normalized_luminance = std::clamp(target_mean, 0.02f, 0.98f);
+            const float target_luminance = 0.5f * normalized_luminance;
+            const float target_darkness = 1.0f - target_luminance;
             const auto scaled_mean = [&](float scale)
             {
                 double sum = 0.0;
@@ -1061,6 +1065,7 @@ namespace poseweaver
             glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
             glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
             glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
+            glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
             glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
             glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
 
@@ -1707,6 +1712,7 @@ namespace poseweaver
         glUniform1f(glGetUniformLocation(prog, "light2_factor"), 0.55f);
         glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
         glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
+        glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
         glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
@@ -1805,7 +1811,7 @@ namespace poseweaver
             if (matched_stroke_mean)
             {
                 console_add_line(state,
-                    "Cloth render ink mean matched sketch: "
+                    "Cloth render ink blended halfway from sketch toward black: "
                     + std::to_string(sketch_stroke_mean));
             }
         }
