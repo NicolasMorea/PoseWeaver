@@ -91,12 +91,22 @@ namespace poseweaver
             const std::vector<unsigned char>& cloth_rgba,
             int width,
             int height,
-            const std::string& uv_json_path,
-            float uv_from_cloth_scale,
-            float uv_from_cloth_offset_x,
-            float uv_from_cloth_offset_y,
+            const std::string& iso_npz_path,
+            const std::string& depth_prediction_path,
+            float prediction_from_cloth_scale,
+            float prediction_from_cloth_offset_x,
+            float prediction_from_cloth_offset_y,
             std::vector<unsigned char>& out_rgba,
+            std::vector<unsigned char>& out_warped_rgba,
             std::vector<unsigned char>& out_debug_rgba,
+            std::vector<unsigned char>& out_warped_debug_rgba,
+            std::vector<unsigned char>& out_occlusion_rgba,
+            std::vector<unsigned char>& out_scene_occlusion_rgba,
+            std::vector<unsigned char>& out_predicted_depth_occlusion_rgba,
+            std::vector<unsigned char>& out_aligned_predicted_depth_occlusion_rgba,
+            std::vector<unsigned char>& out_scene_debug_rgba,
+            std::vector<unsigned char>& out_deformation_rgba,
+            std::vector<unsigned char>& out_close_to_body_rgba,
             int& out_tested_count,
             int& out_removed_count,
             std::string* out_error);
@@ -296,6 +306,7 @@ namespace poseweaver
         std::uint64_t m_last_canva_iso_displacement_request_id = 0;
 
         std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
+        std::vector<Eigen::MatrixXd> m_smpl_sim_frames;
         std::uint64_t m_cloth_sim_pose_version = 0;
         std::uint64_t m_cloth_sim_garment_version = 0;
 
@@ -303,6 +314,7 @@ namespace poseweaver
         {
             bool ok = false;
             std::vector<Eigen::MatrixXd> frames; // each is (#V x 3)
+            std::vector<Eigen::MatrixXd> smpl_frames;
             int steps_simulated = 0;
             int last_step_contacts = 0;
             std::string timing_report;
@@ -313,6 +325,7 @@ namespace poseweaver
         bool m_cloth_sim_job_running = false;
         std::shared_ptr<std::atomic_bool> m_cloth_sim_cancel_flag;
         std::shared_ptr<std::atomic_int> m_cloth_sim_progress_steps_done;
+        std::shared_ptr<std::atomic_int> m_cloth_sim_progress_stage;
         int m_cloth_sim_progress_steps_total = 0;
         std::string m_cloth_sim_last_error;
 
