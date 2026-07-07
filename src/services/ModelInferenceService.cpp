@@ -47,7 +47,8 @@ namespace poseweaver
 
     void ModelInferenceService::start(
         const std::filesystem::path& model_dir,
-        const std::filesystem::path& worker_script)
+        const std::filesystem::path& worker_script,
+        const std::filesystem::path& checkpoint_filename)
     {
         if (m_running.load())
             return;
@@ -55,6 +56,7 @@ namespace poseweaver
     #if defined(_WIN32)
         (void)model_dir;
         (void)worker_script;
+        (void)checkpoint_filename;
         if (!m_windows_unsupported_started)
         {
             m_windows_unsupported_started = true;
@@ -65,7 +67,7 @@ namespace poseweaver
         std::filesystem::path script = worker_script;
         if (script.empty())
             script = model_dir / "inference_worker.py";
-        const std::filesystem::path checkpoint = model_dir / "best.pth";
+        const std::filesystem::path checkpoint = model_dir / checkpoint_filename;
 
         if (!std::filesystem::exists(script))
         {

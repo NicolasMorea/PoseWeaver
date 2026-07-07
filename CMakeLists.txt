@@ -138,6 +138,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/ClothToSmplMapping.h
 		src/services/ModelInferenceService.cpp
 		src/services/ModelInferenceService.h
+		src/sketch2depth/inference_worker.py
+		src/vitpose/inference_worker.py
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
@@ -180,6 +182,8 @@ if(POSEWEAVER_BUILD_APP)
 		POSEWEAVER_SKETCH2BETAS_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2betas/inference_worker.py"
 		POSEWEAVER_SKETCH2UV_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2uv/inference_worker.py"
 		POSEWEAVER_SKETCH2ISO_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2iso/inference_worker.py"
+		POSEWEAVER_SKETCH2DEPTH_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2depth/inference_worker.py"
+		POSEWEAVER_VITPOSE_WORKER="${CMAKE_SOURCE_DIR}/src/vitpose/inference_worker.py"
 		POSEWEAVER_RIG_OPTIMIZER_WORKER="${CMAKE_SOURCE_DIR}/src/rigopt/optimize_rig.py"
 	)
 

@@ -461,12 +461,16 @@ int main(int, char**)
     poseweaver::ModelInferenceService sketch2betas("Sketch2Betas");
     poseweaver::ModelInferenceService sketch2uv("Sketch2UV");
     poseweaver::ModelInferenceService sketch2iso("Sketch2ISO");
+    poseweaver::ModelInferenceService sketch2depth("Sketch2Depth");
+    poseweaver::ModelInferenceService vitpose("VitPose");
     NativeCursorGuard cursor_guard;
     cursor_guard.init(window);
     state.sketch2rig.service = &sketch2rig;
     state.sketch2betas.service = &sketch2betas;
     state.sketch2uv.service = &sketch2uv;
     state.sketch2iso.service = &sketch2iso;
+    state.sketch2depth.service = &sketch2depth;
+    state.vitpose.service = &vitpose;
 
     poseweaver::install_imgui_state_settings_handler(state);
 
@@ -506,6 +510,13 @@ int main(int, char**)
     sketch2iso.start(
         poseweaver::assets_dir() / "Sketch2Iso",
         std::filesystem::path(POSEWEAVER_SKETCH2ISO_WORKER));
+    sketch2depth.start(
+        poseweaver::assets_dir() / "Sketch2Depth",
+        std::filesystem::path(POSEWEAVER_SKETCH2DEPTH_WORKER));
+    vitpose.start(
+        poseweaver::assets_dir() / "VitPose",
+        std::filesystem::path(POSEWEAVER_VITPOSE_WORKER),
+        "vitpose_base_coco_aic_mpii.pth");
 
     double last_time = glfwGetTime();
     double play_accum = 0.0;
@@ -545,6 +556,8 @@ int main(int, char**)
         sketch2betas.drain_events(state, state.sketch2betas);
         sketch2uv.drain_events(state, state.sketch2uv);
         sketch2iso.drain_events(state, state.sketch2iso);
+        sketch2depth.drain_events(state, state.sketch2depth);
+        vitpose.drain_events(state, state.vitpose);
 
         if (state.asset_refresh_request_id != last_asset_refresh_request_id)
         {
@@ -596,6 +609,8 @@ int main(int, char**)
     sketch2betas.stop();
     sketch2uv.stop();
     sketch2iso.stop();
+    sketch2depth.stop();
+    vitpose.stop();
 
     poseweaver::save_imgui_settings_to_disk();
 

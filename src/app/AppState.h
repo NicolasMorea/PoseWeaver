@@ -38,9 +38,17 @@ namespace poseweaver
 
         int sim_steps_done = 0;
         int sim_steps_total = 0;
+        int sim_pipeline_stage = 0; // 0 sequence, 1 proxy, 2 simulation
+        int sim_sequence_steps_done = 0;
+        int sim_sequence_steps_total = 0;
+        int sim_proxy_steps_done = 0;
+        int sim_proxy_steps_total = 0;
+        int sim_solver_steps_done = 0;
+        int sim_solver_steps_total = 0;
 
         bool smooth_sequence = true;
         float smooth_sequence_length = 0.5f;
+        bool save_smpl_sequence = false;
     };
 
     // Compliance values are >= 0, where 0 is perfectly rigid.
@@ -78,6 +86,7 @@ namespace poseweaver
         float wind_random_space = 0.0f;
         float wind_random_time = 0.0f;
 
+        bool simplify_smpl = false;
         float smpl_geometry_percent = 100.0f;
     };
 
@@ -253,6 +262,10 @@ namespace poseweaver
         float canva_brush_radius = 8.0f;
         std::array<float, 4> canva_brush_color{ 0.0f, 0.0f, 0.0f, 1.0f };
         float cloth_fitting_depth_margin = 0.0015f;
+        float cloth_fitting_depth_margin_pred = 0.05f;
+        float cloth_fitting_body_distance_threshold = 0.01f;
+        float cloth_fitting_warp_radius = 48.0f;
+        float cloth_fitting_warp_force = 1.0f;
         float iso_distance_threshold = 0.15f;
 
         bool canva_tab_active = false;
@@ -268,6 +281,8 @@ namespace poseweaver
         ModelInferenceUiState sketch2betas;
         ModelInferenceUiState sketch2uv;
         ModelInferenceUiState sketch2iso;
+        ModelInferenceUiState sketch2depth;
+        ModelInferenceUiState vitpose;
 
         SmplShapeState smpl_shape;
         UiLayoutState layout;
@@ -285,6 +300,7 @@ namespace poseweaver
         bool show_garment_mesh = true;
         bool garment_color_by_smpl_uv = false;
         bool cloth_toon_shader = false;
+        std::array<float, 3> cloth_ink_color{ 1.0f, 1.0f, 1.0f };
         bool show_console = true;
     };
 

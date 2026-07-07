@@ -22,7 +22,8 @@ namespace poseweaver
 
         void start(
             const std::filesystem::path& model_dir,
-            const std::filesystem::path& worker_script = {});
+            const std::filesystem::path& worker_script = {},
+            const std::filesystem::path& checkpoint_filename = "best.pth");
         bool request_inference(
             std::uint64_t request_id,
             const std::filesystem::path& sketch_path,
