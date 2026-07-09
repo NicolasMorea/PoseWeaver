@@ -43,6 +43,8 @@ namespace poseweaver
         int max_frames = 300;
 
         std::vector<Eigen::MatrixXd> body_sequence;
+        Eigen::MatrixXd body_capsules; // #C x 15 rows: ax ay az bx by bz ru rv rw ux uy uz vx vy vz
+        std::vector<Eigen::MatrixXd> body_capsule_sequence;
         std::vector<int> fixed_vertex_indices;
         std::vector<Eigen::MatrixXd> fixed_vertex_target_sequence; // each (#fixed x 3)
     };

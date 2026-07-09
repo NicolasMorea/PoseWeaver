@@ -322,6 +322,264 @@ namespace poseweaver
             Xs.row(vi) += (w * dlambda * grad).transpose();
         }
 
+        struct VertexCapsuleContact
+        {
+            int v = -1;
+            int capsule = -1;
+        };
+
+        struct RuntimeCapsule
+        {
+            Eigen::Vector3d a = Eigen::Vector3d::Zero();
+            Eigen::Vector3d b = Eigen::Vector3d::Zero();
+            Eigen::Vector3d u = Eigen::Vector3d::UnitX();
+            Eigen::Vector3d v = Eigen::Vector3d::UnitZ();
+            Eigen::Vector3d w = Eigen::Vector3d::UnitY();
+            double radius_u = 0.03;
+            double radius_v = 0.03;
+            double radius_w = 0.03;
+            double bound_radius = 0.03;
+        };
+
+        static inline Eigen::Vector3d capsule_fallback_normal(const Eigen::Vector3d& a, const Eigen::Vector3d& b);
+
+        static inline bool capsule_row(
+            const Eigen::MatrixXd& capsules,
+            int ci,
+            RuntimeCapsule& out)
+        {
+            if (ci < 0 || ci >= capsules.rows() || capsules.cols() < 7)
+                return false;
+            out.a = capsules.block<1, 3>(ci, 0).transpose();
+            out.b = capsules.block<1, 3>(ci, 3).transpose();
+            out.radius_u = capsules(ci, 6);
+            out.radius_v = (capsules.cols() >= 8) ? capsules(ci, 7) : out.radius_u;
+            out.radius_w = (capsules.cols() >= 15)
+                ? capsules(ci, 8)
+                : 0.5 * (out.radius_u + out.radius_v);
+            out.bound_radius = std::max({ out.radius_u, out.radius_v, out.radius_w });
+
+            const Eigen::Vector3d axis = out.b - out.a;
+            const double axis_len = axis.norm();
+            out.w = (axis_len > 1e-12 && std::isfinite(axis_len))
+                ? axis / axis_len
+                : Eigen::Vector3d(0.0, 1.0, 0.0);
+
+            const int frame_offset = capsules.cols() >= 15 ? 9 : 8;
+            if (capsules.cols() >= frame_offset + 6)
+            {
+                out.u = capsules.block<1, 3>(ci, frame_offset).transpose();
+                out.v = capsules.block<1, 3>(ci, frame_offset + 3).transpose();
+                out.u -= out.u.dot(out.w) * out.w;
+                const double un = out.u.norm();
+                if (un > 1e-12 && std::isfinite(un))
+                    out.u /= un;
+                else
+                    out.u = capsule_fallback_normal(out.a, out.b);
+                out.v -= out.v.dot(out.w) * out.w;
+                out.v -= out.v.dot(out.u) * out.u;
+                const double vn = out.v.norm();
+                if (vn > 1e-12 && std::isfinite(vn))
+                    out.v /= vn;
+                else
+                {
+                    out.v = out.w.cross(out.u);
+                    const double fallback_vn = out.v.norm();
+                    if (fallback_vn > 1e-12 && std::isfinite(fallback_vn))
+                        out.v /= fallback_vn;
+                    else
+                        out.v = Eigen::Vector3d(0.0, 0.0, 1.0);
+                }
+            }
+            else
+            {
+                out.u = capsule_fallback_normal(out.a, out.b);
+                out.v = out.w.cross(out.u);
+                const double vn = out.v.norm();
+                if (vn > 1e-12 && std::isfinite(vn))
+                    out.v /= vn;
+                else
+                    out.v = Eigen::Vector3d(0.0, 0.0, 1.0);
+            }
+
+            return out.a.allFinite() && out.b.allFinite()
+                && out.u.allFinite() && out.v.allFinite() && out.w.allFinite()
+                && out.radius_u > 0.0 && out.radius_v > 0.0 && out.radius_w > 0.0
+                && std::isfinite(out.radius_u) && std::isfinite(out.radius_v)
+                && std::isfinite(out.radius_w);
+        }
+
+        static inline Eigen::Vector3d capsule_fallback_normal(const Eigen::Vector3d& a, const Eigen::Vector3d& b)
+        {
+            Eigen::Vector3d axis = b - a;
+            const double an = axis.norm();
+            if (an > 1e-12 && std::isfinite(an))
+                axis /= an;
+            else
+                axis = Eigen::Vector3d(0.0, 1.0, 0.0);
+
+            Eigen::Vector3d seed = (std::abs(axis.y()) < 0.9)
+                ? Eigen::Vector3d(0.0, 1.0, 0.0)
+                : Eigen::Vector3d(1.0, 0.0, 0.0);
+            Eigen::Vector3d n = axis.cross(seed);
+            if (n.squaredNorm() < 1e-12)
+                n = axis.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
+            if (n.squaredNorm() < 1e-12)
+                return Eigen::Vector3d(1.0, 0.0, 0.0);
+            n.normalize();
+            return n;
+        }
+
+        static inline double signed_distance_to_capsule(
+            const Eigen::Vector3d& p,
+            const RuntimeCapsule& capsule,
+            Eigen::Vector3d* out_grad = nullptr)
+        {
+            const Eigen::Vector3d ab = capsule.b - capsule.a;
+            const double len2 = ab.squaredNorm();
+            double t = 0.0;
+            if (len2 > 1e-12 && std::isfinite(len2))
+                t = std::clamp((p - capsule.a).dot(ab) / len2, 0.0, 1.0);
+            const Eigen::Vector3d q = capsule.a + t * ab;
+            const Eigen::Vector3d d = p - q;
+            const double dist = d.norm();
+            Eigen::Vector3d grad = Eigen::Vector3d::Zero();
+            if (out_grad)
+            {
+                if (dist > 1e-12 && std::isfinite(dist))
+                    grad = d / dist;
+                else
+                    grad = capsule_fallback_normal(capsule.a, capsule.b);
+                *out_grad = grad;
+            }
+
+            if (dist > 1e-12 && std::isfinite(dist))
+                grad = d / dist;
+            else
+                grad = capsule_fallback_normal(capsule.a, capsule.b);
+
+            const double cu = grad.dot(capsule.u);
+            const double cv = grad.dot(capsule.v);
+            const double cw = grad.dot(capsule.w);
+            const double denom = std::sqrt(
+                (cu * cu) / (capsule.radius_u * capsule.radius_u)
+                + (cv * cv) / (capsule.radius_v * capsule.radius_v)
+                + (cw * cw) / (capsule.radius_w * capsule.radius_w));
+            const double effective_radius = (denom > 1e-12 && std::isfinite(denom))
+                ? (1.0 / denom)
+                : capsule.bound_radius;
+            return dist - effective_radius;
+        }
+
+        static core::Aabb capsule_bounds(const Eigen::MatrixXd& capsules, double margin)
+        {
+            core::Aabb bb;
+            for (int ci = 0; ci < capsules.rows(); ++ci)
+            {
+                RuntimeCapsule c;
+                if (!capsule_row(capsules, ci, c))
+                    continue;
+                const double grow = c.bound_radius + margin;
+                const Eigen::Vector3d mn = c.a.cwiseMin(c.b) - Eigen::Vector3d::Constant(grow);
+                const Eigen::Vector3d mx = c.a.cwiseMax(c.b) + Eigen::Vector3d::Constant(grow);
+                bb.expand(mn);
+                bb.expand(mx);
+            }
+            return bb;
+        }
+
+        static bool find_vertex_capsule_contacts(
+            const Eigen::MatrixXd& cloth_V,
+            const Eigen::MatrixXd& capsules,
+            double thickness,
+            const std::vector<int>& vertex_indices,
+            std::vector<VertexCapsuleContact>& out)
+        {
+            out.clear();
+            if (vertex_indices.empty())
+                return true;
+            if (cloth_V.rows() == 0 || capsules.rows() == 0 || capsules.cols() < 7)
+                return false;
+
+            out.reserve(vertex_indices.size());
+            for (int vi : vertex_indices)
+            {
+                if (vi < 0 || vi >= cloth_V.rows())
+                    continue;
+
+                const Eigen::Vector3d p = cloth_V.row(vi);
+                int best_capsule = -1;
+                double best_C = std::numeric_limits<double>::infinity();
+                for (int ci = 0; ci < capsules.rows(); ++ci)
+                {
+                    RuntimeCapsule c;
+                    if (!capsule_row(capsules, ci, c))
+                        continue;
+                    const double C = signed_distance_to_capsule(p, c) - thickness;
+                    if (C < best_C)
+                    {
+                        best_C = C;
+                        best_capsule = ci;
+                    }
+                }
+                if (best_capsule >= 0 && best_C < 0.0 && std::isfinite(best_C))
+                    out.push_back(VertexCapsuleContact{ vi, best_capsule });
+            }
+
+            return true;
+        }
+
+        static inline void apply_capsule_collision_constraint(
+            Eigen::MatrixXd& Xs,
+            const Eigen::MatrixXd& capsules,
+            const VertexCapsuleContact& c,
+            const Eigen::VectorXd& inv_mass,
+            int N,
+            double thickness,
+            double col_alpha,
+            std::vector<double>& lambda_col)
+        {
+            const int vi = c.v;
+            if (vi < 0 || vi >= N)
+                return;
+
+            const double w = inv_mass[vi];
+            if (!(w > 0.0))
+                return;
+
+            RuntimeCapsule capsule;
+            if (!capsule_row(capsules, c.capsule, capsule))
+                return;
+
+            Eigen::Vector3d grad;
+            const double C = signed_distance_to_capsule(Xs.row(vi).transpose(), capsule, &grad) - thickness;
+            if (!(C < 0.0) || !std::isfinite(C) || !grad.allFinite())
+                return;
+
+            const double denom = w + col_alpha;
+            if (!(denom > kEps))
+                return;
+
+            double& lam = lambda_col[(size_t)vi];
+            const double dlambda = (-C - col_alpha * lam) / denom;
+            lam += dlambda;
+
+            Xs.row(vi) += (w * dlambda * grad).transpose();
+        }
+
+        static inline Eigen::Vector3d capsule_contact_normal(
+            const Eigen::MatrixXd& X,
+            const Eigen::MatrixXd& capsules,
+            const VertexCapsuleContact& c)
+        {
+            RuntimeCapsule capsule;
+            Eigen::Vector3d grad = Eigen::Vector3d::Zero();
+            if (!capsule_row(capsules, c.capsule, capsule))
+                return grad;
+            (void)signed_distance_to_capsule(X.row(c.v).transpose(), capsule, &grad);
+            return grad;
+        }
+
         static bool find_self_collision_contacts(
             const Eigen::MatrixXd& X,
             const Eigen::MatrixXi& F,
@@ -555,7 +813,10 @@ namespace poseweaver
                 *error = "Expected cloth faces to be triangles (#F x 3).";
             return false;
         }
-        if (body_F.rows() == 0 || body_F.cols() != 3)
+        const bool use_capsule_collision =
+            params.body_capsules.rows() > 0 && params.body_capsules.cols() >= 7;
+
+        if (!use_capsule_collision && (body_F.rows() == 0 || body_F.cols() != 3))
         {
             if (error)
                 *error = "Expected body faces to be triangles (#F x 3).";
@@ -666,8 +927,9 @@ namespace poseweaver
         collision::TriangleBvh bvh;
         // For static body (no sequence) build BVH once; dynamic body rebuilds per step in the loop.
         const Eigen::MatrixXd* p_body_V = &body_V;
+        const Eigen::MatrixXd* p_body_capsules = use_capsule_collision ? &params.body_capsules : nullptr;
         int bvh_body_idx = -1;
-        if (params.body_sequence.empty())
+        if (!use_capsule_collision && params.body_sequence.empty())
         {
             const auto t0 = Clock::now();
             bvh.build(body_V, body_F);
@@ -701,6 +963,7 @@ namespace poseweaver
             on_frame(result.frames.back(), body_for_frame(result.stats.steps_simulated), result.stats.steps_simulated, on_frame_user);
 
         std::vector<collision::VertexTriangleContact> contacts;
+        std::vector<VertexCapsuleContact> capsule_contacts;
         std::vector<collision::VertexTriangleContact> self_contacts;
 
         std::vector<double> lambda_stretch(stretch_edges.size(), 0.0);
@@ -720,13 +983,25 @@ namespace poseweaver
                 if (idx != bvh_body_idx)
                 {
                     p_body_V = &params.body_sequence[(size_t)idx];
-                    const auto t0 = Clock::now();
-                    bvh.build(*p_body_V, body_F);
-                    ms_bvh_build += to_ms(Clock::now() - t0);
+                    if (use_capsule_collision)
+                    {
+                        if (!params.body_capsule_sequence.empty())
+                        {
+                            const int capsule_idx = std::min((int)params.body_capsule_sequence.size() - 1, idx);
+                            p_body_capsules = &params.body_capsule_sequence[(size_t)capsule_idx];
+                        }
+                    }
+                    else
+                    {
+                        const auto t0 = Clock::now();
+                        bvh.build(*p_body_V, body_F);
+                        ms_bvh_build += to_ms(Clock::now() - t0);
+                    }
                     bvh_body_idx = idx;
                 }
             }
             const Eigen::MatrixXd& cur_body_V = *p_body_V;
+            const Eigen::MatrixXd* cur_body_capsules = p_body_capsules;
             const int fixed_frame = std::min(step + 1, std::max(0, max_frames - 1));
 
             for (int sub = 0; sub < substeps; ++sub)
@@ -759,16 +1034,25 @@ namespace poseweaver
                     const auto t0 = Clock::now();
                     if (params.collision_enabled)
                     {
-                        const core::Aabb bb = bvh.bounds();
                         const double margin = std::max(0.02, thickness * 4.0);
-                        const core::Aabb expanded{ bb.min - Eigen::Vector3d::Constant(margin), bb.max + Eigen::Vector3d::Constant(margin) };
-
-                        col_candidates.reserve((size_t)N);
-                        for (int vi = 0; vi < N; ++vi)
+                        core::Aabb expanded;
+                        if (use_capsule_collision && cur_body_capsules)
+                            expanded = capsule_bounds(*cur_body_capsules, margin);
+                        else
                         {
-                            const Eigen::Vector3d p = Xs.row(vi);
-                            if ((p.array() >= expanded.min.array()).all() && (p.array() <= expanded.max.array()).all())
-                                col_candidates.push_back(vi);
+                            const core::Aabb bb = bvh.bounds();
+                            expanded = core::Aabb{ bb.min - Eigen::Vector3d::Constant(margin), bb.max + Eigen::Vector3d::Constant(margin) };
+                        }
+
+                        if (expanded.valid())
+                        {
+                            col_candidates.reserve((size_t)N);
+                            for (int vi = 0; vi < N; ++vi)
+                            {
+                                const Eigen::Vector3d p = Xs.row(vi);
+                                if ((p.array() >= expanded.min.array()).all() && (p.array() <= expanded.max.array()).all())
+                                    col_candidates.push_back(vi);
+                            }
                         }
                     }
                     ms_candidates += to_ms(Clock::now() - t0);
@@ -778,6 +1062,7 @@ namespace poseweaver
                 std::fill(lambda_bend.begin(), lambda_bend.end(), 0.0);
                 std::fill(lambda_col.begin(), lambda_col.end(), 0.0);
                 contacts.clear();
+                capsule_contacts.clear();
                 self_contacts.clear();
                 lambda_self.clear();
 
@@ -888,24 +1173,47 @@ namespace poseweaver
                         const bool refresh_contacts = (it % kRefreshEvery) == 0;
                         if (refresh_contacts)
                         {
-                            collision::VertexTriangleContactQueryStats qs;
-                            (void)collision::find_vertex_triangle_contacts(Xs, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
-                            ms_collision_bvh += qs.ms_total;
-                            ms_collision_narrow += qs.ms_bvh;
-                            ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                            if (use_capsule_collision && cur_body_capsules)
+                            {
+                                const auto tq = Clock::now();
+                                (void)find_vertex_capsule_contacts(Xs, *cur_body_capsules, thickness, col_candidates, capsule_contacts);
+                                const double elapsed = to_ms(Clock::now() - tq);
+                                ms_collision_bvh += elapsed;
+                                ms_collision_narrow += elapsed;
+                            }
+                            else
+                            {
+                                collision::VertexTriangleContactQueryStats qs;
+                                (void)collision::find_vertex_triangle_contacts(Xs, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
+                                ms_collision_bvh += qs.ms_total;
+                                ms_collision_narrow += qs.ms_bvh;
+                                ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                            }
                         }
 
                         const auto t0 = Clock::now();
-                        for (const auto& c : contacts)
+                        if (use_capsule_collision && cur_body_capsules)
                         {
-                            apply_collision_constraint(Xs, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
-                            last_contact_count++;
+                            for (const auto& c : capsule_contacts)
+                            {
+                                apply_capsule_collision_constraint(Xs, *cur_body_capsules, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                                last_contact_count++;
+                            }
+                        }
+                        else
+                        {
+                            for (const auto& c : contacts)
+                            {
+                                apply_collision_constraint(Xs, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                                last_contact_count++;
+                            }
                         }
                         ms_collision_solve += to_ms(Clock::now() - t0);
                     }
                     else
                     {
                         contacts.clear();
+                        capsule_contacts.clear();
                     }
 
                     last_contact_count = 0;
@@ -940,22 +1248,43 @@ namespace poseweaver
                 if (params.collision_enabled && col_alpha >= 0.0 && !col_candidates.empty())
                 {
                     {
-                        collision::VertexTriangleContactQueryStats qs;
-                        (void)collision::find_vertex_triangle_contacts(Xs, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
-                        ms_collision_bvh += qs.ms_total;
-                        ms_collision_narrow += qs.ms_bvh;
-                        ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                        if (use_capsule_collision && cur_body_capsules)
+                        {
+                            const auto tq = Clock::now();
+                            (void)find_vertex_capsule_contacts(Xs, *cur_body_capsules, thickness, col_candidates, capsule_contacts);
+                            const double elapsed = to_ms(Clock::now() - tq);
+                            ms_collision_bvh += elapsed;
+                            ms_collision_narrow += elapsed;
+                        }
+                        else
+                        {
+                            collision::VertexTriangleContactQueryStats qs;
+                            (void)collision::find_vertex_triangle_contacts(Xs, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
+                            ms_collision_bvh += qs.ms_total;
+                            ms_collision_narrow += qs.ms_bvh;
+                            ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                        }
                     }
 
-                    result.stats.last_step_contacts = (int)contacts.size();
+                    result.stats.last_step_contacts = use_capsule_collision
+                        ? (int)capsule_contacts.size()
+                        : (int)contacts.size();
 
                     // Extra passes to clear remaining penetrations (e.g. in concave regions like armpits).
                     const int post_passes = 4;
                     for (int pass = 0; pass < post_passes; ++pass)
                     {
                         const auto t0 = Clock::now();
-                        for (const auto& c : contacts)
-                            apply_collision_constraint(Xs, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                        if (use_capsule_collision && cur_body_capsules)
+                        {
+                            for (const auto& c : capsule_contacts)
+                                apply_capsule_collision_constraint(Xs, *cur_body_capsules, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                        }
+                        else
+                        {
+                            for (const auto& c : contacts)
+                                apply_collision_constraint(Xs, cur_body_V, body_F, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                        }
                         apply_fixed_positions(Xs, fixed_frame);
                         ms_collision_solve += to_ms(Clock::now() - t0);
                     }
@@ -963,6 +1292,7 @@ namespace poseweaver
                 else
                 {
                     contacts.clear();
+                    capsule_contacts.clear();
                     result.stats.last_step_contacts = 0;
                 }
 
@@ -1005,7 +1335,23 @@ namespace poseweaver
                 Vv *= (1.0 - damp);
 
                 // Zero inward normal velocity at contacts to prevent tunneling on subsequent substeps.
-                if (params.collision_enabled && !contacts.empty())
+                if (params.collision_enabled && use_capsule_collision && cur_body_capsules && !capsule_contacts.empty())
+                {
+                    for (const auto& cc : capsule_contacts)
+                    {
+                        const int vi = cc.v;
+                        if (vi < 0 || vi >= N)
+                            continue;
+                        const Eigen::Vector3d n = capsule_contact_normal(X, *cur_body_capsules, cc);
+                        if (!(n.squaredNorm() > 0.0) || !n.allFinite())
+                            continue;
+
+                        const double vn = Vv.row(vi).dot(n);
+                        if (vn < 0.0)
+                            Vv.row(vi) -= (vn * n).transpose();
+                    }
+                }
+                else if (params.collision_enabled && !contacts.empty())
                 {
                     for (const auto& cc : contacts)
                     {
@@ -1041,46 +1387,76 @@ namespace poseweaver
                         damp_self_collision_velocity(Vv, X, cloth_F, cc, inv_mass, N);
                 }
 
-                if (params.enable_friction && params.friction_mu > 0.0 && !contacts.empty())
+                const bool have_body_contacts = use_capsule_collision ? !capsule_contacts.empty() : !contacts.empty();
+                if (params.enable_friction && params.friction_mu > 0.0 && have_body_contacts)
                 {
                     const auto t0 = Clock::now();
                     const double mu = std::max(0.0, params.friction_mu);
-                    for (const auto& cc : contacts)
+                    if (use_capsule_collision && cur_body_capsules)
                     {
-                        const int vi = cc.v;
-                        const int face = cc.face;
-                        if (vi < 0 || vi >= N)
-                            continue;
-                        if (face < 0 || face >= body_F.rows())
-                            continue;
+                        for (const auto& cc : capsule_contacts)
+                        {
+                            const int vi = cc.v;
+                            if (vi < 0 || vi >= N)
+                                continue;
 
-                        const int i0 = body_F(face, 0);
-                        const int i1 = body_F(face, 1);
-                        const int i2 = body_F(face, 2);
-                        if (i0 < 0 || i1 < 0 || i2 < 0)
-                            continue;
-                        if (i0 >= cur_body_V.rows() || i1 >= cur_body_V.rows() || i2 >= cur_body_V.rows())
-                            continue;
+                            const Eigen::Vector3d n = capsule_contact_normal(X, *cur_body_capsules, cc);
+                            if (!(n.squaredNorm() > 0.0) || !n.allFinite())
+                                continue;
 
-                        const Eigen::Vector3d n = core::triangle_unit_normal(
-                            cur_body_V.row(i0).transpose(),
-                            cur_body_V.row(i1).transpose(),
-                            cur_body_V.row(i2).transpose());
-                        if (!(n.squaredNorm() > 0.0))
-                            continue;
+                            const Eigen::Vector3d v = Vv.row(vi);
+                            const double vn_mag = v.dot(n);
+                            const Eigen::Vector3d v_n = vn_mag * n;
+                            const Eigen::Vector3d v_t = v - v_n;
+                            const double vt = v_t.norm();
+                            if (!(vt > 1e-12))
+                                continue;
 
-                        const Eigen::Vector3d v = Vv.row(vi);
-                        const double vn_mag = v.dot(n);
-                        const Eigen::Vector3d v_n = vn_mag * n;
-                        const Eigen::Vector3d v_t = v - v_n;
-                        const double vt = v_t.norm();
-                        if (!(vt > 1e-12))
-                            continue;
+                            const double max_t = std::max(0.0, vt - mu * std::abs(vn_mag));
+                            const Eigen::Vector3d v_t_new = (max_t / vt) * v_t;
+                            const Eigen::Vector3d v_new = v_n + v_t_new;
+                            Vv.row(vi) = v_new.transpose();
+                        }
+                    }
+                    else
+                    {
+                        for (const auto& cc : contacts)
+                        {
+                            const int vi = cc.v;
+                            const int face = cc.face;
+                            if (vi < 0 || vi >= N)
+                                continue;
+                            if (face < 0 || face >= body_F.rows())
+                                continue;
 
-                        const double max_t = std::max(0.0, vt - mu * std::abs(vn_mag));
-                        const Eigen::Vector3d v_t_new = (max_t / vt) * v_t;
-                        const Eigen::Vector3d v_new = v_n + v_t_new;
-                        Vv.row(vi) = v_new.transpose();
+                            const int i0 = body_F(face, 0);
+                            const int i1 = body_F(face, 1);
+                            const int i2 = body_F(face, 2);
+                            if (i0 < 0 || i1 < 0 || i2 < 0)
+                                continue;
+                            if (i0 >= cur_body_V.rows() || i1 >= cur_body_V.rows() || i2 >= cur_body_V.rows())
+                                continue;
+
+                            const Eigen::Vector3d n = core::triangle_unit_normal(
+                                cur_body_V.row(i0).transpose(),
+                                cur_body_V.row(i1).transpose(),
+                                cur_body_V.row(i2).transpose());
+                            if (!(n.squaredNorm() > 0.0))
+                                continue;
+
+                            const Eigen::Vector3d v = Vv.row(vi);
+                            const double vn_mag = v.dot(n);
+                            const Eigen::Vector3d v_n = vn_mag * n;
+                            const Eigen::Vector3d v_t = v - v_n;
+                            const double vt = v_t.norm();
+                            if (!(vt > 1e-12))
+                                continue;
+
+                            const double max_t = std::max(0.0, vt - mu * std::abs(vn_mag));
+                            const Eigen::Vector3d v_t_new = (max_t / vt) * v_t;
+                            const Eigen::Vector3d v_new = v_n + v_t_new;
+                            Vv.row(vi) = v_new.transpose();
+                        }
                     }
 
                     X = X_sub_prev + sub_dt * Vv;
@@ -1090,13 +1466,32 @@ namespace poseweaver
                     if (params.collision_enabled && col_alpha >= 0.0 && !col_candidates.empty())
                     {
                         {
-                            collision::VertexTriangleContactQueryStats qs;
-                            (void)collision::find_vertex_triangle_contacts(X, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
-                            ms_collision_bvh += qs.ms_total;
-                            ms_collision_narrow += qs.ms_bvh;
-                            ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                            if (use_capsule_collision && cur_body_capsules)
+                            {
+                                const auto tq = Clock::now();
+                                (void)find_vertex_capsule_contacts(X, *cur_body_capsules, thickness, col_candidates, capsule_contacts);
+                                const double elapsed = to_ms(Clock::now() - tq);
+                                ms_collision_bvh += elapsed;
+                                ms_collision_narrow += elapsed;
+                            }
+                            else
+                            {
+                                collision::VertexTriangleContactQueryStats qs;
+                                (void)collision::find_vertex_triangle_contacts(X, cur_body_V, body_F, bvh, thickness, col_candidates, contacts, &qs);
+                                ms_collision_bvh += qs.ms_total;
+                                ms_collision_narrow += qs.ms_bvh;
+                                ms_collision_broad += std::max(0.0, qs.ms_total - qs.ms_bvh);
+                            }
                         }
-                        if (!contacts.empty())
+                        if (use_capsule_collision && cur_body_capsules && !capsule_contacts.empty())
+                        {
+                            const auto t1 = Clock::now();
+                            for (const auto& c : capsule_contacts)
+                                apply_capsule_collision_constraint(X, *cur_body_capsules, c, inv_mass, N, thickness, col_alpha, lambda_col);
+                            apply_fixed_positions(X, fixed_frame);
+                            ms_collision_solve += to_ms(Clock::now() - t1);
+                        }
+                        else if (!contacts.empty())
                         {
                             const auto t1 = Clock::now();
                             for (const auto& c : contacts)

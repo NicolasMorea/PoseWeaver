@@ -129,6 +129,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/ClothMeshProcessor.h
 		src/simulation/SmplSimplifier.cpp
 		src/simulation/SmplSimplifier.h
+		src/simulation/SmplCollisionProxy.cpp
+		src/simulation/SmplCollisionProxy.h
 		src/simulation/collision/TriangleBvh.cpp
 		src/simulation/collision/TriangleBvh.h
 		src/simulation/collision/ClothContacts.h
