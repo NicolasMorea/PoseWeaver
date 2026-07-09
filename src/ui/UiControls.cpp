@@ -339,8 +339,28 @@ namespace poseweaver
                             if (ImGui::SliderFloat("Sequence length", &pct, 0.0f, 100.0f, "%.0f%%"))
                                 state.controls.smooth_sequence_length = std::clamp(pct / 100.0f, 0.0f, 1.0f);
                             ImGui::Checkbox("Save SMPL sequence", &state.controls.save_smpl_sequence);
+                            if (!state.controls.save_smpl_sequence)
+                                state.controls.show_collision_proxy_sequence = false;
+
+                            const char* sequence_display_items[] = {
+                                "Full SMPL sequence",
+                                "Collision proxy sequence"
+                            };
+                            int sequence_display = state.controls.show_collision_proxy_sequence ? 1 : 0;
+                            ImGui::BeginDisabled(!state.controls.save_smpl_sequence);
+                            if (ImGui::Combo(
+                                    "Display sequence",
+                                    &sequence_display,
+                                    sequence_display_items,
+                                    IM_ARRAYSIZE(sequence_display_items)))
+                            {
+                                state.controls.show_collision_proxy_sequence = (sequence_display == 1);
+                            }
+                            ImGui::EndDisabled();
                         }
                         ImGui::EndDisabled();
+                        if (!state.controls.smooth_sequence)
+                            state.controls.show_collision_proxy_sequence = false;
 
                         ImGui::Separator();
 
@@ -360,8 +380,27 @@ namespace poseweaver
 
                             ImGui::InputFloat("Gravity", &p.gravity, 0.5f, 5.0f, "%.3f");
 
-                            ImGui::Checkbox("Use simplified SMPL", &p.simplify_smpl);
-                            ImGui::BeginDisabled(!p.simplify_smpl);
+                            const char* collision_geometry_items[] = {
+                                "Raw SMPL model",
+                                "Simplified model",
+                                "Simple Proxy"
+                            };
+                            int collision_geometry = (int)p.collision_geometry;
+                            collision_geometry = std::clamp(collision_geometry, 0, 2);
+                            if (ImGui::Combo(
+                                    "Collision geometry",
+                                    &collision_geometry,
+                                    collision_geometry_items,
+                                    IM_ARRAYSIZE(collision_geometry_items)))
+                            {
+                                p.collision_geometry = (collision_geometry == 1)
+                                    ? CollisionGeometryType::SimplifiedSmpl
+                                    : (collision_geometry == 2)
+                                        ? CollisionGeometryType::SimpleProxy
+                                        : CollisionGeometryType::RawSmpl;
+                            }
+                            p.simplify_smpl = (p.collision_geometry == CollisionGeometryType::SimplifiedSmpl);
+                            ImGui::BeginDisabled(p.collision_geometry != CollisionGeometryType::SimplifiedSmpl);
                             ImGui::SliderFloat("SMPL geometry kept", &p.smpl_geometry_percent, 1.0f, 100.0f, "%.0f%%");
                             ImGui::EndDisabled();
                             p.smpl_geometry_percent = std::clamp(p.smpl_geometry_percent, 1.0f, 100.0f);

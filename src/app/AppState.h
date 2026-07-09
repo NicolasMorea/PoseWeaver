@@ -25,6 +25,13 @@ namespace poseweaver
         Neutral = 2,
     };
 
+    enum class CollisionGeometryType
+    {
+        RawSmpl = 0,
+        SimplifiedSmpl = 1,
+        SimpleProxy = 2,
+    };
+
     struct SimulationControls
     {
         bool simulating = false;
@@ -45,10 +52,18 @@ namespace poseweaver
         int sim_proxy_steps_total = 0;
         int sim_solver_steps_done = 0;
         int sim_solver_steps_total = 0;
+        double sim_sequence_seconds = 0.0;
+        double sim_proxy_seconds = 0.0;
+        double sim_solver_seconds = 0.0;
+        double sim_pipeline_seconds = 0.0;
+        std::vector<std::string> sim_sequence_timing_details;
+        std::vector<std::string> sim_proxy_timing_details;
+        std::vector<std::string> sim_solver_timing_details;
 
         bool smooth_sequence = true;
         float smooth_sequence_length = 0.5f;
         bool save_smpl_sequence = false;
+        bool show_collision_proxy_sequence = false;
     };
 
     // Compliance values are >= 0, where 0 is perfectly rigid.
@@ -86,7 +101,8 @@ namespace poseweaver
         float wind_random_space = 0.0f;
         float wind_random_time = 0.0f;
 
-        bool simplify_smpl = false;
+        CollisionGeometryType collision_geometry = CollisionGeometryType::RawSmpl;
+        bool simplify_smpl = false; // Legacy setting, mirrored from collision_geometry for old imgui.ini files.
         float smpl_geometry_percent = 100.0f;
     };
 
@@ -298,6 +314,7 @@ namespace poseweaver
         bool show_garments = true;
         bool show_object_mesh = false;
         bool show_garment_mesh = true;
+        bool show_collision_colliders = false;
         bool garment_color_by_smpl_uv = false;
         bool cloth_toon_shader = false;
         std::array<float, 3> cloth_ink_color{ 1.0f, 1.0f, 1.0f };

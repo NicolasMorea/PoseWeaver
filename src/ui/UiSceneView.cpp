@@ -660,6 +660,9 @@ namespace poseweaver
             if (scene_toolbar_toggle("Ink Cloth", state.cloth_toon_shader))
                 state.cloth_toon_shader = !state.cloth_toon_shader;
             ImGui::SameLine();
+            if (scene_toolbar_toggle("Colliders", state.show_collision_colliders))
+                state.show_collision_colliders = !state.show_collision_colliders;
+            ImGui::SameLine();
             ImGui::ColorEdit3(
                 "Ink color",
                 state.cloth_ink_color.data(),

@@ -2,6 +2,7 @@
 
 #include "core/Geometry.h"
 #include "simulation/ClothMeshProcessor.h"
+#include "simulation/SmplCollisionProxy.h"
 #include "simulation/SmplSimplifier.h"
 #include "simulation/collision/TriangleBvh.h"
 #include "simulation/xpbd/ClothXpbd.h"
@@ -518,6 +519,8 @@ namespace poseweaver
     {
         m_cloth_sim_frames.clear();
         m_smpl_sim_frames.clear();
+        m_collision_proxy_sim_frames.clear();
+        m_collision_proxy_sim_F.resize(0, 3);
         m_cloth_sim_restart_pending = false;
         m_cloth_sim_reset_frame0_valid = false;
         m_cloth_sim_preview_state.reset();
@@ -537,6 +540,13 @@ namespace poseweaver
         state.controls.sim_proxy_steps_total = 0;
         state.controls.sim_solver_steps_done = 0;
         state.controls.sim_solver_steps_total = 0;
+        state.controls.sim_sequence_seconds = 0.0;
+        state.controls.sim_proxy_seconds = 0.0;
+        state.controls.sim_solver_seconds = 0.0;
+        state.controls.sim_pipeline_seconds = 0.0;
+        state.controls.sim_sequence_timing_details.clear();
+        state.controls.sim_proxy_timing_details.clear();
+        state.controls.sim_solver_timing_details.clear();
         state.controls.sim_stage.clear();
         console_add_line(state, "Cleared cloth simulation frames");
     }
@@ -572,6 +582,13 @@ namespace poseweaver
         state.controls.sim_proxy_steps_total = 0;
         state.controls.sim_solver_steps_done = 0;
         state.controls.sim_solver_steps_total = 0;
+        state.controls.sim_sequence_seconds = 0.0;
+        state.controls.sim_proxy_seconds = 0.0;
+        state.controls.sim_solver_seconds = 0.0;
+        state.controls.sim_pipeline_seconds = 0.0;
+        state.controls.sim_sequence_timing_details.clear();
+        state.controls.sim_proxy_timing_details.clear();
+        state.controls.sim_solver_timing_details.clear();
 
         m_cloth_sim_restart_pending = false;
         m_smpl_sim_frames.clear();
@@ -823,11 +840,14 @@ namespace poseweaver
 
 
         const bool save_smpl_sequence = state.controls.save_smpl_sequence;
-        const bool simplify_smpl = state.xpbd_params.simplify_smpl;
+        const CollisionGeometryType collision_geometry = state.xpbd_params.collision_geometry;
+        const bool simplify_smpl = collision_geometry == CollisionGeometryType::SimplifiedSmpl;
+        const bool use_simple_proxy = collision_geometry == CollisionGeometryType::SimpleProxy;
+        const bool prepare_collision_proxy = simplify_smpl || use_simple_proxy;
         const double keep_percent = std::clamp((double)state.xpbd_params.smpl_geometry_percent, 1.0, 100.0);
         const int simplification_units = simplify_smpl && keep_percent < 99.5 ? 1 : 0;
         const int target_units = fixed_vertex_indices.empty() ? 0 : std::max(1, smooth_sequence_steps);
-        const int proxy_units = xpbd_params.collision_enabled ? smooth_sequence_steps + 1 : 0;
+        const int proxy_units = xpbd_params.collision_enabled && prepare_collision_proxy ? smooth_sequence_steps + 1 : 0;
         const int sequence_units = smooth_sequence_steps + target_units + simplification_units;
         const int preparation_units = sequence_units + proxy_units;
 
@@ -843,6 +863,8 @@ namespace poseweaver
 
         m_cloth_sim_frames.clear();
         state.controls.frame_count = 0;
+        m_collision_proxy_sim_frames.clear();
+        m_collision_proxy_sim_F.resize(0, 3);
         state.controls.current_frame = 0;
         state.controls.playing = false;
 
@@ -910,6 +932,8 @@ namespace poseweaver
                 dof,
                 save_smpl_sequence,
                 simplify_smpl,
+                use_simple_proxy,
+                prepare_collision_proxy,
                 keep_percent,
                 preparation_units,
                 cancel_flag,
@@ -921,11 +945,24 @@ namespace poseweaver
                 ClothSimJobResult jr;
                 std::string err;
                 ClothXpbdResult xpbd_res;
+                const auto job_start = std::chrono::steady_clock::now();
+
+                const auto seconds_since = [](std::chrono::steady_clock::time_point start)
+                {
+                    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+                };
+                const auto append_timing = [](std::vector<std::string>& out, const char* label, double seconds)
+                {
+                    std::ostringstream oss;
+                    oss << std::fixed << std::setprecision(2) << label << ": " << seconds << "s";
+                    out.push_back(oss.str());
+                };
 
                 const auto advance_progress = [&]() { progress_steps_done->fetch_add(1); };
 
                 if (smooth_sequence_steps > 0)
                 {
+                    const auto step_start = std::chrono::steady_clock::now();
                     progress_stage->store(0);
                     const auto aa_to_quat = [](const Eigen::Vector3d& value)
                     {
@@ -978,10 +1015,14 @@ namespace poseweaver
                         xpbd_params.body_sequence.push_back(std::move(frame));
                         advance_progress();
                     }
+                    const double seconds = seconds_since(step_start);
+                    jr.sequence_seconds += seconds;
+                    append_timing(jr.sequence_timing_details, "Smooth SMPL sequence", seconds);
                 }
 
                 if (!fixed_vertex_indices.empty())
                 {
+                    const auto step_start = std::chrono::steady_clock::now();
                     progress_stage->store(1);
                     Eigen::MatrixXd rest_body = smplh_model.v_template;
                     if (mirror_display_x)
@@ -1006,10 +1047,14 @@ namespace poseweaver
                             advance_progress();
                         }
                     }
+                    const double seconds = seconds_since(step_start);
+                    jr.sequence_seconds += seconds;
+                    append_timing(jr.sequence_timing_details, "Cloth constraint targets", seconds);
                 }
 
                 if (simplify_smpl && keep_percent < 99.5)
                 {
+                    const auto step_start = std::chrono::steady_clock::now();
                     progress_stage->store(2);
                     SmplSimplification simplification;
                     Eigen::MatrixXd simplified_body;
@@ -1040,27 +1085,86 @@ namespace poseweaver
                     }
                     err.clear();
                     advance_progress();
+                    const double seconds = seconds_since(step_start);
+                    jr.sequence_seconds += seconds;
+                    append_timing(jr.sequence_timing_details, "SMPL simplification", seconds);
                 }
 
-                if (xpbd_params.collision_enabled && body_V.rows() > 0 && body_F.rows() > 0)
+                if (xpbd_params.collision_enabled && prepare_collision_proxy && body_V.rows() > 0 && body_F.rows() > 0)
                 {
+                    const auto step_start = std::chrono::steady_clock::now();
                     progress_stage->store(3);
-                    const double inflation = std::clamp(
-                        std::max(0.0015, 0.5 * std::max(0.0, xpbd_params.collision_thickness)),
-                        0.0015, 0.008);
-                    const double clearance = std::clamp(std::max(0.0020, 1.25 * inflation), 0.0020, 0.012);
-                    prepare_xpbd_body_proxy_frame(body_V, body_F, inflation, clearance);
-                    advance_progress();
-                    for (Eigen::MatrixXd& frame : xpbd_params.body_sequence)
+                    if (use_simple_proxy)
                     {
-                        if (cancel_flag->load())
+                        SmplCollisionProxy proxy;
+                        Eigen::MatrixXd proxy_body;
+                        Eigen::MatrixXd proxy_capsules;
+                        Eigen::MatrixXi proxy_F;
+                        if (!build_smpl_collision_proxy(body_tpose, smplh_model, proxy, &err)
+                            || !apply_smpl_collision_proxy(proxy, body_V, smplh_model, proxy_body, proxy_F, &err)
+                            || !apply_smpl_collision_proxy_capsules(proxy, body_V, smplh_model, proxy_capsules, &err))
                         {
-                            jr.error = "Simulation preparation cancelled";
+                            jr.error = "Simple collision proxy failed: " + err;
                             return jr;
                         }
-                        prepare_xpbd_body_proxy_frame(frame, body_F, inflation, clearance);
+                        body_V = std::move(proxy_body);
+                        body_F = proxy_F;
+                        xpbd_params.body_capsules = std::move(proxy_capsules);
+                        jr.collision_proxy_F = proxy_F;
+                        jr.collision_proxy_frames.push_back(body_V);
                         advance_progress();
+
+                        std::vector<Eigen::MatrixXd> proxy_sequence;
+                        std::vector<Eigen::MatrixXd> capsule_sequence;
+                        proxy_sequence.reserve(xpbd_params.body_sequence.size());
+                        capsule_sequence.reserve(xpbd_params.body_sequence.size());
+                        jr.collision_proxy_frames.reserve(xpbd_params.body_sequence.size() + 1u);
+                        for (const Eigen::MatrixXd& frame : xpbd_params.body_sequence)
+                        {
+                            if (cancel_flag->load())
+                            {
+                                jr.error = "Simulation preparation cancelled";
+                                return jr;
+                            }
+                            Eigen::MatrixXd proxy_frame;
+                            Eigen::MatrixXd capsule_frame;
+                            Eigen::MatrixXi frame_F;
+                            if (!apply_smpl_collision_proxy(proxy, frame, smplh_model, proxy_frame, frame_F, &err)
+                                || !apply_smpl_collision_proxy_capsules(proxy, frame, smplh_model, capsule_frame, &err))
+                            {
+                                jr.error = "Simple collision proxy frame failed: " + err;
+                                return jr;
+                            }
+                            proxy_sequence.push_back(proxy_frame);
+                            capsule_sequence.push_back(std::move(capsule_frame));
+                            jr.collision_proxy_frames.push_back(std::move(proxy_frame));
+                            advance_progress();
+                        }
+                        xpbd_params.body_sequence = std::move(proxy_sequence);
+                        xpbd_params.body_capsule_sequence = std::move(capsule_sequence);
+                        append_timing(jr.proxy_timing_details, "Build simple capsule proxy", seconds_since(step_start));
                     }
+                    else
+                    {
+                        const double inflation = std::clamp(
+                            std::max(0.0015, 0.5 * std::max(0.0, xpbd_params.collision_thickness)),
+                            0.0015, 0.008);
+                        const double clearance = std::clamp(std::max(0.0020, 1.25 * inflation), 0.0020, 0.012);
+                        prepare_xpbd_body_proxy_frame(body_V, body_F, inflation, clearance);
+                        advance_progress();
+                        for (Eigen::MatrixXd& frame : xpbd_params.body_sequence)
+                        {
+                            if (cancel_flag->load())
+                            {
+                                jr.error = "Simulation preparation cancelled";
+                                return jr;
+                            }
+                            prepare_xpbd_body_proxy_frame(frame, body_F, inflation, clearance);
+                            advance_progress();
+                        }
+                        append_timing(jr.proxy_timing_details, "Inflate and relax SMPL proxy", seconds_since(step_start));
+                    }
+                    jr.proxy_seconds += seconds_since(step_start);
                 }
 
                 progress_stage->store(4);
@@ -1119,6 +1223,7 @@ namespace poseweaver
                 preview_cb.progress_offset = preparation_units;
                 preview_cb.body_F = body_F;
 
+                const auto solver_start = std::chrono::steady_clock::now();
                 bool ok = run_cloth_xpbd(
                     cloth_V0, cloth_F,
                     body_V, body_F,
@@ -1129,6 +1234,7 @@ namespace poseweaver
                     nullptr,
                     on_frame_xpbd,
                     &preview_cb);
+                jr.solver_seconds = seconds_since(solver_start);
                 if (ok)
                 {
                     jr.frames = std::move(xpbd_res.frames);
@@ -1157,14 +1263,35 @@ namespace poseweaver
                     oss << "    broad phase: " << ms_collision_broadphase << " (" << pct(ms_collision_broadphase) << "%)\n";
                     oss << "      candidates (AABB): " << s.ms_candidates << " (" << pct(s.ms_candidates) << "%)\n";
                     oss << "      filters/bookkeeping: " << s.ms_collision_broad << " (" << pct(s.ms_collision_broad) << "%)\n";
-                    oss << "    narrow phase (BVH query): " << ms_collision_narrowphase << " (" << pct(ms_collision_narrowphase) << "%)\n";
+                    oss << "    narrow phase (" << (use_simple_proxy ? "capsule query" : "BVH query") << "): "
+                        << ms_collision_narrowphase << " (" << pct(ms_collision_narrowphase) << "%)\n";
                     oss << "  collision solve: " << s.ms_collision_solve << " (" << pct(s.ms_collision_solve) << "%)\n";
                     oss << "  self collision contacts: " << s.ms_self_collision_bvh << " (" << pct(s.ms_self_collision_bvh) << "%)\n";
                     oss << "  self collision solve: " << s.ms_self_collision_solve << " (" << pct(s.ms_self_collision_solve) << "%)\n";
                     oss << "  friction: " << s.ms_friction << " (" << pct(s.ms_friction) << "%)";
                     jr.timing_report = oss.str();
+
+                    append_timing(jr.solver_timing_details, "XPBD wall time", jr.solver_seconds);
+                    const auto append_ms = [&](const char* label, double ms)
+                    {
+                        std::ostringstream detail;
+                        detail << std::fixed << std::setprecision(2)
+                            << label << ": " << (ms / 1000.0) << "s (" << pct(ms) << "%)";
+                        jr.solver_timing_details.push_back(detail.str());
+                    };
+                    append_ms("BVH build", s.ms_bvh_build);
+                    append_ms("Predict", s.ms_predict);
+                    append_ms("Wind", s.ms_wind);
+                    append_ms("Stretch", s.ms_stretch);
+                    append_ms("Bend", s.ms_bend);
+                    append_ms("Collision contacts", s.ms_collision_bvh);
+                    append_ms("Collision solve", s.ms_collision_solve);
+                    append_ms("Self collision contacts", s.ms_self_collision_bvh);
+                    append_ms("Self collision solve", s.ms_self_collision_solve);
+                    append_ms("Friction", s.ms_friction);
                 }
 
+                jr.pipeline_seconds = seconds_since(job_start);
                 jr.ok = ok;
                 jr.error = std::move(err);
                 return jr;
@@ -1233,6 +1360,8 @@ namespace poseweaver
         {
             state.controls.sim_stage.clear();
             m_smpl_sim_frames.clear();
+            m_collision_proxy_sim_frames.clear();
+            m_collision_proxy_sim_F.resize(0, 3);
             m_cloth_sim_last_error = jr.error;
             console_add_line(state, std::string("ERROR: Cloth simulation failed: ") + (jr.error.empty() ? "(unknown error)" : jr.error));
             return;
@@ -1243,6 +1372,8 @@ namespace poseweaver
             // Discard result and restart immediately to avoid a transient "stopped" state.
             m_cloth_sim_frames.clear();
             m_smpl_sim_frames.clear();
+            m_collision_proxy_sim_frames.clear();
+            m_collision_proxy_sim_F.resize(0, 3);
             state.controls.frame_count = 0;
             state.controls.playing = false;
             state.controls.current_frame = 0;
@@ -1258,6 +1389,8 @@ namespace poseweaver
             console_add_line(state, "Cloth simulation finished, but selection changed; result discarded");
             m_cloth_sim_frames.clear();
             m_smpl_sim_frames.clear();
+            m_collision_proxy_sim_frames.clear();
+            m_collision_proxy_sim_F.resize(0, 3);
             state.controls.frame_count = 0;
             state.controls.sim_stage.clear();
             return;
@@ -1265,7 +1398,16 @@ namespace poseweaver
 
         m_cloth_sim_frames = std::move(jr.frames);
         m_smpl_sim_frames = std::move(jr.smpl_frames);
+        m_collision_proxy_sim_frames = std::move(jr.collision_proxy_frames);
+        m_collision_proxy_sim_F = std::move(jr.collision_proxy_F);
         state.controls.frame_count = (int)m_cloth_sim_frames.size();
+        state.controls.sim_sequence_seconds = jr.sequence_seconds;
+        state.controls.sim_proxy_seconds = jr.proxy_seconds;
+        state.controls.sim_solver_seconds = jr.solver_seconds;
+        state.controls.sim_pipeline_seconds = jr.pipeline_seconds;
+        state.controls.sim_sequence_timing_details = std::move(jr.sequence_timing_details);
+        state.controls.sim_proxy_timing_details = std::move(jr.proxy_timing_details);
+        state.controls.sim_solver_timing_details = std::move(jr.solver_timing_details);
 
         if (was_cancelled)
         {
@@ -1372,6 +1514,8 @@ namespace poseweaver
         {
             m_cloth_sim_frames.clear();
             m_smpl_sim_frames.clear();
+            m_collision_proxy_sim_frames.clear();
+            m_collision_proxy_sim_F.resize(0, 3);
             state.controls.frame_count = 0;
             return;
         }
@@ -1387,6 +1531,8 @@ namespace poseweaver
         {
             m_cloth_sim_frames.clear();
             m_smpl_sim_frames.clear();
+            m_collision_proxy_sim_frames.clear();
+            m_collision_proxy_sim_F.resize(0, 3);
             state.controls.frame_count = 0;
             return;
         }
@@ -1397,7 +1543,42 @@ namespace poseweaver
             garment.compute_normals();
         }
 
-        if (!m_smpl_sim_frames.empty())
+        const bool want_proxy_sequence =
+            state.controls.save_smpl_sequence
+            && state.controls.show_collision_proxy_sequence
+            && !m_collision_proxy_sim_frames.empty()
+            && m_collision_proxy_sim_F.rows() > 0;
+
+        if (want_proxy_sequence)
+        {
+            const int body_fi = std::min(fi, (int)m_collision_proxy_sim_frames.size() - 1);
+            const Eigen::MatrixXd& body_V = m_collision_proxy_sim_frames[(size_t)body_fi];
+            const Eigen::MatrixXi& body_F = m_collision_proxy_sim_F;
+            auto& body = m_viewer.data(m_smplh_mesh_index);
+
+            if (body_V.rows() > 0 && body_F.rows() > 0)
+            {
+                if (!m_smplh_sim_preview_mesh_active
+                    || body.V.rows() != body_V.rows()
+                    || body.F.rows() != body_F.rows())
+                {
+                    body.clear();
+                    body.set_mesh(body_V, body_F);
+                    body.show_faces = 1;
+                    body.show_lines = 0;
+                    body.show_overlay = 0;
+                    body.set_colors(Eigen::RowVector3d(0.72, 0.80, 0.92));
+                    m_smplh_sim_preview_mesh_active = true;
+                }
+                else
+                {
+                    body.set_vertices(body_V);
+                }
+                body.compute_normals();
+                body.set_visible(true);
+            }
+        }
+        else if (!m_smpl_sim_frames.empty())
         {
             const int body_fi = std::min(fi, (int)m_smpl_sim_frames.size() - 1);
             const Eigen::MatrixXd& body_V = m_smpl_sim_frames[(size_t)body_fi];

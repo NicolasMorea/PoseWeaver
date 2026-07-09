@@ -1,6 +1,7 @@
 #include "render/Renderer.h"
 #include "core/Paths.h"
 #include "simulation/ClothMeshProcessor.h"
+#include "simulation/SmplCollisionProxy.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -553,12 +554,14 @@ namespace poseweaver
         m_wind_arrow_mesh_index = m_viewer.append_mesh(true);
         m_sketch2rig_rig_mesh_index = m_viewer.append_mesh(true);
         m_cloth_render_mesh_index = m_viewer.append_mesh(false);
+        m_collision_proxy_mesh_index = m_viewer.append_mesh(true);
 
         m_viewer.data(m_object_mesh_index).set_visible(false);
         m_viewer.data(m_garment_mesh_index).set_visible(false);
         m_viewer.data(m_smplh_mesh_index).set_visible(false);
         m_viewer.data(m_sketch2rig_rig_mesh_index).set_visible(false);
         m_viewer.data(m_cloth_render_mesh_index).set_visible(false);
+        m_viewer.data(m_collision_proxy_mesh_index).set_visible(false);
 
         {
             auto& w = m_viewer.data(m_wind_arrow_mesh_index);
@@ -588,6 +591,80 @@ namespace poseweaver
         grid.line_width = 2.5f;
         grid.add_edges(P1, P2, C);
         grid.set_visible(true);
+    }
+
+    void Renderer::update_collision_proxy_gizmo(AppState& state)
+    {
+        if (!m_initialized)
+            return;
+
+        auto& data = m_viewer.data(m_collision_proxy_mesh_index);
+        if (!state.show_collision_colliders)
+        {
+            data.set_visible(false);
+            return;
+        }
+
+        Eigen::MatrixXd V;
+        Eigen::MatrixXi F;
+        if (m_cloth_sim_job_running
+            && state.xpbd_params.collision_geometry == CollisionGeometryType::SimpleProxy
+            && m_cloth_sim_preview_state)
+        {
+            std::lock_guard<std::mutex> lk(m_cloth_sim_preview_state->mutex);
+            if (m_cloth_sim_preview_state->body_valid && m_cloth_sim_preview_state->body_topology_valid)
+            {
+                V = m_cloth_sim_preview_state->body_V;
+                F = m_cloth_sim_preview_state->body_F;
+            }
+        }
+        if (V.rows() <= 0 && !m_collision_proxy_sim_frames.empty() && m_collision_proxy_sim_F.rows() > 0)
+        {
+            const int frame_count = (int)m_collision_proxy_sim_frames.size();
+            const int fi = std::clamp(state.controls.current_frame, 0, std::max(0, frame_count - 1));
+            V = m_collision_proxy_sim_frames[(size_t)fi];
+            F = m_collision_proxy_sim_F;
+        }
+        else if (V.rows() <= 0
+            && state.xpbd_params.collision_geometry == CollisionGeometryType::SimpleProxy
+            && m_smplh_loaded
+            && m_smplh_vertices.rows() > 0)
+        {
+            SmplCollisionProxy proxy;
+            std::string err;
+            if (!build_smpl_collision_proxy(m_smplh_vertices, m_smplh_model, proxy, &err)
+                || !apply_smpl_collision_proxy(proxy, m_smplh_vertices, m_smplh_model, V, F, &err))
+            {
+                data.set_visible(false);
+                return;
+            }
+        }
+
+        if (V.rows() <= 0 || F.rows() <= 0)
+        {
+            data.set_visible(false);
+            return;
+        }
+
+        if (data.V.rows() != V.rows() || data.F.rows() != F.rows())
+        {
+            data.clear();
+            data.set_mesh(V, F);
+            data.show_faces = 0;
+            data.show_lines = 1;
+            data.show_overlay = 0;
+            data.line_width = 1.8f;
+            data.line_color[0] = 0.2f;
+            data.line_color[1] = 0.95f;
+            data.line_color[2] = 1.0f;
+            data.line_color[3] = 0.9f;
+        }
+        else
+        {
+            data.set_vertices(V);
+        }
+        data.compute_normals();
+        data.set_visible(true);
     }
 
     void Renderer::ensure_object_mesh_loaded(const AppState& state)
@@ -719,6 +796,10 @@ namespace poseweaver
             auto& cloth_render = m_viewer.data(m_cloth_render_mesh_index);
             cloth_render.clear();
             cloth_render.set_visible(false);
+
+            auto& proxy = m_viewer.data(m_collision_proxy_mesh_index);
+            proxy.clear();
+            proxy.set_visible(false);
         }
 
         if (m_sketch2uv_prediction_texture_id != 0)
@@ -826,6 +907,7 @@ namespace poseweaver
 
         update_cloth_simulation_job(state);
         apply_cloth_simulation_frame(state);
+        update_collision_proxy_gizmo(state);
 
         Eigen::Vector3d scene_center(0.0, 0.0, 0.0);
         double scene_diag = 1.0;
@@ -1151,6 +1233,7 @@ namespace poseweaver
             draw_scene_mesh(m_object_mesh_index);
             draw_scene_mesh(m_garment_mesh_index);
             draw_scene_mesh(m_smplh_mesh_index);
+            draw_scene_mesh(m_collision_proxy_mesh_index);
 
             {
                 auto& garment = m_viewer.data(m_garment_mesh_index);

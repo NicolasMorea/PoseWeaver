@@ -12,12 +12,15 @@
 
 namespace
 {
+    static bool g_read_seen_collision_geometry = false;
+
     static void* pw_imgui_settings_read_open(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name)
     {
         if (!handler || !name)
             return nullptr;
         if (std::strcmp(name, "State") != 0)
             return nullptr;
+        g_read_seen_collision_geometry = false;
         return handler->UserData;
     }
 
@@ -79,6 +82,10 @@ namespace
         if (std::sscanf(line, "SaveSmplSequence=%d", &iv) == 1)
         {
             state->controls.save_smpl_sequence = (iv != 0);
+        }
+        if (std::sscanf(line, "ShowCollisionProxySequence=%d", &iv) == 1)
+        {
+            state->controls.show_collision_proxy_sequence = (iv != 0);
         }
 
         if (std::sscanf(line, "SimulationMaxFrames=%d", &iv) == 1)
@@ -306,9 +313,25 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.wind_random_time = std::clamp(v, 0.0f, 1000.0f);
         }
+        if (std::sscanf(line, "XpbdCollisionGeometry=%d", &iv) == 1)
+        {
+            g_read_seen_collision_geometry = true;
+            iv = std::clamp(iv, 0, 2);
+            state->xpbd_params.collision_geometry = (iv == 1)
+                ? poseweaver::CollisionGeometryType::SimplifiedSmpl
+                : (iv == 2) ? poseweaver::CollisionGeometryType::SimpleProxy : poseweaver::CollisionGeometryType::RawSmpl;
+            state->xpbd_params.simplify_smpl =
+                state->xpbd_params.collision_geometry == poseweaver::CollisionGeometryType::SimplifiedSmpl;
+        }
         if (std::sscanf(line, "XpbdSimplifySmpl=%d", &iv) == 1)
         {
-            state->xpbd_params.simplify_smpl = (iv != 0);
+            if (!g_read_seen_collision_geometry)
+            {
+                state->xpbd_params.simplify_smpl = (iv != 0);
+                state->xpbd_params.collision_geometry = state->xpbd_params.simplify_smpl
+                    ? poseweaver::CollisionGeometryType::SimplifiedSmpl
+                    : poseweaver::CollisionGeometryType::RawSmpl;
+            }
         }
         if (std::sscanf(line, "XpbdSmplGeometryPercent=%f", &v) == 1)
         {
@@ -335,6 +358,7 @@ namespace
         buf->appendf("SmoothSequence=%d\n", state->controls.smooth_sequence ? 1 : 0);
         buf->appendf("SmoothSequenceLength=%.6f\n", state->controls.smooth_sequence_length);
         buf->appendf("SaveSmplSequence=%d\n", state->controls.save_smpl_sequence ? 1 : 0);
+        buf->appendf("ShowCollisionProxySequence=%d\n", state->controls.show_collision_proxy_sequence ? 1 : 0);
 
         buf->appendf("SimulationMaxFrames=%d\n", state->controls.max_frames);
         buf->appendf("SimulationFps=%.9f\n", state->controls.fps);
@@ -381,7 +405,10 @@ namespace
         buf->appendf("XpbdWindPitchDeg=%.6f\n", state->xpbd_params.wind_pitch_deg);
         buf->appendf("XpbdWindRandomSpace=%.6f\n", state->xpbd_params.wind_random_space);
         buf->appendf("XpbdWindRandomTime=%.6f\n", state->xpbd_params.wind_random_time);
-        buf->appendf("XpbdSimplifySmpl=%d\n", state->xpbd_params.simplify_smpl ? 1 : 0);
+        const int collision_geometry = (state->xpbd_params.collision_geometry == poseweaver::CollisionGeometryType::SimplifiedSmpl)
+            ? 1
+            : (state->xpbd_params.collision_geometry == poseweaver::CollisionGeometryType::SimpleProxy) ? 2 : 0;
+        buf->appendf("XpbdCollisionGeometry=%d\n", collision_geometry);
         buf->appendf("XpbdSmplGeometryPercent=%.6f\n", state->xpbd_params.smpl_geometry_percent);
 
         buf->appendf("\n");

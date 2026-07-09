@@ -187,6 +187,7 @@ namespace poseweaver
         void capture_generated_cloth_render_if_requested(AppState& state);
         void process_canva_displacement_map(AppState& state);
         void process_canva_iso_displacement_map(AppState& state);
+        void update_collision_proxy_gizmo(AppState& state);
 
         void regenerate_uv_wireframe_segments();
         bool try_load_smpl_uv_layout_once();
@@ -203,9 +204,10 @@ namespace poseweaver
         int m_wind_arrow_mesh_index = 4;
         int m_sketch2rig_rig_mesh_index = 5;
         int m_cloth_render_mesh_index = 6;
+        int m_collision_proxy_mesh_index = 7;
 
         // Indexed by mesh index in m_viewer.data_list.
-        std::array<MeshShaderVariant, 8> m_mesh_shader_variant{};
+        std::array<MeshShaderVariant, 9> m_mesh_shader_variant{};
 
         std::string m_object_mesh_name;
         std::string m_garment_mesh_name;
@@ -315,9 +317,18 @@ namespace poseweaver
             bool ok = false;
             std::vector<Eigen::MatrixXd> frames; // each is (#V x 3)
             std::vector<Eigen::MatrixXd> smpl_frames;
+            std::vector<Eigen::MatrixXd> collision_proxy_frames;
+            Eigen::MatrixXi collision_proxy_F;
             int steps_simulated = 0;
             int last_step_contacts = 0;
             std::string timing_report;
+            double sequence_seconds = 0.0;
+            double proxy_seconds = 0.0;
+            double solver_seconds = 0.0;
+            double pipeline_seconds = 0.0;
+            std::vector<std::string> sequence_timing_details;
+            std::vector<std::string> proxy_timing_details;
+            std::vector<std::string> solver_timing_details;
             std::string error;
         };
 
@@ -352,6 +363,8 @@ namespace poseweaver
         std::shared_ptr<ClothSimPreviewState> m_cloth_sim_preview_state;
         std::shared_ptr<std::atomic_bool> m_cloth_sim_preview_enabled;
         std::uint64_t m_cloth_sim_preview_last_seq_applied = 0;
+        std::vector<Eigen::MatrixXd> m_collision_proxy_sim_frames;
+        Eigen::MatrixXi m_collision_proxy_sim_F;
 
         std::uint64_t m_pose_version = 0;
         std::uint64_t m_garment_version = 0;
