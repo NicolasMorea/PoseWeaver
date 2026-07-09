@@ -171,6 +171,16 @@ if(POSEWEAVER_BUILD_APP)
 		src/ui/canva/SketchPose.h
 		src/ui/canva/CanvaPanel.cpp
 		src/ui/canva/CanvaPanel.h
+		src/ui/canva/CanvaPanelInternal.h
+		src/ui/canva/CanvaPanelCanvasEditing.cpp
+		src/ui/canva/CanvaPanelCanvasView.cpp
+		src/ui/canva/CanvaPanelClothFitting.cpp
+		src/ui/canva/CanvaPanelControls.cpp
+		src/ui/canva/CanvaPanelFrameUpdates.cpp
+		src/ui/canva/CanvaPanelLayerIO.cpp
+		src/ui/canva/CanvaPanelPipelineRequests.cpp
+		src/ui/canva/CanvaPanelPipelineUi.cpp
+		src/ui/canva/CanvaPanelPoseLayers.cpp
 		src/ui/UiInternal.h
 	)
 
