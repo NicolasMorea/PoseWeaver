@@ -26,6 +26,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(POSEWEAVER_BUILD_APP "Build PoseWeaver app" ON)
+option(POSEWEAVER_ENABLE_CUDA "Build the CUDA cloth simulation backend when a CUDA compiler is available" ON)
+set(POSEWEAVER_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures used by PoseWeaver")
+
+set(POSEWEAVER_GPU_SIMULATION_SOURCE src/simulation/gpu/ClothCudaJacobiStub.cpp)
+set(POSEWEAVER_HAS_CUDA OFF)
+if(POSEWEAVER_ENABLE_CUDA)
+	include(CheckLanguage)
+	check_language(CUDA)
+	if(CMAKE_CUDA_COMPILER)
+		enable_language(CUDA)
+		find_package(CUDAToolkit REQUIRED)
+		if(UNIX AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 11.6)
+			set(POSEWEAVER_CUDA_LEGACY_COMPILER ON)
+		endif()
+		set(POSEWEAVER_GPU_SIMULATION_SOURCE "")
+		set(POSEWEAVER_HAS_CUDA ON)
+	endif()
+endif()
 
 include(FetchContent)
 find_package(Threads REQUIRED)
@@ -55,6 +73,51 @@ FetchContent_Declare(
 	GIT_TAG        v2.6.0
 )
 FetchContent_MakeAvailable(libigl)
+
+if(POSEWEAVER_CUDA_LEGACY_COMPILER)
+	set(POSEWEAVER_CUDA_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/ClothCudaJacobi.cu.o")
+	add_custom_command(
+		OUTPUT "${POSEWEAVER_CUDA_OBJECT}"
+		COMMAND "${CMAKE_CUDA_COMPILER}"
+			-std=c++14
+			--expt-relaxed-constexpr
+			-D_GLIBCXX_STD_FUNCTION_H=1
+			-O3
+			"--generate-code=arch=compute_${POSEWEAVER_CUDA_ARCHITECTURES},code=[compute_${POSEWEAVER_CUDA_ARCHITECTURES},sm_${POSEWEAVER_CUDA_ARCHITECTURES}]"
+			"-I${CMAKE_CURRENT_SOURCE_DIR}/src"
+			"-I${FETCHCONTENT_BASE_DIR}/eigen-src"
+			-c "${CMAKE_CURRENT_SOURCE_DIR}/src/simulation/gpu/ClothCudaJacobi.cu"
+			-o "${POSEWEAVER_CUDA_OBJECT}"
+		DEPENDS
+			src/simulation/gpu/ClothCudaJacobi.cu
+			src/simulation/gpu/ClothCudaJacobi.h
+			src/simulation/xpbd/ClothXpbd.h
+		VERBATIM
+	)
+	set_source_files_properties("${POSEWEAVER_CUDA_OBJECT}" PROPERTIES
+		EXTERNAL_OBJECT TRUE
+		GENERATED TRUE
+	)
+	add_library(poseweaver_cuda_backend STATIC "${POSEWEAVER_CUDA_OBJECT}")
+	set_target_properties(poseweaver_cuda_backend PROPERTIES LINKER_LANGUAGE CXX)
+	target_link_libraries(poseweaver_cuda_backend PUBLIC CUDA::cudart)
+elseif(POSEWEAVER_HAS_CUDA)
+	add_library(poseweaver_cuda_backend STATIC
+		src/simulation/gpu/ClothCudaJacobi.cu
+		src/simulation/gpu/ClothCudaJacobi.h
+	)
+	set_target_properties(poseweaver_cuda_backend PROPERTIES
+		CUDA_STANDARD 14
+		CUDA_STANDARD_REQUIRED ON
+		CUDA_ARCHITECTURES "${POSEWEAVER_CUDA_ARCHITECTURES}"
+	)
+	target_compile_options(poseweaver_cuda_backend PRIVATE
+		$<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+	)
+	target_include_directories(poseweaver_cuda_backend PRIVATE src)
+	target_link_libraries(poseweaver_cuda_backend PRIVATE Eigen3::Eigen)
+	target_link_libraries(poseweaver_cuda_backend PUBLIC CUDA::cudart)
+endif()
 
 # stb provides stb_image.h (PNG/JPG/etc image loading) for the canva PNG import.
 FetchContent_Declare(
@@ -113,6 +176,18 @@ if(EXISTS "${cnpy_SOURCE_DIR}/cnpy.cpp")
 	endif()
 endif()
 
+if(POSEWEAVER_HAS_CUDA)
+	enable_testing()
+	add_executable(poseweaver_cuda_smoke
+		tests/ClothCudaSmoke.cpp
+		src/simulation/gpu/ClothCudaJacobi.h
+	)
+	target_include_directories(poseweaver_cuda_smoke PRIVATE src)
+	target_link_libraries(poseweaver_cuda_smoke PRIVATE Eigen3::Eigen poseweaver_cuda_backend)
+	target_compile_features(poseweaver_cuda_smoke PRIVATE cxx_std_17)
+	add_test(NAME poseweaver_cuda_smoke COMMAND poseweaver_cuda_smoke)
+endif()
+
 if(POSEWEAVER_BUILD_APP)
 	add_executable(poseweaver
 		src/app/main.cpp
@@ -136,6 +211,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/simulation/collision/ClothContacts.h
 		src/simulation/xpbd/ClothXpbd.cpp
 		src/simulation/xpbd/ClothXpbd.h
+		${POSEWEAVER_GPU_SIMULATION_SOURCE}
+		src/simulation/gpu/ClothCudaJacobi.h
 		src/simulation/ClothToSmplMapping.cpp
 		src/simulation/ClothToSmplMapping.h
 		src/services/ModelInferenceService.cpp
@@ -197,14 +274,19 @@ if(POSEWEAVER_BUILD_APP)
 		POSEWEAVER_SKETCH2DEPTH_WORKER="${CMAKE_SOURCE_DIR}/src/sketch2depth/inference_worker.py"
 		POSEWEAVER_VITPOSE_WORKER="${CMAKE_SOURCE_DIR}/src/vitpose/inference_worker.py"
 		POSEWEAVER_RIG_OPTIMIZER_WORKER="${CMAKE_SOURCE_DIR}/src/rigopt/optimize_rig.py"
+		POSEWEAVER_HAS_CUDA=$<BOOL:${POSEWEAVER_HAS_CUDA}>
 	)
+
+	if(POSEWEAVER_HAS_CUDA)
+		target_link_libraries(poseweaver PRIVATE poseweaver_cuda_backend)
+	endif()
 
 	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs Threads::Threads)
 
 	if(MSVC)
-		target_compile_options(poseweaver PRIVATE /W4)
+		target_compile_options(poseweaver PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
 	else()
-		target_compile_options(poseweaver PRIVATE -Wall -Wextra -Wpedantic)
+		target_compile_options(poseweaver PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
 	endif()
 
 	# Treat libigl headers as system headers to suppress warnings from them
