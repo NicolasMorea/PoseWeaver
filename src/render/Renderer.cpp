@@ -1986,6 +1986,11 @@ namespace poseweaver
 
     void Renderer::shutdown()
     {
+        if (m_cloth_sim_job_running && m_cloth_sim_cancel_flag)
+            m_cloth_sim_cancel_flag->store(true);
+        if (m_cloth_sim_future.valid())
+            m_cloth_sim_future.wait();
+        m_cloth_sim_job_running = false;
         m_initialized = false;
         m_window = nullptr;
         m_object_mesh_name.clear();
