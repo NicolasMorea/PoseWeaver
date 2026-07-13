@@ -43,8 +43,8 @@ namespace poseweaver::ui_canva
         ClothFittingWarpedDebug,
         ClothFittingOcclusionDebug,
         ClothFittingSceneOcclusionDebug,
-        ClothFittingPredictedDepthOcclusionDebug,
         ClothFittingAlignedPredictedDepthOcclusionDebug,
+        ClothFittingIsoOcclusionDebug,
         ClothFittingSceneDebug,
         ClothFittingDeformation
     };

@@ -73,8 +73,8 @@ namespace poseweaver::ui_canva
         std::vector<unsigned char> warped_debug_pixels,
         std::vector<unsigned char> occlusion_pixels,
         std::vector<unsigned char> scene_occlusion_pixels,
-        std::vector<unsigned char> predicted_depth_occlusion_pixels,
         std::vector<unsigned char> aligned_predicted_depth_occlusion_pixels,
+        std::vector<unsigned char> iso_occlusion_pixels,
         std::vector<unsigned char> scene_debug_pixels,
         std::vector<unsigned char> deformation_pixels,
         std::string* out_error)
@@ -115,16 +115,16 @@ namespace poseweaver::ui_canva
                 *out_error = "true-depth occlusion pixel buffer is too small";
             return false;
         }
-        if ((int)predicted_depth_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "predicted-depth occlusion pixel buffer is too small";
-            return false;
-        }
         if ((int)aligned_predicted_depth_occlusion_pixels.size() < canva.width * canva.height * 4)
         {
             if (out_error)
                 *out_error = "aligned predicted-depth occlusion pixel buffer is too small";
+            return false;
+        }
+        if ((int)iso_occlusion_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "ISO occlusion pixel buffer is too small";
             return false;
         }
         if ((int)scene_debug_pixels.size() < canva.width * canva.height * 4)
@@ -177,7 +177,7 @@ namespace poseweaver::ui_canva
             canva.width,
             canva.height,
             canva.next_layer_id++,
-            "cloth occlusion (ISO mapping colors)");
+            "cloth fitting debug (ISO mapping colors)");
         debug_layer.kind = CanvaLayerKind::ClothFittingDebug;
         debug_layer.pixels = std::move(debug_pixels);
         debug_layer.offset = source_offset;
@@ -233,20 +233,6 @@ namespace poseweaver::ui_canva
 
         canva.layers.insert(canva.layers.begin(), std::move(scene_occlusion_layer));
 
-        CanvaLayer predicted_depth_occlusion_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth occlusion (predicted depth)");
-        predicted_depth_occlusion_layer.kind = CanvaLayerKind::ClothFittingPredictedDepthOcclusionDebug;
-        predicted_depth_occlusion_layer.pixels = std::move(predicted_depth_occlusion_pixels);
-        predicted_depth_occlusion_layer.offset = source_offset;
-        predicted_depth_occlusion_layer.scale = source_scale;
-        predicted_depth_occlusion_layer.enabled = false;
-        predicted_depth_occlusion_layer.dirty = true;
-        predicted_depth_occlusion_layer.bounds_dirty = true;
-        canva.layers.insert(canva.layers.begin(), std::move(predicted_depth_occlusion_layer));
-
         CanvaLayer aligned_predicted_depth_occlusion_layer = canva_make_layer(
             canva.width,
             canva.height,
@@ -262,6 +248,20 @@ namespace poseweaver::ui_canva
         aligned_predicted_depth_occlusion_layer.dirty = true;
         aligned_predicted_depth_occlusion_layer.bounds_dirty = true;
         canva.layers.insert(canva.layers.begin(), std::move(aligned_predicted_depth_occlusion_layer));
+
+        CanvaLayer iso_occlusion_layer = canva_make_layer(
+            canva.width,
+            canva.height,
+            canva.next_layer_id++,
+            "cloth occlusion (ISO mapping only)");
+        iso_occlusion_layer.kind = CanvaLayerKind::ClothFittingIsoOcclusionDebug;
+        iso_occlusion_layer.pixels = std::move(iso_occlusion_pixels);
+        iso_occlusion_layer.offset = source_offset;
+        iso_occlusion_layer.scale = source_scale;
+        iso_occlusion_layer.enabled = false;
+        iso_occlusion_layer.dirty = true;
+        iso_occlusion_layer.bounds_dirty = true;
+        canva.layers.insert(canva.layers.begin(), std::move(iso_occlusion_layer));
 
         CanvaLayer scene_debug_layer = canva_make_layer(
             canva.width,
@@ -350,8 +350,8 @@ namespace poseweaver::ui_canva
         std::vector<unsigned char> warped_debug;
         std::vector<unsigned char> occlusion;
         std::vector<unsigned char> scene_occlusion;
-        std::vector<unsigned char> predicted_depth_occlusion;
         std::vector<unsigned char> aligned_predicted_depth_occlusion;
+        std::vector<unsigned char> iso_occlusion;
         std::vector<unsigned char> scene_debug;
         std::vector<unsigned char> deformation;
         std::vector<unsigned char> close_to_body;
@@ -387,8 +387,8 @@ namespace poseweaver::ui_canva
                 warped_debug,
                 occlusion,
                 scene_occlusion,
-                predicted_depth_occlusion,
                 aligned_predicted_depth_occlusion,
+                iso_occlusion,
                 scene_debug,
                 deformation,
                 close_to_body,
@@ -418,8 +418,8 @@ namespace poseweaver::ui_canva
                 std::move(warped_debug),
                 std::move(occlusion),
                 std::move(scene_occlusion),
-                std::move(predicted_depth_occlusion),
                 std::move(aligned_predicted_depth_occlusion),
+                std::move(iso_occlusion),
                 std::move(scene_debug),
                 std::move(deformation),
                 &add_err))

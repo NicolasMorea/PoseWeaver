@@ -218,9 +218,18 @@ namespace poseweaver
             }
         }
 
-        static int build_red_deformation_warp(
+        struct DeformationWarpSeedCounts
+        {
+            int red = 0;
+            int purple = 0;
+
+            int total() const { return red + purple; }
+        };
+
+        static DeformationWarpSeedCounts build_deformation_warp(
             const std::vector<unsigned char>& deformation_rgba,
             const std::vector<unsigned char>& body_mask,
+            const std::vector<unsigned char>& cloth_mask,
             int width,
             int height,
             float smooth_radius,
@@ -231,58 +240,91 @@ namespace poseweaver
             const size_t count = (size_t)width * (size_t)height;
             out_dx.assign(count, 0.0f);
             out_dy.assign(count, 0.0f);
-            if (deformation_rgba.size() < count * 4u || body_mask.size() < count || force <= 0.0f)
-                return 0;
+            DeformationWarpSeedCounts seed_counts;
+            if (deformation_rgba.size() < count * 4u
+                || body_mask.size() < count
+                || cloth_mask.size() < count
+                || force <= 0.0f)
+                return seed_counts;
 
             std::vector<unsigned char> red_mask(count, 0u);
-            int red_count = 0;
+            std::vector<unsigned char> purple_mask(count, 0u);
             for (size_t i = 0; i < count; ++i)
             {
                 const size_t p = i * 4u;
                 // The deformation-map red is deliberately detected narrowly so
-                // blue and magenta cases cannot become warp sources.
+                // blue and purple cases cannot become red warp sources.
                 if (deformation_rgba[p + 3u] != 0u
                     && deformation_rgba[p + 0u] >= 240u
                     && deformation_rgba[p + 1u] <= 96u
                     && deformation_rgba[p + 2u] <= 80u)
                 {
                     red_mask[i] = 1u;
-                    ++red_count;
+                    ++seed_counts.red;
+                }
+                else if (deformation_rgba[p + 3u] != 0u
+                    && deformation_rgba[p + 0u] >= 180u
+                    && deformation_rgba[p + 1u] <= 96u
+                    && deformation_rgba[p + 2u] >= 200u)
+                {
+                    purple_mask[i] = 1u;
+                    ++seed_counts.purple;
                 }
             }
-            if (red_count == 0)
-                return 0;
+            if (seed_counts.total() == 0)
+                return seed_counts;
 
             std::vector<int> body_x;
             std::vector<int> body_y;
-            if (!nearest_mask_pixels(body_mask, width, height, body_x, body_y))
-                return 0;
+            const bool have_body_targets =
+                seed_counts.red > 0 && nearest_mask_pixels(body_mask, width, height, body_x, body_y);
+            if (seed_counts.red > 0 && !have_body_targets)
+                seed_counts.red = 0;
 
-            std::vector<float> red_weight(count, 0.0f);
-            std::vector<float> red_dx(count, 0.0f);
-            std::vector<float> red_dy(count, 0.0f);
+            std::vector<int> cloth_x;
+            std::vector<int> cloth_y;
+            const bool have_cloth_targets =
+                seed_counts.purple > 0 && nearest_mask_pixels(cloth_mask, width, height, cloth_x, cloth_y);
+            if (seed_counts.purple > 0 && !have_cloth_targets)
+                seed_counts.purple = 0;
+            if (seed_counts.total() == 0)
+                return seed_counts;
+
+            std::vector<unsigned char> seed_mask(count, 0u);
+            std::vector<float> seed_weight(count, 0.0f);
+            std::vector<float> seed_dx(count, 0.0f);
+            std::vector<float> seed_dy(count, 0.0f);
             for (size_t i = 0; i < count; ++i)
             {
-                if (red_mask[i] == 0u)
-                    continue;
                 const int x = (int)(i % (size_t)width);
                 const int y = (int)(i / (size_t)width);
-                red_weight[i] = 1.0f;
-                red_dx[i] = (float)(body_x[i] - x);
-                red_dy[i] = (float)(body_y[i] - y);
+                if (red_mask[i] != 0u && have_body_targets)
+                {
+                    seed_mask[i] = 1u;
+                    seed_weight[i] = 1.0f;
+                    seed_dx[i] = (float)(body_x[i] - x);
+                    seed_dy[i] = (float)(body_y[i] - y);
+                }
+                else if (purple_mask[i] != 0u && have_cloth_targets)
+                {
+                    seed_mask[i] = 1u;
+                    seed_weight[i] = 1.0f;
+                    seed_dx[i] = (float)(x - cloth_x[i]);
+                    seed_dy[i] = (float)(y - cloth_y[i]);
+                }
             }
 
-            std::vector<int> red_x;
-            std::vector<int> red_y;
-            if (!nearest_mask_pixels(red_mask, width, height, red_x, red_y))
-                return 0;
+            std::vector<int> seed_x;
+            std::vector<int> seed_y;
+            if (!nearest_mask_pixels(seed_mask, width, height, seed_x, seed_y))
+                return DeformationWarpSeedCounts{};
 
             const float radius = std::max(0.0f, smooth_radius);
             if (radius > 0.0f)
             {
-                gaussian_like_blur_scalar(red_weight, width, height, radius);
-                gaussian_like_blur_scalar(red_dx, width, height, radius);
-                gaussian_like_blur_scalar(red_dy, width, height, radius);
+                gaussian_like_blur_scalar(seed_weight, width, height, radius);
+                gaussian_like_blur_scalar(seed_dx, width, height, radius);
+                gaussian_like_blur_scalar(seed_dy, width, height, radius);
             }
             const float radius_squared = radius * radius;
             for (int y = 0; y < height; ++y)
@@ -290,8 +332,8 @@ namespace poseweaver
                 for (int x = 0; x < width; ++x)
                 {
                     const size_t i = (size_t)y * (size_t)width + (size_t)x;
-                    const int sx = red_x[i];
-                    const int sy = red_y[i];
+                    const int sx = seed_x[i];
+                    const int sy = seed_y[i];
                     if (sx < 0 || sy < 0)
                         continue;
                     const float dx = (float)(x - sx);
@@ -308,18 +350,18 @@ namespace poseweaver
                         const float smoothstep = t * t * (3.0f - 2.0f * t);
                         influence = 1.0f - smoothstep;
                     }
-                    const float density = red_weight[i];
+                    const float density = seed_weight[i];
                     if (!(density > 1e-6f))
                         continue;
 
                     // Normalize the blurred vectors by blurred seed density.
-                    // Adjacent red pixels therefore act as one continuous
+                    // Adjacent deformation pixels therefore act as one continuous
                     // liquify stroke instead of competing nearest-pixel sites.
-                    out_dx[i] = (red_dx[i] / density) * force * influence;
-                    out_dy[i] = (red_dy[i] / density) * force * influence;
+                    out_dx[i] = (seed_dx[i] / density) * force * influence;
+                    out_dy[i] = (seed_dy[i] / density) * force * influence;
                 }
             }
-            return red_count;
+            return seed_counts;
         }
 
         static float sample_bilinear_scalar(
@@ -1488,8 +1530,8 @@ namespace poseweaver
         std::vector<unsigned char>& out_warped_debug_rgba,
         std::vector<unsigned char>& out_occlusion_rgba,
         std::vector<unsigned char>& out_scene_occlusion_rgba,
-        std::vector<unsigned char>& out_predicted_depth_occlusion_rgba,
         std::vector<unsigned char>& out_aligned_predicted_depth_occlusion_rgba,
+        std::vector<unsigned char>& out_iso_occlusion_rgba,
         std::vector<unsigned char>& out_scene_debug_rgba,
         std::vector<unsigned char>& out_deformation_rgba,
         std::vector<unsigned char>& out_close_to_body_rgba,
@@ -1503,8 +1545,8 @@ namespace poseweaver
         out_warped_debug_rgba.clear();
         out_occlusion_rgba.clear();
         out_scene_occlusion_rgba.clear();
-        out_predicted_depth_occlusion_rgba.clear();
         out_aligned_predicted_depth_occlusion_rgba.clear();
+        out_iso_occlusion_rgba.clear();
         out_scene_debug_rgba.clear();
         out_deformation_rgba.clear();
         out_close_to_body_rgba.clear();
@@ -1727,8 +1769,8 @@ namespace poseweaver
         out_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_scene_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
-        out_predicted_depth_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_aligned_predicted_depth_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
+        out_iso_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_scene_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_deformation_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_close_to_body_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
@@ -1850,11 +1892,6 @@ namespace poseweaver
 
                 float predicted_distance = 0.0f;
                 const bool have_predicted_depth = predicted_body_distance_at(x, y, predicted_distance);
-                const bool predicted_depth_occluded =
-                    have_predicted_depth && predicted_distance + depth_margin_pred < cloth_distance;
-                set_visibility_pixel(
-                    out_predicted_depth_occlusion_rgba, out_pix, predicted_depth_occluded);
-
                 const float aligned_predicted_distance =
                     aligned_depth_scale * predicted_distance + aligned_depth_translation;
                 const bool aligned_predicted_depth_occluded =
@@ -2235,17 +2272,33 @@ namespace poseweaver
             }
         }
 
-        // Only red deformation-map pixels seed the warp. Their target is the
-        // closest valid ISO/body pixel, and the displacement fades smoothly to
-        // zero over the configured radius. Other deformation colors never seed
-        // a displacement.
+        for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel)
+        {
+            if (cloth_rgba[pixel * 4u + 3u] == 0u || out_debug_rgba[pixel * 4u + 3u] == 0u)
+                continue;
+
+            const bool iso_occluded =
+                rgba_is_color(out_debug_rgba, pixel, 255u, 32u, 32u)
+                || rgba_is_color(out_debug_rgba, pixel, 255u, 144u, 0u)
+                || rgba_is_color(out_debug_rgba, pixel, 190u, 0u, 32u);
+            set_visibility_pixel(out_iso_occlusion_rgba, pixel, iso_occluded);
+        }
+
+        // Red deformation pixels pull cloth toward the closest valid ISO/body
+        // pixel. Purple deformation pixels extend cloth away from their nearest
+        // source cloth pixel. Both use the same liquify radius and force.
+        std::vector<unsigned char> source_cloth_mask((size_t)width * (size_t)height, 0u);
+        for (size_t pixel = 0; pixel < source_cloth_mask.size(); ++pixel)
+            source_cloth_mask[pixel] = out_rgba[pixel * 4u + 3u] != 0u ? 1u : 0u;
+
         std::vector<float> warp_dx;
         std::vector<float> warp_dy;
         const float warp_radius = std::clamp(state.cloth_fitting_warp_radius, 0.0f, 512.0f);
         const float warp_force = std::clamp(state.cloth_fitting_warp_force, 0.0f, 4.0f);
-        const int warped_red_count = build_red_deformation_warp(
+        const DeformationWarpSeedCounts warp_seed_counts = build_deformation_warp(
             out_deformation_rgba,
             iso_body_mask,
+            source_cloth_mask,
             width,
             height,
             warp_radius,
@@ -2259,7 +2312,7 @@ namespace poseweaver
         std::vector<unsigned char> warped_scene_occlusion = out_scene_occlusion_rgba;
         std::vector<unsigned char> warped_aligned_predicted_depth_occlusion =
             out_aligned_predicted_depth_occlusion_rgba;
-        if (warped_red_count > 0)
+        if (warp_seed_counts.total() > 0)
         {
             std::vector<float> inverse_source_x;
             std::vector<float> inverse_source_y;
@@ -2379,7 +2432,8 @@ namespace poseweaver
 
         console_add_line(
             state,
-            "Cloth fitting red warp: seeds=" + std::to_string(warped_red_count)
+            "Cloth fitting deformation warp: red=" + std::to_string(warp_seed_counts.red)
+                + ", purple=" + std::to_string(warp_seed_counts.purple)
                 + ", radius=" + std::to_string(warp_radius)
                 + ", force=" + std::to_string(warp_force)
                 + ", removed(no warp/warped)=" + std::to_string(out_removed_count)
@@ -2405,8 +2459,8 @@ namespace poseweaver
             { "cloth_fitting_occlusion.png", &out_occlusion_rgba },
             { "cloth_fitting_occlusion_warped.png", &warped_occlusion },
             { "cloth_fitting_true_depth_visibility.png", &out_scene_occlusion_rgba },
-            { "cloth_fitting_predicted_depth_visibility.png", &out_predicted_depth_occlusion_rgba },
             { "cloth_fitting_aligned_predicted_depth_visibility.png", &out_aligned_predicted_depth_occlusion_rgba },
+            { "cloth_fitting_iso_visibility.png", &out_iso_occlusion_rgba },
             { "cloth_fitting_3d_scene_debug.png", &out_scene_debug_rgba },
             { "cloth_fitting_deformation.png", &out_deformation_rgba },
             { "cloth_fitting_close_to_body.png", &out_close_to_body_rgba },
