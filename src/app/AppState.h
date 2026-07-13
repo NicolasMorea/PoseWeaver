@@ -32,6 +32,12 @@ namespace poseweaver
         SimpleProxy = 2,
     };
 
+    enum class SimulationDevice
+    {
+        Cpu = 0,
+        Gpu = 1,
+    };
+
     struct SimulationControls
     {
         bool simulating = false;
@@ -69,6 +75,7 @@ namespace poseweaver
     // Compliance values are >= 0, where 0 is perfectly rigid.
     struct SimulationXpbdParams
     {
+        SimulationDevice device = SimulationDevice::Cpu;
         float dt = 1.0f / 60.0f;
         float duration_seconds = 2.0f;
         int solver_iterations = 20;
@@ -174,6 +181,7 @@ namespace poseweaver
     {
         SimulationControls controls;
         SimulationXpbdParams xpbd_params;
+        bool gpu_simulation_available = false;
         SelectionState selection;
         ViewportRect cloth_view;
 

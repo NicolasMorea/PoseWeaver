@@ -4,6 +4,7 @@
 #include "core/Paths.h"
 #include "render/Renderer.h"
 #include "services/ModelInferenceService.h"
+#include "simulation/gpu/ClothCudaJacobi.h"
 #include "ui/Ui.h"
 
 #include <algorithm>
@@ -454,6 +455,8 @@ int main(int, char**)
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     poseweaver::AppState state;
+    std::string cuda_status;
+    state.gpu_simulation_available = poseweaver::cuda_simulation_available(&cuda_status);
     poseweaver::AssetIndex assets(poseweaver::assets_dir());
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
@@ -497,6 +500,9 @@ int main(int, char**)
         poseweaver::console_add_line(state, std::string("GL_RENDERER: ") + renderer_str);
     if (const char* vendor = (const char*)glGetString(GL_VENDOR))
         poseweaver::console_add_line(state, std::string("GL_VENDOR: ") + vendor);
+    poseweaver::console_add_line(state, state.gpu_simulation_available
+        ? "CUDA Jacobi simulation available: " + cuda_status
+        : "CUDA Jacobi simulation unavailable: " + cuda_status);
     poseweaver::console_add_line(state, "PoseWeaver started");
     sketch2rig.start(
         poseweaver::assets_dir() / "Sketch2Rig",

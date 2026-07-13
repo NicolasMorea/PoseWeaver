@@ -327,6 +327,15 @@ namespace poseweaver
             {
                 if (state.show_simulation && ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen))
                 {
+                    const char* simulation_devices[] = { "CPU", "GPU (CUDA Jacobi)" };
+                    int simulation_device = state.xpbd_params.device == SimulationDevice::Gpu ? 1 : 0;
+                    ImGui::BeginDisabled(state.controls.simulating);
+                    if (ImGui::Combo("Simulation device", &simulation_device, simulation_devices, IM_ARRAYSIZE(simulation_devices)))
+                        state.xpbd_params.device = simulation_device == 1 ? SimulationDevice::Gpu : SimulationDevice::Cpu;
+                    ImGui::EndDisabled();
+                    if (state.xpbd_params.device == SimulationDevice::Gpu && !state.gpu_simulation_available)
+                        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "CUDA support is unavailable");
+
                     const int frame_max = (state.controls.frame_count > 0) ? (state.controls.frame_count - 1) : 0;
                     state.controls.current_frame = std::clamp(state.controls.current_frame, 0, std::max(0, frame_max));
 

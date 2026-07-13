@@ -6,6 +6,7 @@
 #include "simulation/SmplSimplifier.h"
 #include "simulation/collision/TriangleBvh.h"
 #include "simulation/xpbd/ClothXpbd.h"
+#include "simulation/gpu/ClothCudaJacobi.h"
 
 #include <igl/signed_distance.h>
 
@@ -838,6 +839,14 @@ namespace poseweaver
 
         xpbd_params.max_frames = max_frames_for_progress;
 
+        const bool use_gpu_simulation = state.xpbd_params.device == SimulationDevice::Gpu;
+        if (use_gpu_simulation && !state.gpu_simulation_available)
+        {
+            state.controls.simulating = false;
+            state.controls.sim_stage.clear();
+            console_add_line(state, "ERROR: CUDA simulation is unavailable.");
+            return;
+        }
 
         const bool save_smpl_sequence = state.controls.save_smpl_sequence;
         const CollisionGeometryType collision_geometry = state.xpbd_params.collision_geometry;
@@ -909,7 +918,9 @@ namespace poseweaver
         state.controls.sim_stage = initial_progress_stage < 3
             ? "Building SMPL sequence"
             : (initial_progress_stage == 3 ? "Preparing SMPL proxy" : "Simulating XPBD");
-        console_add_line(state, "Starting cloth simulation (XPBD)…");
+        console_add_line(state, use_gpu_simulation
+            ? "Starting cloth simulation (CUDA Jacobi XPBD)..."
+            : "Starting cloth simulation (CPU XPBD)...");
 
         m_cloth_sim_future = std::async(std::launch::async,
             [cloth_V0 = std::move(cloth_V0),
@@ -935,6 +946,7 @@ namespace poseweaver
                 use_simple_proxy,
                 prepare_collision_proxy,
                 keep_percent,
+                use_gpu_simulation,
                 preparation_units,
                 cancel_flag,
                 progress_steps_done,
@@ -1224,16 +1236,27 @@ namespace poseweaver
                 preview_cb.body_F = body_F;
 
                 const auto solver_start = std::chrono::steady_clock::now();
-                bool ok = run_cloth_xpbd(
-                    cloth_V0, cloth_F,
-                    body_V, body_F,
-                    xpbd_params,
-                    &xpbd_res,
-                    &err,
-                    cancel_flag.get(),
-                    nullptr,
-                    on_frame_xpbd,
-                    &preview_cb);
+                bool ok = use_gpu_simulation
+                    ? run_cloth_cuda_jacobi(
+                        cloth_V0, cloth_F,
+                        body_V, body_F,
+                        xpbd_params,
+                        &xpbd_res,
+                        &err,
+                        cancel_flag.get(),
+                        nullptr,
+                        on_frame_xpbd,
+                        &preview_cb)
+                    : run_cloth_xpbd(
+                        cloth_V0, cloth_F,
+                        body_V, body_F,
+                        xpbd_params,
+                        &xpbd_res,
+                        &err,
+                        cancel_flag.get(),
+                        nullptr,
+                        on_frame_xpbd,
+                        &preview_cb);
                 jr.solver_seconds = seconds_since(solver_start);
                 if (ok)
                 {
@@ -1252,7 +1275,9 @@ namespace poseweaver
                     const double ms_collision_broadphase = s.ms_candidates + s.ms_collision_broad;
                     const double ms_collision_narrowphase = s.ms_collision_narrow;
 
-                    oss << "XPBD timing breakdown (ms)\n";
+                    oss << (use_gpu_simulation
+                        ? "CUDA Jacobi XPBD timing breakdown (ms)\n"
+                        : "CPU XPBD timing breakdown (ms)\n");
                     oss << "  total: " << s.ms_total << "\n";
                     oss << "  bvh build: " << s.ms_bvh_build << " (" << pct(s.ms_bvh_build) << "%)\n";
                     oss << "  predict: " << s.ms_predict << " (" << pct(s.ms_predict) << "%)\n";

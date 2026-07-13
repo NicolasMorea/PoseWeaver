@@ -204,6 +204,12 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.dt = std::clamp(v, 1e-6f, 1.0f);
         }
+        if (std::sscanf(line, "SimulationDevice=%d", &iv) == 1)
+        {
+            state->xpbd_params.device = iv == 1
+                ? poseweaver::SimulationDevice::Gpu
+                : poseweaver::SimulationDevice::Cpu;
+        }
         if (std::sscanf(line, "XpbdDurationSeconds=%f", &v) == 1)
         {
             if (std::isfinite(v))
@@ -212,6 +218,10 @@ namespace
         if (std::sscanf(line, "XpbdSolverIterations=%d", &iv) == 1)
         {
             state->xpbd_params.solver_iterations = std::clamp(iv, 1, 200);
+        }
+        if (std::sscanf(line, "XpbdSubsteps=%d", &iv) == 1)
+        {
+            state->xpbd_params.substeps = std::clamp(iv, 1, 16);
         }
         if (std::sscanf(line, "XpbdGravity=%f", &v) == 1)
         {
@@ -377,9 +387,12 @@ namespace
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
 
+        buf->appendf("SimulationDevice=%d\n",
+            state->xpbd_params.device == poseweaver::SimulationDevice::Gpu ? 1 : 0);
         buf->appendf("XpbdDt=%.9f\n", state->xpbd_params.dt);
         buf->appendf("XpbdDurationSeconds=%.9f\n", state->xpbd_params.duration_seconds);
         buf->appendf("XpbdSolverIterations=%d\n", state->xpbd_params.solver_iterations);
+        buf->appendf("XpbdSubsteps=%d\n", state->xpbd_params.substeps);
         buf->appendf("XpbdGravity=%.9f\n", state->xpbd_params.gravity);
 
         buf->appendf("XpbdStretchEnabled=%d\n", state->xpbd_params.stretch_enabled ? 1 : 0);
