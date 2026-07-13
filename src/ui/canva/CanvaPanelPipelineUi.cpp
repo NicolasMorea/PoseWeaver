@@ -397,11 +397,14 @@ namespace poseweaver::ui_canva
 
         const ImFont* font = ImGui::GetFont();
         const float font_size = ImGui::GetFontSize();
-        const float title_size = font_size + 2.0f;
+        const float title_size = font_size + 3.0f;
+        const float step_label_size = font_size + 2.0f;
+        const float step_meta_size = font_size;
+        const float step_detail_size = font_size - 1.0f;
         const float w = 360.0f;
-        const float base_row_h = 58.0f;
-        const float detail_line_h = 15.0f;
-        const float header_h = 62.0f;
+        const float base_row_h = 64.0f;
+        const float detail_line_h = 17.0f;
+        const float header_h = 66.0f;
         const float pad = 12.0f;
         std::array<float, kGenerateClothStepCount> row_heights{};
         float rows_h = 0.0f;
@@ -425,9 +428,9 @@ namespace poseweaver::ui_canva
         dl->AddRectFilled(p0, p1, IM_COL32(18, 20, 24, 218), 7.0f);
         dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 42), 7.0f, 0, 1.0f);
         dl->AddText(font, title_size, ImVec2(p0.x + pad, p0.y + 10.0f), IM_COL32(238, 240, 244, 255), "Generate Cloth");
-        dl->AddText(font, font_size, ImVec2(p0.x + pad, p0.y + 28.0f), IM_COL32(176, 181, 190, 255), canva.generate_cloth_status.c_str());
+        dl->AddText(font, step_meta_size, ImVec2(p0.x + pad, p0.y + 30.0f), IM_COL32(176, 181, 190, 255), canva.generate_cloth_status.c_str());
         const std::string total_text = "Pipeline: " + canva_format_seconds(pipeline_seconds);
-        dl->AddText(font, font_size - 1.0f, ImVec2(p0.x + pad, p0.y + 45.0f), IM_COL32(176, 181, 190, 255), total_text.c_str());
+        dl->AddText(font, step_detail_size, ImVec2(p0.x + pad, p0.y + 49.0f), IM_COL32(176, 181, 190, 255), total_text.c_str());
 
         const float rail_x = p0.x + 22.0f;
         const float rows_y = p0.y + header_h;
@@ -450,11 +453,11 @@ namespace poseweaver::ui_canva
 
             dl->AddRectFilled(row0, row1, soft, 6.0f);
             dl->AddCircleFilled(ImVec2(rail_x, y + row_h * 0.5f), 5.5f, accent, 18);
-            dl->AddText(font, font_size, ImVec2(p0.x + 38.0f, y + 11.0f), accent, step.label);
+            dl->AddText(font, step_label_size, ImVec2(p0.x + 38.0f, y + 10.0f), accent, step.label);
             dl->AddText(
                 font,
-                font_size - 1.0f,
-                ImVec2(p0.x + 38.0f, y + 29.0f),
+                step_meta_size,
+                ImVec2(p0.x + 38.0f, y + 33.0f),
                 IM_COL32(190, 195, 204, 255),
                 generate_cloth_step_status_text(step.status));
 
@@ -462,7 +465,7 @@ namespace poseweaver::ui_canva
             {
                 const float bar_x0 = p0.x + 210.0f;
                 const float bar_x1 = p1.x - 16.0f;
-                const float bar_y = y + 34.0f;
+                const float bar_y = y + 39.0f;
                 const float t = std::clamp(step.progress, 0.0f, 1.0f);
                 dl->AddRectFilled(ImVec2(bar_x0, bar_y), ImVec2(bar_x1, bar_y + 5.0f), IM_COL32(62, 66, 74, 255), 2.5f);
                 dl->AddRectFilled(ImVec2(bar_x0, bar_y), ImVec2(bar_x0 + (bar_x1 - bar_x0) * t, bar_y + 5.0f), accent, 2.5f);
@@ -472,8 +475,8 @@ namespace poseweaver::ui_canva
             {
                 dl->AddText(
                     font,
-                    font_size - 1.0f,
-                    ImVec2(p0.x + 210.0f, y + 12.0f),
+                    step_meta_size,
+                    ImVec2(p0.x + 210.0f, y + 14.0f),
                     IM_COL32(190, 195, 204, 255),
                     step.detail.c_str());
             }
@@ -484,8 +487,8 @@ namespace poseweaver::ui_canva
             {
                 dl->AddText(
                     font,
-                    font_size - 2.0f,
-                    ImVec2(p0.x + 38.0f, y + 47.0f + (float)j * detail_line_h),
+                    step_detail_size,
+                    ImVec2(p0.x + 38.0f, y + 53.0f + (float)j * detail_line_h),
                     IM_COL32(168, 174, 184, 255),
                     step.details[(size_t)j].c_str());
             }
