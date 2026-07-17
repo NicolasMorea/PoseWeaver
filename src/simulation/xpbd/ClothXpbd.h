@@ -37,10 +37,15 @@ namespace poseweaver
 
         Eigen::Vector3d wind_dir = Eigen::Vector3d(0.0, 0.0, 1.0);
         double wind_force = 0.0;
-        double wind_random_space = 0.0;
-        double wind_random_time = 0.0;
+        double wind_random_magnitude = 0.0;
+        double wind_random_time_scale = 1.0;
+        double wind_random_spatial_scale = 1.0;
 
         int max_frames = 300;
+
+        // Optional rest/reference cloth used for masses and constraint rest lengths.
+        // When empty, cloth_V0 is used as both the initial and reference state.
+        Eigen::MatrixXd reference_positions;
 
         std::vector<Eigen::MatrixXd> body_sequence;
         Eigen::MatrixXd body_capsules; // #C x 15 rows: ax ay az bx by bz ru rv rw ux uy uz vx vy vz

@@ -205,6 +205,120 @@ namespace poseweaver
             return true;
         }
 
+        static inline double wind_lerp(double a, double b, double t)
+        {
+            return a + (b - a) * t;
+        }
+
+        static inline double wind_fade(double t)
+        {
+            return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        }
+
+        static inline std::uint32_t wind_hash_combine(std::uint32_t h, std::uint32_t v)
+        {
+            h ^= v + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= h >> 16;
+            h *= 0x7feb352du;
+            h ^= h >> 15;
+            h *= 0x846ca68bu;
+            h ^= h >> 16;
+            return h;
+        }
+
+        static double wind_hash_noise(int x, int y, int z, int w, std::uint32_t seed)
+        {
+            std::uint32_t h = wind_hash_combine(seed, static_cast<std::uint32_t>(x));
+            h = wind_hash_combine(h, static_cast<std::uint32_t>(y));
+            h = wind_hash_combine(h, static_cast<std::uint32_t>(z));
+            h = wind_hash_combine(h, static_cast<std::uint32_t>(w));
+            return (static_cast<double>(h & 0x00ffffffu) / 8388607.5) - 1.0;
+        }
+
+        static double wind_value_noise4(double x, double y, double z, double w, std::uint32_t seed)
+        {
+            const int ix = (int)std::floor(x);
+            const int iy = (int)std::floor(y);
+            const int iz = (int)std::floor(z);
+            const int iw = (int)std::floor(w);
+            const double fx = x - (double)ix;
+            const double fy = y - (double)iy;
+            const double fz = z - (double)iz;
+            const double fw = w - (double)iw;
+            const double sx = wind_fade(fx);
+            const double sy = wind_fade(fy);
+            const double sz = wind_fade(fz);
+            const double sw = wind_fade(fw);
+
+            double zw[2];
+            for (int dw = 0; dw <= 1; ++dw)
+            {
+                double zv[2];
+                for (int dz = 0; dz <= 1; ++dz)
+                {
+                    double yv[2];
+                    for (int dy = 0; dy <= 1; ++dy)
+                    {
+                        const double a = wind_hash_noise(ix, iy + dy, iz + dz, iw + dw, seed);
+                        const double b = wind_hash_noise(ix + 1, iy + dy, iz + dz, iw + dw, seed);
+                        yv[dy] = wind_lerp(a, b, sx);
+                    }
+                    zv[dz] = wind_lerp(yv[0], yv[1], sy);
+                }
+                zw[dw] = wind_lerp(zv[0], zv[1], sz);
+            }
+            return wind_lerp(zw[0], zw[1], sw);
+        }
+
+        static double wind_fbm4(double x, double y, double z, double w, std::uint32_t seed)
+        {
+            double value = 0.0;
+            double amplitude = 0.5;
+            double norm = 0.0;
+            double frequency = 1.0;
+            for (int octave = 0; octave < 4; ++octave)
+            {
+                value += amplitude * wind_value_noise4(
+                    x * frequency, y * frequency, z * frequency, w * frequency,
+                    seed + (std::uint32_t)(octave * 1013));
+                norm += amplitude;
+                amplitude *= 0.5;
+                frequency *= 2.03;
+            }
+            return (norm > 0.0) ? std::clamp(value / norm, -1.0, 1.0) : 0.0;
+        }
+
+        static Eigen::Vector3d random_wind_at(
+            const Eigen::Vector3d& pos,
+            double t,
+            const ClothXpbdParams& params)
+        {
+            const double max_magnitude = std::max(0.0, params.wind_random_magnitude);
+            if (!(max_magnitude > 0.0))
+                return Eigen::Vector3d::Zero();
+
+            const double spatial_scale = std::max(0.0, params.wind_random_spatial_scale);
+            const double time_scale = std::max(0.0, params.wind_random_time_scale);
+            const double x = pos.x() * spatial_scale;
+            const double y = pos.y() * spatial_scale;
+            const double z = pos.z() * spatial_scale;
+            const double w = t * time_scale;
+
+            Eigen::Vector3d raw(
+                wind_fbm4(x + 17.31, y - 9.42, z + 3.77, w, 0x6a09e667u),
+                wind_fbm4(x - 31.11, y + 5.13, z + 23.9, w + 41.0, 0xbb67ae85u),
+                wind_fbm4(x + 7.49, y + 29.3, z - 13.7, w - 19.0, 0x3c6ef372u));
+            const double len = raw.norm();
+            if (!(len > 1e-9) || !std::isfinite(len))
+                return Eigen::Vector3d::Zero();
+
+            const double gust_noise = 0.5 + 0.5 * wind_fbm4(
+                x * 0.63 + 4.1, y * 0.63 - 8.7, z * 0.63 + 12.2, w * 0.71 + 5.0, 0xa54ff53au);
+            const double gust = std::pow(std::clamp(gust_noise, 0.0, 1.0), 2.35);
+            const double magnitude = max_magnitude * std::clamp(0.08 + 0.92 * gust, 0.0, 1.0);
+            return (magnitude / len) * raw;
+        }
+
         static void apply_wind_prediction(
             Eigen::MatrixXd& X_pred,
             const Eigen::MatrixXd& X,
@@ -212,38 +326,25 @@ namespace poseweaver
             double dt,
             const ClothXpbdParams& params)
         {
-            if (!(params.wind_force > 0.0))
+            const double constant_magnitude = std::max(0.0, params.wind_force);
+            const double random_magnitude = std::max(0.0, params.wind_random_magnitude);
+            if (!(constant_magnitude > 0.0) && !(random_magnitude > 0.0))
                 return;
-
-            Eigen::Vector3d dir = params.wind_dir;
-            const double dn = dir.norm();
-            if (!(dn > 1e-12) || !std::isfinite(dn))
-                return;
-            dir /= dn;
 
             const double t = (double)step * dt;
-            const double w_time = 1.7;
-            const Eigen::Vector3d k_space(12.9898, 78.233, 37.719);
-
-            const double time_term = (params.wind_random_time > 0.0)
-                ? std::sin(t * w_time)
-                : 0.0;
+            Eigen::Vector3d constant_wind = Eigen::Vector3d::Zero();
+            if (constant_magnitude > 0.0)
+            {
+                Eigen::Vector3d dir = params.wind_dir;
+                const double dn = dir.norm();
+                if (dn > 1e-12 && std::isfinite(dn))
+                    constant_wind = constant_magnitude * (dir / dn);
+            }
 
             for (int i = 0; i < X.rows(); ++i)
             {
                 const Eigen::Vector3d pos = X.row(i);
-                const double space_term = (params.wind_random_space > 0.0)
-                    ? std::sin(pos.dot(k_space))
-                    : 0.0;
-
-                double scale = 1.0;
-                scale += 0.25 * params.wind_random_space * space_term;
-                scale += 0.25 * params.wind_random_time * time_term;
-                if (!std::isfinite(scale))
-                    scale = 1.0;
-                scale = std::max(0.0, scale);
-
-                const Eigen::Vector3d a = (params.wind_force * scale) * dir;
+                const Eigen::Vector3d a = constant_wind + random_wind_at(pos, t, params);
                 X_pred.row(i) += ((dt * dt) * a).transpose();
             }
         }
@@ -847,17 +948,22 @@ namespace poseweaver
         const int max_frames = std::max(1, params.max_frames);
         const int steps_target = (params.duration_seconds <= 0.0) ? 0 : (int)std::ceil(params.duration_seconds / dt);
         const int steps = std::min(steps_target, std::max(0, max_frames - 1));
+        const Eigen::MatrixXd& cloth_reference =
+            (params.reference_positions.rows() == cloth_V0.rows()
+                && params.reference_positions.cols() == 3)
+                ? params.reference_positions
+                : cloth_V0;
 
         if (progress_steps_done)
             progress_steps_done->store(0);
 
         std::vector<StretchEdge> stretch_edges;
         std::vector<BendEdge> bend_edges;
-        build_stretch_edges(cloth_V0, cloth_F, stretch_edges);
-        build_bend_edges(cloth_V0, cloth_F, bend_edges);
+        build_stretch_edges(cloth_reference, cloth_F, stretch_edges);
+        build_bend_edges(cloth_reference, cloth_F, bend_edges);
 
         Eigen::VectorXd mass;
-        if (!compute_lumped_masses(cloth_V0, cloth_F, mass))
+        if (!compute_lumped_masses(cloth_reference, cloth_F, mass))
         {
             if (error)
                 *error = "Failed to compute masses.";
@@ -940,7 +1046,7 @@ namespace poseweaver
         if (params.self_collision_enabled && self_thickness > 0.0)
         {
             const auto t0 = Clock::now();
-            self_bvh.build(cloth_V0, cloth_F);
+            self_bvh.build(cloth_reference, cloth_F);
             ms_bvh_build += to_ms(Clock::now() - t0);
         }
 

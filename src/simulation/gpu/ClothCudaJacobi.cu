@@ -105,6 +105,117 @@ namespace poseweaver
             return length > 1e-12f ? mul(v, 1.0f / length) : make_float3(0.0f, 1.0f, 0.0f);
         }
 
+        __host__ __device__ static float wind_lerp(float a, float b, float t)
+        {
+            return a + (b - a) * t;
+        }
+
+        __host__ __device__ static float wind_fade(float t)
+        {
+            return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+        }
+
+        __host__ __device__ static unsigned int wind_hash_combine(unsigned int h, unsigned int v)
+        {
+            h ^= v + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= h >> 16;
+            h *= 0x7feb352du;
+            h ^= h >> 15;
+            h *= 0x846ca68bu;
+            h ^= h >> 16;
+            return h;
+        }
+
+        __host__ __device__ static float wind_hash_noise(int x, int y, int z, int w, unsigned int seed)
+        {
+            unsigned int h = wind_hash_combine(seed, (unsigned int)x);
+            h = wind_hash_combine(h, (unsigned int)y);
+            h = wind_hash_combine(h, (unsigned int)z);
+            h = wind_hash_combine(h, (unsigned int)w);
+            return ((float)(h & 0x00ffffffu) / 8388607.5f) - 1.0f;
+        }
+
+        __host__ __device__ static float wind_value_noise4(float x, float y, float z, float w, unsigned int seed)
+        {
+            const int ix = (int)floorf(x);
+            const int iy = (int)floorf(y);
+            const int iz = (int)floorf(z);
+            const int iw = (int)floorf(w);
+            const float fx = x - (float)ix;
+            const float fy = y - (float)iy;
+            const float fz = z - (float)iz;
+            const float fw = w - (float)iw;
+            const float sx = wind_fade(fx);
+            const float sy = wind_fade(fy);
+            const float sz = wind_fade(fz);
+            const float sw = wind_fade(fw);
+
+            float zw[2];
+            for (int dw = 0; dw <= 1; ++dw)
+            {
+                float zv[2];
+                for (int dz = 0; dz <= 1; ++dz)
+                {
+                    float yv[2];
+                    for (int dy = 0; dy <= 1; ++dy)
+                    {
+                        const float a = wind_hash_noise(ix, iy + dy, iz + dz, iw + dw, seed);
+                        const float b = wind_hash_noise(ix + 1, iy + dy, iz + dz, iw + dw, seed);
+                        yv[dy] = wind_lerp(a, b, sx);
+                    }
+                    zv[dz] = wind_lerp(yv[0], yv[1], sy);
+                }
+                zw[dw] = wind_lerp(zv[0], zv[1], sz);
+            }
+            return wind_lerp(zw[0], zw[1], sw);
+        }
+
+        __host__ __device__ static float wind_fbm4(float x, float y, float z, float w, unsigned int seed)
+        {
+            float value = 0.0f;
+            float amplitude = 0.5f;
+            float norm = 0.0f;
+            float frequency = 1.0f;
+            for (int octave = 0; octave < 4; ++octave)
+            {
+                value += amplitude * wind_value_noise4(
+                    x * frequency, y * frequency, z * frequency, w * frequency,
+                    seed + (unsigned int)(octave * 1013));
+                norm += amplitude;
+                amplitude *= 0.5f;
+                frequency *= 2.03f;
+            }
+            const float n = norm > 0.0f ? value / norm : 0.0f;
+            return fminf(1.0f, fmaxf(-1.0f, n));
+        }
+
+        __host__ __device__ static float3 random_wind_at(
+            float3 pos, float simulation_time, float max_magnitude, float time_scale, float spatial_scale)
+        {
+            if (!(max_magnitude > 0.0f))
+                return make_float3(0.0f, 0.0f, 0.0f);
+
+            const float s = fmaxf(0.0f, spatial_scale);
+            const float w = simulation_time * fmaxf(0.0f, time_scale);
+            const float x = pos.x * s;
+            const float y = pos.y * s;
+            const float z = pos.z * s;
+            const float3 raw = make_float3(
+                wind_fbm4(x + 17.31f, y - 9.42f, z + 3.77f, w, 0x6a09e667u),
+                wind_fbm4(x - 31.11f, y + 5.13f, z + 23.9f, w + 41.0f, 0xbb67ae85u),
+                wind_fbm4(x + 7.49f, y + 29.3f, z - 13.7f, w - 19.0f, 0x3c6ef372u));
+            const float len = sqrtf(length2(raw));
+            if (!(len > 1e-9f))
+                return make_float3(0.0f, 0.0f, 0.0f);
+
+            const float gust_noise = 0.5f + 0.5f * wind_fbm4(
+                x * 0.63f + 4.1f, y * 0.63f - 8.7f, z * 0.63f + 12.2f, w * 0.71f + 5.0f, 0xa54ff53au);
+            const float g = fminf(1.0f, fmaxf(0.0f, gust_noise));
+            const float gust = powf(g, 2.35f);
+            const float magnitude = max_magnitude * fminf(1.0f, fmaxf(0.0f, 0.08f + 0.92f * gust));
+            return mul(raw, magnitude / len);
+        }
+
         __device__ static void atomic_add3(float4* values, unsigned int i, float3 value)
         {
             atomicAdd(&values[i].x, value.x);
@@ -218,7 +329,7 @@ namespace poseweaver
         __global__ static void predict(
             float4* positions, float4* previous, const float4* velocity, const float4* fixed,
             unsigned int count, float dt, float gravity, float3 wind_direction, float wind_force,
-            float random_space, float random_time, float simulation_time)
+            float random_magnitude, float random_time_scale, float random_spatial_scale, float simulation_time)
         {
             const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
             if (i >= count)
@@ -230,10 +341,10 @@ namespace poseweaver
                 return;
             }
             const float3 p = f3(positions[i]);
-            const float spatial = sinf(dot3(p, make_float3(12.9898f, 78.233f, 37.719f)));
-            const float temporal = sinf(simulation_time * 1.7f);
-            const float scale = fmaxf(0.0f, 1.0f + 0.25f * random_space * spatial + 0.25f * random_time * temporal);
-            const float3 acceleration = add(make_float3(0, gravity, 0), mul(wind_direction, wind_force * scale));
+            const float3 constant_wind = mul(wind_direction, fmaxf(0.0f, wind_force));
+            const float3 random_wind = random_wind_at(
+                p, simulation_time, random_magnitude, random_time_scale, random_spatial_scale);
+            const float3 acceleration = add(add(make_float3(0, gravity, 0), constant_wind), random_wind);
             const float3 next = add(p, add(mul(f3(velocity[i]), dt), mul(acceleration, dt * dt)));
             positions[i] = make_float4(next.x, next.y, next.z, 0);
         }
@@ -660,20 +771,25 @@ namespace poseweaver
         const float sub_dt = (float)(params.dt / substeps);
         const int target_steps = params.duration_seconds <= 0.0 ? 0 : (int)std::ceil(params.duration_seconds / params.dt);
         const int steps = std::min(target_steps, std::max(0, params.max_frames - 1));
+        const Eigen::MatrixXd& cloth_reference =
+            (params.reference_positions.rows() == cloth_V0.rows()
+                && params.reference_positions.cols() == 3)
+                ? params.reference_positions
+                : cloth_V0;
 
         std::vector<Edge> stretch, bend;
-        build_edges(cloth_V0, cloth_F, std::max(0.0, params.base_stretch_mult), stretch, bend);
+        build_edges(cloth_reference, cloth_F, std::max(0.0, params.base_stretch_mult), stretch, bend);
         std::vector<float4> cloth_positions = positions4(cloth_V0);
         std::vector<float4> body_positions = positions4(body_V);
         const std::vector<uint4> cloth_faces = faces4(cloth_F);
         const std::vector<uint4> body_faces = faces4(body_F);
-        const std::vector<float> masses = inverse_masses(cloth_V0, cloth_F, params.fixed_vertex_indices);
+        const std::vector<float> masses = inverse_masses(cloth_reference, cloth_F, params.fixed_vertex_indices);
         std::vector<float4> zeros((size_t)vertex_count, make_float4(0, 0, 0, 0));
         std::vector<unsigned int> zero_weights((size_t)vertex_count, 0);
         std::vector<float4> fixed((size_t)vertex_count, make_float4(0, 0, 0, 0));
         int body_depth = 0, cloth_depth = 0;
         const std::vector<Node> body_nodes = build_bvh(body_V, body_F, body_depth);
-        const std::vector<Node> cloth_nodes = build_bvh(cloth_V0, cloth_F, cloth_depth);
+        const std::vector<Node> cloth_nodes = build_bvh(cloth_reference, cloth_F, cloth_depth);
 
         DeviceBuffer<float4> d_positions, d_previous, d_velocity, d_body_positions;
         DeviceBuffer<float4> d_corrections, d_fixed, d_contacts;
@@ -765,7 +881,9 @@ namespace poseweaver
                 predict<<<blocks(vertex_count), kBlockSize>>>(
                     d_positions.data, d_previous.data, d_velocity.data, d_fixed.data, vertex_count,
                     sub_dt, (float)params.gravity_y, wind, (float)std::max(0.0, params.wind_force),
-                    (float)std::max(0.0, params.wind_random_space), (float)std::max(0.0, params.wind_random_time),
+                    (float)std::max(0.0, params.wind_random_magnitude),
+                    (float)std::max(0.0, params.wind_random_time_scale),
+                    (float)std::max(0.0, params.wind_random_spatial_scale),
                     (float)(step * params.dt + substep * sub_dt));
                 if (!launch_ok("CUDA prediction failed", error))
                     return false;

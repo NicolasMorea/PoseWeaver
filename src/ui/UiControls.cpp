@@ -375,11 +375,13 @@ namespace poseweaver
 
                         auto& p = state.xpbd_params;
 
-                            ImGui::InputFloat("dt", &p.dt, 0.001f, 0.01f, "%.6f");
-                            p.dt = std::max(p.dt, 1e-6f);
-
                             ImGui::InputFloat("Simulation time (s)", &p.duration_seconds, 0.1f, 1.0f, "%.3f");
                             p.duration_seconds = std::max(p.duration_seconds, 0.0f);
+
+                            ImGui::InputInt("Simulation steps", &p.simulation_steps);
+                            p.simulation_steps = std::clamp(p.simulation_steps, 1, 1000000);
+                            p.dt = solver_dt_seconds(p);
+                            ImGui::Text("dt = %.6f s", simulation_dt_seconds(p));
 
                             ImGui::InputInt("Iterations", &p.solver_iterations);
                             p.solver_iterations = std::max(p.solver_iterations, 1);
@@ -454,16 +456,18 @@ namespace poseweaver
 
                             if (ImGui::TreeNodeEx("Wind", ImGuiTreeNodeFlags_DefaultOpen))
                             {
-                                ImGui::InputFloat("Wind force", &p.wind_force, 0.1f, 1.0f, "%.6f");
+                                ImGui::InputFloat("Constant magnitude", &p.wind_force, 0.1f, 1.0f, "%.6f");
                                 p.wind_force = std::max(p.wind_force, 0.0f);
 
-                                ImGui::InputFloat("Wind yaw (deg)", &p.wind_yaw_deg, 1.0f, 5.0f, "%.3f");
-                                ImGui::InputFloat("Wind pitch (deg)", &p.wind_pitch_deg, 1.0f, 5.0f, "%.3f");
+                                ImGui::InputFloat("Constant yaw (deg)", &p.wind_yaw_deg, 1.0f, 5.0f, "%.3f");
+                                ImGui::InputFloat("Constant pitch (deg)", &p.wind_pitch_deg, 1.0f, 5.0f, "%.3f");
 
-                                ImGui::InputFloat("Random space", &p.wind_random_space, 0.05f, 0.25f, "%.6f");
-                                ImGui::InputFloat("Random time", &p.wind_random_time, 0.05f, 0.25f, "%.6f");
-                                p.wind_random_space = std::max(p.wind_random_space, 0.0f);
-                                p.wind_random_time = std::max(p.wind_random_time, 0.0f);
+                                ImGui::InputFloat("Random max magnitude", &p.wind_random_magnitude, 0.1f, 1.0f, "%.6f");
+                                ImGui::InputFloat("Random time scale", &p.wind_random_time_scale, 0.05f, 0.25f, "%.6f");
+                                ImGui::InputFloat("Random spatial scale", &p.wind_random_spatial_scale, 0.05f, 0.25f, "%.6f");
+                                p.wind_random_magnitude = std::max(p.wind_random_magnitude, 0.0f);
+                                p.wind_random_time_scale = std::max(p.wind_random_time_scale, 0.0f);
+                                p.wind_random_spatial_scale = std::max(p.wind_random_spatial_scale, 0.0f);
 
                                 ImGui::TreePop();
                             }
@@ -478,8 +482,6 @@ namespace poseweaver
                         ImGui::InputFloat("Damping", &p.damping, 0.001f, 0.01f, "%.6f");
                         p.damping = std::clamp(p.damping, 0.0f, 0.99f);
 
-                        ImGui::InputInt("Max Frames (cap)", &state.controls.max_frames);
-                        state.controls.max_frames = std::clamp(state.controls.max_frames, 1, 1000000);
                         ImGui::TreePop();
                     }
 
