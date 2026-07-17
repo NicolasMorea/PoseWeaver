@@ -72,11 +72,25 @@ namespace poseweaver::ui_canva
             int min_y,
             int max_x,
             int max_y,
+            const std::filesystem::path& model_input_path,
             std::string* out_error)
         {
-            std::filesystem::path out;
-            if (!next_render_path("filtered_bbox", ".png", &out, out_error))
+            std::filesystem::path out = model_input_path.parent_path()
+                / (model_input_path.stem().string() + "_filtered_bbox.png");
+            if (out.empty())
+            {
+                if (!next_render_path("filtered_bbox", ".png", &out, out_error))
+                    return false;
+            }
+
+            std::error_code ec;
+            std::filesystem::create_directories(out.parent_path(), ec);
+            if (ec)
+            {
+                if (out_error)
+                    *out_error = "Failed to create preprocessing debug directory: " + ec.message();
                 return false;
+            }
 
             std::vector<unsigned char> debug((size_t)width * (size_t)height * 4u, 0u);
             for (int y = 0; y < height; ++y)
@@ -210,6 +224,26 @@ namespace poseweaver::ui_canva
         std::filesystem::path* out_path,
         std::string* out_error)
     {
+        std::filesystem::path out;
+        if (!next_render_path("model_input", ".png", &out, out_error))
+            return false;
+        return save_normalized_model_input_png_to_path(
+            width,
+            height,
+            rgba,
+            out,
+            out_path,
+            out_error);
+    }
+
+    bool save_normalized_model_input_png_to_path(
+        int width,
+        int height,
+        const std::vector<unsigned char>& rgba,
+        const std::filesystem::path& output_path,
+        std::filesystem::path* out_path,
+        std::string* out_error)
+    {
         if (width <= 0 || height <= 0)
         {
             if (out_error)
@@ -275,9 +309,6 @@ namespace poseweaver::ui_canva
                 *out_error = "No sketch pixels survived preprocessing threshold";
             return false;
         }
-
-        if (!save_filtered_bbox_debug_png(width, height, ink, step, min_x, min_y, max_x, max_y, out_error))
-            return false;
 
         const float bbox_w = (float)(max_x - min_x + 1);
         const float bbox_h = (float)(max_y - min_y + 1);
@@ -358,8 +389,24 @@ namespace poseweaver::ui_canva
             out_gray[i] = (unsigned char)std::clamp<int>((int)(value * 255.0f + 0.5f), 0, 255);
         }
 
-        std::filesystem::path out;
-        if (!next_render_path("model_input", ".png", &out, out_error))
+        std::filesystem::path out = output_path;
+        if (out.empty())
+        {
+            if (out_error)
+                *out_error = "Failed to allocate model input path";
+            return false;
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(out.parent_path(), ec);
+        if (ec)
+        {
+            if (out_error)
+                *out_error = "Failed to create model input directory: " + ec.message();
+            return false;
+        }
+
+        if (!save_filtered_bbox_debug_png(width, height, ink, step, min_x, min_y, max_x, max_y, out, out_error))
             return false;
 
         const int ok = stbi_write_png(out.string().c_str(), width, height, 1, out_gray.data(), width);

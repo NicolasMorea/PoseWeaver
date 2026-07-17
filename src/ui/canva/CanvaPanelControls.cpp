@@ -30,6 +30,12 @@ namespace poseweaver::ui_canva
     ImGui::BeginChild("##canva_controls", ImVec2(0.0f, 0.0f), true,
         ImGuiWindowFlags_AlwaysVerticalScrollbar);
     {
+        const auto show_canva_layers = [&]()
+        {
+            canva.sequence_preview_active = false;
+            canva.sequence_preview_frame_id = 0;
+        };
+
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.16f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
         if (ImGui::Button("Reset Everything"))
@@ -103,7 +109,9 @@ namespace poseweaver::ui_canva
             const char* patterns[] = {
                 "*.png", "*.PNG",
                 "*.jpg", "*.JPG",
-                "*.jpeg", "*.JPEG"
+                "*.jpeg", "*.JPEG",
+                "*.gif", "*.GIF",
+                "*.mp4", "*.MP4"
             };
 
             std::error_code ec;
@@ -114,11 +122,11 @@ namespace poseweaver::ui_canva
                 std::filesystem::exists(initial_dir, ec) ? initial_dir.string() : std::string();
 
             const char* path = tinyfd_openFileDialog(
-                "Load image",
+                "Load image or video",
                 initial_dir_string.c_str(),
                 (int)(sizeof(patterns) / sizeof(patterns[0])),
                 patterns,
-                "Image files (*.png, *.jpg, *.jpeg)",
+                "Image/video files (*.png, *.jpg, *.jpeg, *.gif, *.mp4)",
                 0);
 
             // The blocking dialog can desync GLFW's cached cursor mode from
@@ -128,7 +136,20 @@ namespace poseweaver::ui_canva
             if (path && path[0] != '\0')
             {
                 std::string err;
-                if (canva_add_png_layer(canva, path, &err))
+                const std::filesystem::path load_path(path);
+                std::string ext = load_path.extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return (char)std::tolower(c); });
+                if ((ext == ".gif" || ext == ".mp4")
+                    && canva_sequence_import_sketch_file(state, canva, load_path, &err))
+                {
+                    console_add_line(state, std::string("Canva: Loaded sketch video into sequence: ") + path);
+                }
+                else if ((ext == ".gif" || ext == ".mp4"))
+                {
+                    console_add_line(state, std::string("Canva: Video load failed: ") + (err.empty() ? "(unknown error)" : err));
+                }
+                else if (canva_add_png_layer(canva, path, &err))
                 {
                     console_add_line(state, std::string("Canva: Loaded image layer: ") + canva.layers.front().name);
                 }
@@ -1007,6 +1028,7 @@ namespace poseweaver::ui_canva
 
         if (ImGui::Button("Add layer"))
         {
+            show_canva_layers();
             const std::string name = std::string("Layer ") + std::to_string(canva.next_layer_number++);
             canva.layers.insert(canva.layers.begin(),
                 canva_make_layer(canva.width, canva.height, canva.next_layer_id++, name));
@@ -1019,6 +1041,7 @@ namespace poseweaver::ui_canva
             const int idx = canva.active_layer;
             if (idx >= 0 && idx < (int)canva.layers.size())
             {
+                show_canva_layers();
                 const int removed_id = canva.layers[(size_t)idx].id;
                 canva_delete_layer_texture(canva.layers[(size_t)idx]);
                 canva.layers.erase(canva.layers.begin() + idx);
@@ -1032,12 +1055,14 @@ namespace poseweaver::ui_canva
         ImGui::BeginDisabled(canva.layers.size() <= 1);
         if (ImGui::Button("Up") && canva.active_layer > 0)
         {
+            show_canva_layers();
             std::swap(canva.layers[(size_t)canva.active_layer], canva.layers[(size_t)canva.active_layer - 1]);
             canva.active_layer--;
         }
         ImGui::SameLine();
         if (ImGui::Button("Down") && canva.active_layer + 1 < (int)canva.layers.size())
         {
+            show_canva_layers();
             std::swap(canva.layers[(size_t)canva.active_layer], canva.layers[(size_t)canva.active_layer + 1]);
             canva.active_layer++;
         }
@@ -1051,12 +1076,16 @@ namespace poseweaver::ui_canva
             CanvaLayer& layer = canva.layers[(size_t)i];
 
             ImGui::PushID(i);
-            ImGui::Checkbox("##vis", &layer.enabled);
+            if (ImGui::Checkbox("##vis", &layer.enabled))
+                show_canva_layers();
             ImGui::SameLine();
 
             const bool selected = (canva.active_layer == i);
             if (ImGui::Selectable(layer.name.c_str(), selected, ImGuiSelectableFlags_AllowDoubleClick))
+            {
+                show_canva_layers();
                 canva.active_layer = i;
+            }
 
             // Drag-drop reorder (swap-based).
             if (ImGui::BeginDragDropSource())
@@ -1075,6 +1104,7 @@ namespace poseweaver::ui_canva
                         const int to = i;
                         if (from >= 0 && from < (int)canva.layers.size() && to >= 0 && to < (int)canva.layers.size() && from != to)
                         {
+                            show_canva_layers();
                             std::swap(canva.layers[(size_t)from], canva.layers[(size_t)to]);
                             if (canva.active_layer == from)
                                 canva.active_layer = to;

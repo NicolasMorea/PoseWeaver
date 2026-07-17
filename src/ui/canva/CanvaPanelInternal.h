@@ -46,7 +46,8 @@ namespace poseweaver::ui_canva
         ClothFittingAlignedPredictedDepthOcclusionDebug,
         ClothFittingIsoOcclusionDebug,
         ClothFittingSceneDebug,
-        ClothFittingDeformation
+        ClothFittingDeformation,
+        ClothFittingCloseToBodyDebug
     };
 
     struct CanvaLayer
@@ -89,6 +90,49 @@ namespace poseweaver::ui_canva
         int exit_code = -1;
         std::filesystem::path output_json_path;
         std::string error;
+    };
+
+    enum class CanvaFrameInferenceStatus
+    {
+        NotStarted,
+        Busy,
+        Done,
+        Failed
+    };
+
+    enum class CanvaClothFrameStatus
+    {
+        NotStarted,
+        Simulating,
+        Fitting,
+        Ready,
+        Failed
+    };
+
+    struct CanvaSequenceTrackFrame
+    {
+        int id = 0;
+        CanvaLayer layer;
+        CanvaFrameInferenceStatus inference_status = CanvaFrameInferenceStatus::NotStarted;
+        CanvaClothFrameStatus cloth_status = CanvaClothFrameStatus::NotStarted;
+        int sim_frame_index = -1;
+        std::filesystem::path model_input_path;
+        std::filesystem::path rig_json_path;
+        std::filesystem::path betas_json_path;
+        std::filesystem::path pose_npz_path;
+        std::filesystem::path pose_json_path;
+        std::filesystem::path iso_path;
+        std::filesystem::path depth_path;
+        std::filesystem::path frame_dir;
+        std::filesystem::path cloth_frame_dir;
+        std::string gender;
+        int sketch_frame_index = -1;
+        int cloth_frame_index = -1;
+        std::vector<int> cloth_frame_indices;
+        std::uint64_t rig_request_id = 0;
+        std::uint64_t betas_request_id = 0;
+        std::uint64_t iso_request_id = 0;
+        std::uint64_t depth_request_id = 0;
     };
 
     static constexpr int kGenerateClothStepCount = 8;
@@ -237,6 +281,7 @@ namespace poseweaver::ui_canva
         std::filesystem::path cloth_fitting_model_input_path;
         std::filesystem::path cloth_fitting_iso_path;
         std::filesystem::path cloth_fitting_depth_path;
+        std::filesystem::path cloth_fitting_rig_json_path;
         int cloth_fitting_source_layer_id = 0;
         std::string cloth_fitting_status = "Idle";
 
@@ -266,6 +311,53 @@ namespace poseweaver::ui_canva
 
         std::vector<CanvaLayer> layers;
         std::vector<CanvaUndo> undo;
+
+        int sequence_frame_rate = 12;
+        int sequence_sub_frames = 1;
+        int sequence_generate_amount = 1;
+        float sequence_time_seconds = 0.0f;
+        int sequence_selected_frame = -1;
+        bool sequence_playing = false;
+        bool sequence_generating = false;
+        bool sequence_waiting_simulation = false;
+        bool sequence_waiting_render = false;
+        bool sequence_waiting_sketch_inference = false;
+        bool sequence_waiting_pose_reload = false;
+        bool sequence_pose_transition_pending = false;
+        bool sequence_processing_pose_transition = false;
+        int sequence_remaining_to_generate = 0;
+        int sequence_pending_render_index = 0;
+        int sequence_fitting_render_index = -1;
+        int sequence_pending_sketch_index = -1;
+        int sequence_active_sketch_index = -1;
+        int sequence_sim_frame_base_index = 0;
+        int sequence_sim_batch_amount = 0;
+        bool sequence_batch_initial_smooth = false;
+        bool sequence_has_imported_video = false;
+        int sequence_video_first_sketch_index = 0;
+        int sequence_live_sketch_layer_id = 0;
+        int sequence_last_synced_sim_frame = -1;
+        std::uint64_t sequence_render_request_id = 0;
+        std::string sequence_status = "Idle";
+        std::string sequence_export_status = "Idle";
+        std::string sequence_locked_gender;
+        std::filesystem::path sequence_pose_transition_from_pose_path;
+        std::filesystem::path sequence_model_input_path;
+        std::filesystem::path sequence_iso_path;
+        std::filesystem::path sequence_depth_path;
+        std::filesystem::path sequence_current_frame_dir;
+        std::filesystem::path sequence_current_cloth_frame_dir;
+        int sequence_next_frame_id = 1;
+        std::vector<int> sequence_pending_render_frame_indices;
+        std::vector<int> sequence_pending_render_sketch_indices;
+        std::vector<int> sequence_pending_render_cloth_frame_indices;
+        std::vector<int> sequence_pending_sketch_indices;
+        int sequence_pending_inference_cursor = 0;
+        std::vector<CanvaSequenceTrackFrame> sequence_cloth_frames;
+        std::vector<CanvaSequenceTrackFrame> sequence_sketch_frames;
+        bool sequence_preview_active = false;
+        int sequence_preview_frame_id = 0;
+        std::vector<CanvaLayer> sequence_preview_layers;
     };
 
     struct Sketch2RigJoint2d
@@ -400,6 +492,7 @@ namespace poseweaver::ui_canva
         std::filesystem::path* out_pose_path,
         std::string* out_error);
     void canva_delete_layer_texture(CanvaLayer& layer);
+    void canva_delete_sequence_preview_textures(CanvaState& canva);
     void canva_draw_segment(CanvaLayer& layer, int w, int h, ImVec2 a, ImVec2 b, float radius, const ImVec4& col);
     int canva_find_layer_index_by_id(const std::vector<CanvaLayer>& layers, int layer_id);
     int canva_find_layer_index_by_id(const CanvaState& canva, int layer_id);
@@ -446,12 +539,23 @@ namespace poseweaver::ui_canva
         CanvaState& canva,
         const CanvaLayer& source_layer,
         std::string* out_error);
+    bool canva_queue_cloth_fitting_cached_predictions(
+        AppState& state,
+        CanvaState& canva,
+        Renderer& renderer,
+        const CanvaLayer& source_layer,
+        const std::filesystem::path& iso_path,
+        const std::filesystem::path& depth_path,
+        const std::filesystem::path& model_input_path,
+        const std::filesystem::path& rig_json_path,
+        std::string* out_error);
     bool canva_queue_extract_pose(
         AppState& state,
         CanvaState& canva,
         bool generate_cloth_after,
         bool hide_rig_layer,
-        std::string* out_error);
+        std::string* out_error,
+        const std::filesystem::path& output_dir = {});
     bool canva_queue_generate_cloth_current_pose(
         AppState& state,
         CanvaState& canva,
@@ -478,6 +582,26 @@ namespace poseweaver::ui_canva
         const CanvaState& canva,
         std::filesystem::path* out_path,
         std::string* out_error);
+    bool canva_save_model_input_png_to_dir(
+        const CanvaState& canva,
+        const std::filesystem::path& output_dir,
+        const std::string& stem,
+        std::filesystem::path* out_path,
+        std::string* out_error);
+    bool canva_composite_visible_layers_rgba(
+        const CanvaState& canva,
+        std::vector<unsigned char>* out_rgba,
+        std::string* out_error,
+        bool sketch_layers_only = false);
+    std::filesystem::path canva_render_frame_dir(int frame_index);
+    std::filesystem::path canva_render_cloth_frame_dir(int frame_index, int cloth_frame_index);
+    int canva_count_cloth_frames_for_sketch(const CanvaState& canva, int sketch_frame_index);
+    void canva_prepare_cloth_output_dirs(
+        AppState& state,
+        CanvaState& canva,
+        int sketch_frame_index,
+        int cloth_frame_index);
+    void canva_delete_render_frame_dirs();
     bool canva_save_visible_layers_png(const CanvaState& canva, std::filesystem::path* out_path, std::string* out_error);
     void canva_stamp_circle(CanvaLayer& layer, int w, int h, float cx, float cy, float radius, const ImVec4& col);
     bool canva_start_rig_optimization(
@@ -488,6 +612,22 @@ namespace poseweaver::ui_canva
         std::string* out_error);
     bool canva_try_finish_extract_pose(AppState& state, CanvaState& canva);
     void canva_upload_layer(CanvaLayer& layer, int w, int h);
+    CanvaState& canva_state();
+    void canva_ensure_initialized(AppState& state, CanvaState& canva);
+    void canva_sequence_capture_current_frame(AppState& state, CanvaState& canva);
+    bool canva_sequence_import_sketch_file(
+        AppState& state,
+        CanvaState& canva,
+        const std::filesystem::path& file_path,
+        std::string* out_error);
+    void canva_sequence_update_pipeline(AppState& state, CanvaState& canva, Renderer& renderer);
+    void canva_sequence_sync_from_simulation(AppState& state, CanvaState& canva);
+    void canva_sequence_select_time(
+        AppState& state,
+        CanvaState& canva,
+        float time_seconds,
+        bool sync_simulation = true);
+    void canva_sequence_select_frame(AppState& state, CanvaState& canva, int frame_index);
     void draw_generate_cloth_steps_in_view(
         const AppState& state,
         const CanvaState& canva,

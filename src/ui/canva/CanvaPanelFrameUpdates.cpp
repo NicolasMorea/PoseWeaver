@@ -106,6 +106,12 @@ namespace poseweaver::ui_canva
     if (state.sketch2depth.completed_request_id > canva.last_sketch2depth_import_request_id)
     {
         canva.last_sketch2depth_import_request_id = state.sketch2depth.completed_request_id;
+        const bool is_sequence_depth =
+            canva.sequence_waiting_sketch_inference
+            && canva.sequence_pending_sketch_index >= 0
+            && canva.sequence_pending_sketch_index < (int)canva.sequence_sketch_frames.size()
+            && state.sketch2depth.completed_request_id
+                == canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].depth_request_id;
         const bool is_cloth_fitting_depth =
             canva.cloth_fitting_active
             && canva.cloth_fitting_waiting_depth
@@ -113,7 +119,10 @@ namespace poseweaver::ui_canva
         if (state.sketch2depth.status == ModelInferenceStatus::Ready
             && !state.sketch2depth.last_output_path.empty())
         {
-            if (is_cloth_fitting_depth)
+            if (is_sequence_depth)
+            {
+            }
+            else if (is_cloth_fitting_depth)
             {
                 if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)
                     canva_generate_cloth_append_timed_detail(
@@ -146,7 +155,7 @@ namespace poseweaver::ui_canva
                 }
             }
         }
-        else if (is_cloth_fitting_depth)
+        else if (!is_sequence_depth && is_cloth_fitting_depth)
         {
             canva.cloth_fitting_active = false;
             canva.cloth_fitting_waiting_depth = false;
@@ -167,7 +176,14 @@ namespace poseweaver::ui_canva
     if (state.sketch2rig.completed_request_id > canva.last_sketch2rig_import_request_id)
     {
         canva.last_sketch2rig_import_request_id = state.sketch2rig.completed_request_id;
+        const bool is_sequence_rig =
+            canva.sequence_waiting_sketch_inference
+            && canva.sequence_pending_sketch_index >= 0
+            && canva.sequence_pending_sketch_index < (int)canva.sequence_sketch_frames.size()
+            && state.sketch2rig.completed_request_id
+                == canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].rig_request_id;
         if (canva.extract_pose_active
+            && !is_sequence_rig
             && state.sketch2rig.completed_request_id == canva.extract_pose_rig_request_id)
         {
             if (canva.generate_cloth_timing_started)
@@ -192,7 +208,8 @@ namespace poseweaver::ui_canva
                 canva_generate_cloth_finish_pipeline(canva);
             }
         }
-        if (state.sketch2rig.status == ModelInferenceStatus::Ready && !state.sketch2rig.last_output_path.empty())
+        if (!is_sequence_rig
+            && state.sketch2rig.status == ModelInferenceStatus::Ready && !state.sketch2rig.last_output_path.empty())
         {
             std::string err;
             const bool hide_rig_layer =
@@ -222,7 +239,14 @@ namespace poseweaver::ui_canva
     if (state.sketch2betas.completed_request_id > canva.last_sketch2betas_import_request_id)
     {
         canva.last_sketch2betas_import_request_id = state.sketch2betas.completed_request_id;
+        const bool is_sequence_betas =
+            canva.sequence_waiting_sketch_inference
+            && canva.sequence_pending_sketch_index >= 0
+            && canva.sequence_pending_sketch_index < (int)canva.sequence_sketch_frames.size()
+            && state.sketch2betas.completed_request_id
+                == canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].betas_request_id;
         if (canva.extract_pose_active
+            && !is_sequence_betas
             && state.sketch2betas.completed_request_id == canva.extract_pose_betas_request_id)
         {
             if (canva.generate_cloth_timing_started)
@@ -247,7 +271,8 @@ namespace poseweaver::ui_canva
                 canva_generate_cloth_finish_pipeline(canva);
             }
         }
-        if (state.sketch2betas.status == ModelInferenceStatus::Ready && !state.sketch2betas.last_output_path.empty())
+        if (!is_sequence_betas
+            && state.sketch2betas.status == ModelInferenceStatus::Ready && !state.sketch2betas.last_output_path.empty())
         {
             std::string err;
             if (canva_apply_sketch2betas_result(state, state.sketch2betas.last_output_path, &err))
@@ -279,17 +304,19 @@ namespace poseweaver::ui_canva
         if (state.sketch2uv.status == ModelInferenceStatus::Ready && !state.sketch2uv.last_output_path.empty())
         {
             std::string err;
-            const bool added_uv = canva_add_sketch2uv_layer(
-                canva,
-                state.sketch2uv.last_output_path,
-                state.sketch2uv.last_sketch_path,
-                !is_internal_uv,
-                is_internal_uv ? "Sketch2UV (hidden)" : "Sketch2UV",
-                &err);
+            const bool added_uv = is_internal_uv
+                ? true
+                : canva_add_sketch2uv_layer(
+                    canva,
+                    state.sketch2uv.last_output_path,
+                    state.sketch2uv.last_sketch_path,
+                    true,
+                    "Sketch2UV",
+                    &err);
             if (added_uv)
             {
                 console_add_line(state, std::string(is_internal_uv
-                        ? "Canva: Added hidden Sketch2UV layer from "
+                        ? "Canva: Kept internal Sketch2UV prediction file at "
                         : "Canva: Added Sketch2UV layer from ")
                     + state.sketch2uv.last_output_path);
 
@@ -364,6 +391,12 @@ namespace poseweaver::ui_canva
     if (state.sketch2iso.completed_request_id > canva.last_sketch2iso_import_request_id)
     {
         canva.last_sketch2iso_import_request_id = state.sketch2iso.completed_request_id;
+        const bool is_sequence_iso =
+            canva.sequence_waiting_sketch_inference
+            && canva.sequence_pending_sketch_index >= 0
+            && canva.sequence_pending_sketch_index < (int)canva.sequence_sketch_frames.size()
+            && state.sketch2iso.completed_request_id
+                == canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].iso_request_id;
         const bool is_iso_displacement =
             canva.generate_iso_displacement_active
             && canva.generate_iso_displacement_waiting_iso
@@ -378,19 +411,27 @@ namespace poseweaver::ui_canva
         if (state.sketch2iso.status == ModelInferenceStatus::Ready
             && !state.sketch2iso.last_output_path.empty())
         {
+            if (is_sequence_iso)
+            {
+            }
+            else
+            {
             std::string err;
-            if (canva_add_iso_debug_layer(
+            const bool added_iso = is_internal_iso
+                ? true
+                : canva_add_iso_debug_layer(
                     canva,
                     state.sketch2iso.last_output_path,
                     state.sketch2iso.last_sketch_path,
-                    is_internal_iso ? "Sketch2ISO (hidden)" : "Sketch2ISO Debug",
-                    !is_internal_iso,
-                    &err))
+                    "Sketch2ISO Debug",
+                    true,
+                    &err);
+            if (added_iso)
             {
                 console_add_line(
                     state,
                     std::string(is_internal_iso
-                            ? "Canva: Added hidden Sketch2ISO layer from "
+                            ? "Canva: Kept internal Sketch2ISO prediction file at "
                             : "Canva: Added Sketch2ISO debug layer from ")
                         + state.sketch2iso.last_output_path);
                 if (is_iso_displacement)
@@ -452,8 +493,9 @@ namespace poseweaver::ui_canva
                     }
                 }
             }
+            }
         }
-        else if (is_iso_displacement || is_cloth_fitting_iso)
+        else if (!is_sequence_iso && (is_iso_displacement || is_cloth_fitting_iso))
         {
             if (is_iso_displacement)
             {
@@ -816,6 +858,15 @@ namespace poseweaver::ui_canva
             state.cloth_render_fine = false;
             state.cloth_render_use_current_camera = false;
             state.cloth_render_stroke_reference_path = canva.generate_cloth_model_input_path.string();
+            state.cloth_render_camera_rig_path.clear();
+            const int sketch_dir_index = (canva.sequence_generating && canva.sequence_active_sketch_index >= 0)
+                ? canva.sequence_active_sketch_index
+                : 0;
+            canva_prepare_cloth_output_dirs(
+                state,
+                canva,
+                sketch_dir_index,
+                canva_count_cloth_frames_for_sketch(canva, sketch_dir_index));
             canva.generate_cloth_render_request_id = ++state.cloth_render_request_id;
             canva.generate_cloth_waiting_render = true;
             canva.generate_cloth_status = "Rendering";
@@ -824,6 +875,9 @@ namespace poseweaver::ui_canva
             console_add_line(state, "Canva: Generate Cloth queued transparent cloth render");
         }
     }
+
+    canva_sequence_update_pipeline(state, canva, renderer);
+    canva_sequence_sync_from_simulation(state, canva);
 
     // Global shortcuts for this tab (works even when hovering the controls).
     {

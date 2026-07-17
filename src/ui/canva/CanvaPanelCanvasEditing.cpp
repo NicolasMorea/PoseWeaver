@@ -86,6 +86,15 @@ namespace poseweaver::ui_canva
         }
     }
 
+    void canva_delete_sequence_preview_textures(CanvaState& canva)
+    {
+        for (CanvaLayer& layer : canva.sequence_preview_layers)
+            canva_delete_layer_texture(layer);
+        canva.sequence_preview_layers.clear();
+        canva.sequence_preview_active = false;
+        canva.sequence_preview_frame_id = 0;
+    }
+
      int canva_find_layer_index_by_id(const std::vector<CanvaLayer>& layers, int layer_id)
     {
         for (int i = 0; i < (int)layers.size(); ++i)
@@ -261,6 +270,12 @@ namespace poseweaver::ui_canva
     {
         for (CanvaLayer& layer : canva.layers)
             canva_delete_layer_texture(layer);
+        canva_delete_sequence_preview_textures(canva);
+        for (CanvaSequenceTrackFrame& frame : canva.sequence_cloth_frames)
+            canva_delete_layer_texture(frame.layer);
+        for (CanvaSequenceTrackFrame& frame : canva.sequence_sketch_frames)
+            canva_delete_layer_texture(frame.layer);
+        canva_delete_render_frame_dirs();
 
         std::future<RigOptimizationJobResult> optimizer_future =
             std::move(canva.rig_optimization_future);
@@ -303,6 +318,9 @@ namespace poseweaver::ui_canva
         fresh.last_displacement_completed_id = state.canva_displacement_request_id;
         fresh.last_iso_displacement_completed_id = state.canva_iso_displacement_request_id;
         fresh.last_cloth_render_completed_id = state.cloth_render_request_id;
+        fresh.sequence_frame_rate = canva.sequence_frame_rate;
+        fresh.sequence_sub_frames = canva.sequence_sub_frames;
+        fresh.sequence_generate_amount = canva.sequence_generate_amount;
         fresh.rig_optimization_future = std::move(optimizer_future);
         fresh.rig_optimization_job_running = optimizer_pending;
         fresh.rig_optimization_discard_result = optimizer_pending;
@@ -331,6 +349,9 @@ namespace poseweaver::ui_canva
         state.smpl_shape.betas.fill(0.0f);
 
         state.scene_view_target_valid = false;
+        state.scene_view_sequence_rig_overlay_active = false;
+        state.scene_view_sequence_rig_overlay_visible = false;
+        state.scene_view_sequence_rig_overlay_path.clear();
         state.scene_view_raw_rig_root_valid = false;
         state.scene_view_raw_rig_height_valid = false;
         state.scene_view_smpl_fit_valid = false;
@@ -345,6 +366,8 @@ namespace poseweaver::ui_canva
 
         state.cloth_render_path.clear();
         state.cloth_render_stroke_reference_path.clear();
+        state.cloth_render_output_dir.clear();
+        state.cloth_render_camera_rig_path.clear();
         state.cloth_render_fine = false;
         state.cloth_render_use_current_camera = false;
         state.cloth_render_source_vertex_count = 0;
@@ -359,6 +382,7 @@ namespace poseweaver::ui_canva
         state.canva_iso_displacement_npz_path.clear();
         state.canva_iso_displacement_model_input_path.clear();
         state.canva_iso_displacement_path.clear();
+        state.cloth_fitting_output_dir.clear();
 
         state.uv_view_zoom = 1.0f;
         state.uv_view_pan_x = 0.0f;

@@ -8,27 +8,37 @@
 
 namespace poseweaver::ui_canva
 {
-    void draw_canva_tab(AppState& state, Renderer& renderer)
+    CanvaState& canva_state()
     {
         static CanvaState canva;
+        return canva;
+    }
 
-        if (canva.layers.empty())
-        {
-            canva.brush_radius = state.canva_brush_radius;
-            canva.brush_color = ImVec4(
-                state.canva_brush_color[0],
-                state.canva_brush_color[1],
-                state.canva_brush_color[2],
-                state.canva_brush_color[3]);
+    void canva_ensure_initialized(AppState& state, CanvaState& canva)
+    {
+        if (!canva.layers.empty())
+            return;
 
-            canva.next_layer_id = 1;
-            canva.layers.emplace_back(canva_make_layer(canva.width, canva.height, canva.next_layer_id++, "Layer 1"));
-            canva.active_layer = 0;
-            canva.zoom = 1.0f;
-            canva.pan = ImVec2(0.0f, 0.0f);
-            canva.tool = CanvaTool::Brush;
-            canva.last_undo_request_id = state.canva_undo_request_id;
-        }
+        canva.brush_radius = state.canva_brush_radius;
+        canva.brush_color = ImVec4(
+            state.canva_brush_color[0],
+            state.canva_brush_color[1],
+            state.canva_brush_color[2],
+            state.canva_brush_color[3]);
+
+        canva.next_layer_id = 1;
+        canva.layers.emplace_back(canva_make_layer(canva.width, canva.height, canva.next_layer_id++, "Layer 1"));
+        canva.active_layer = 0;
+        canva.zoom = 1.0f;
+        canva.pan = ImVec2(0.0f, 0.0f);
+        canva.tool = CanvaTool::Brush;
+        canva.last_undo_request_id = state.canva_undo_request_id;
+    }
+
+    void draw_canva_tab(AppState& state, Renderer& renderer)
+    {
+        CanvaState& canva = canva_state();
+        canva_ensure_initialized(state, canva);
         canva.active_layer = std::clamp(canva.active_layer, 0, std::max(0, (int)canva.layers.size() - 1));
 
         update_canva_frame(state, canva, renderer);

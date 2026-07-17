@@ -77,6 +77,8 @@ namespace poseweaver::ui_canva
         std::vector<unsigned char> iso_occlusion_pixels,
         std::vector<unsigned char> scene_debug_pixels,
         std::vector<unsigned char> deformation_pixels,
+        std::vector<unsigned char> close_to_body_pixels,
+        bool include_hidden_output_layers,
         std::string* out_error)
     {
         if ((int)pixels.size() < canva.width * canva.height * 4)
@@ -139,23 +141,17 @@ namespace poseweaver::ui_canva
                 *out_error = "deformation map pixel buffer is too small";
             return false;
         }
+        if ((int)close_to_body_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "close-to-body pixel buffer is too small";
+            return false;
+        }
         const ImVec2 source_offset = source_layer.offset;
         const float source_scale = source_layer.scale;
-
-        CanvaLayer layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "Modified cloth (no warp)");
-        layer.kind = CanvaLayerKind::ClothFitting;
-        layer.pixels = std::move(pixels);
-        layer.offset = source_offset;
-        layer.scale = source_scale;
-        layer.enabled = false;
-        layer.dirty = true;
-        layer.bounds_dirty = true;
-
-        canva.layers.insert(canva.layers.begin(), std::move(layer));
+        const int source_layer_id = source_layer.id;
+        const bool remove_hidden_source_layer =
+            !source_layer.enabled && canva_layer_is_generated_cloth(source_layer);
 
         CanvaLayer warped_layer = canva_make_layer(
             canva.width,
@@ -173,124 +169,51 @@ namespace poseweaver::ui_canva
 
         canva.layers.insert(canva.layers.begin(), std::move(warped_layer));
 
-        CanvaLayer debug_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth fitting debug (ISO mapping colors)");
-        debug_layer.kind = CanvaLayerKind::ClothFittingDebug;
-        debug_layer.pixels = std::move(debug_pixels);
-        debug_layer.offset = source_offset;
-        debug_layer.scale = source_scale;
-        debug_layer.enabled = false;
-        debug_layer.dirty = true;
-        debug_layer.bounds_dirty = true;
+        if (include_hidden_output_layers)
+        {
+            auto add_hidden_layer = [&](std::vector<unsigned char> layer_pixels, const char* name, CanvaLayerKind kind)
+            {
+                CanvaLayer layer = canva_make_layer(
+                    canva.width,
+                    canva.height,
+                    canva.next_layer_id++,
+                    name);
+                layer.kind = kind;
+                layer.pixels = std::move(layer_pixels);
+                layer.offset = source_offset;
+                layer.scale = source_scale;
+                layer.enabled = false;
+                layer.dirty = true;
+                layer.bounds_dirty = true;
+                const auto insert_pos = canva.layers.begin() + std::min<int>(1, (int)canva.layers.size());
+                canva.layers.insert(insert_pos, std::move(layer));
+            };
 
-        canva.layers.insert(canva.layers.begin(), std::move(debug_layer));
+            add_hidden_layer(std::move(pixels), "Modified cloth", CanvaLayerKind::ClothFitting);
+            add_hidden_layer(std::move(debug_pixels), "Cloth fitting debug", CanvaLayerKind::ClothFittingDebug);
+            add_hidden_layer(std::move(warped_debug_pixels), "Cloth fitting debug (warped)", CanvaLayerKind::ClothFittingWarpedDebug);
+            add_hidden_layer(std::move(occlusion_pixels), "Cloth fitting occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
+            add_hidden_layer(std::move(scene_occlusion_pixels), "Cloth fitting true-depth visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
+            add_hidden_layer(std::move(aligned_predicted_depth_occlusion_pixels), "Cloth fitting predicted-depth visibility", CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug);
+            add_hidden_layer(std::move(iso_occlusion_pixels), "Cloth fitting ISO visibility", CanvaLayerKind::ClothFittingIsoOcclusionDebug);
+            add_hidden_layer(std::move(scene_debug_pixels), "Cloth fitting 3D scene debug", CanvaLayerKind::ClothFittingSceneDebug);
+            add_hidden_layer(std::move(deformation_pixels), "Cloth fitting deformation", CanvaLayerKind::ClothFittingDeformation);
+            add_hidden_layer(std::move(close_to_body_pixels), "Cloth fitting close to body", CanvaLayerKind::ClothFittingCloseToBodyDebug);
+        }
 
-        CanvaLayer warped_debug_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth Fitting Debug (warped)");
-        warped_debug_layer.kind = CanvaLayerKind::ClothFittingWarpedDebug;
-        warped_debug_layer.pixels = std::move(warped_debug_pixels);
-        warped_debug_layer.offset = source_offset;
-        warped_debug_layer.scale = source_scale;
-        warped_debug_layer.enabled = false;
-        warped_debug_layer.dirty = true;
-        warped_debug_layer.bounds_dirty = true;
-
-        canva.layers.insert(canva.layers.begin(), std::move(warped_debug_layer));
-
-        CanvaLayer occlusion_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth occlusion (final colors)");
-        occlusion_layer.kind = CanvaLayerKind::ClothFittingOcclusionDebug;
-        occlusion_layer.pixels = std::move(occlusion_pixels);
-        occlusion_layer.offset = source_offset;
-        occlusion_layer.scale = source_scale;
-        occlusion_layer.enabled = false;
-        occlusion_layer.dirty = true;
-        occlusion_layer.bounds_dirty = true;
-
-        canva.layers.insert(canva.layers.begin(), std::move(occlusion_layer));
-
-        CanvaLayer scene_occlusion_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth occlusion (true 3D depth)");
-        scene_occlusion_layer.kind = CanvaLayerKind::ClothFittingSceneOcclusionDebug;
-        scene_occlusion_layer.pixels = std::move(scene_occlusion_pixels);
-        scene_occlusion_layer.offset = source_offset;
-        scene_occlusion_layer.scale = source_scale;
-        scene_occlusion_layer.enabled = false;
-        scene_occlusion_layer.dirty = true;
-        scene_occlusion_layer.bounds_dirty = true;
-
-        canva.layers.insert(canva.layers.begin(), std::move(scene_occlusion_layer));
-
-        CanvaLayer aligned_predicted_depth_occlusion_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth occlusion (aligned predicted depth)");
-        aligned_predicted_depth_occlusion_layer.kind =
-            CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug;
-        aligned_predicted_depth_occlusion_layer.pixels =
-            std::move(aligned_predicted_depth_occlusion_pixels);
-        aligned_predicted_depth_occlusion_layer.offset = source_offset;
-        aligned_predicted_depth_occlusion_layer.scale = source_scale;
-        aligned_predicted_depth_occlusion_layer.enabled = false;
-        aligned_predicted_depth_occlusion_layer.dirty = true;
-        aligned_predicted_depth_occlusion_layer.bounds_dirty = true;
-        canva.layers.insert(canva.layers.begin(), std::move(aligned_predicted_depth_occlusion_layer));
-
-        CanvaLayer iso_occlusion_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth occlusion (ISO mapping only)");
-        iso_occlusion_layer.kind = CanvaLayerKind::ClothFittingIsoOcclusionDebug;
-        iso_occlusion_layer.pixels = std::move(iso_occlusion_pixels);
-        iso_occlusion_layer.offset = source_offset;
-        iso_occlusion_layer.scale = source_scale;
-        iso_occlusion_layer.enabled = false;
-        iso_occlusion_layer.dirty = true;
-        iso_occlusion_layer.bounds_dirty = true;
-        canva.layers.insert(canva.layers.begin(), std::move(iso_occlusion_layer));
-
-        CanvaLayer scene_debug_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "cloth Fitting 3D Scene Debug");
-        scene_debug_layer.kind = CanvaLayerKind::ClothFittingSceneDebug;
-        scene_debug_layer.pixels = std::move(scene_debug_pixels);
-        scene_debug_layer.offset = source_offset;
-        scene_debug_layer.scale = source_scale;
-        scene_debug_layer.enabled = false;
-        scene_debug_layer.dirty = true;
-        scene_debug_layer.bounds_dirty = true;
-
-        canva.layers.insert(canva.layers.begin(), std::move(scene_debug_layer));
-
-        CanvaLayer deformation_layer = canva_make_layer(
-            canva.width,
-            canva.height,
-            canva.next_layer_id++,
-            "deformation map");
-        deformation_layer.kind = CanvaLayerKind::ClothFittingDeformation;
-        deformation_layer.pixels = std::move(deformation_pixels);
-        deformation_layer.offset = source_offset;
-        deformation_layer.scale = source_scale;
-        deformation_layer.enabled = false;
-        deformation_layer.dirty = true;
-        deformation_layer.bounds_dirty = true;
-        canva.layers.insert(canva.layers.begin(), std::move(deformation_layer));
+        if (remove_hidden_source_layer)
+        {
+            for (int i = (int)canva.layers.size() - 1; i >= 0; --i)
+            {
+                CanvaLayer& layer = canva.layers[(size_t)i];
+                if (layer.id != source_layer_id)
+                    continue;
+                canva_delete_layer_texture(layer);
+                canva_prune_undo_for_layer(canva.undo, source_layer_id);
+                canva.layers.erase(canva.layers.begin() + i);
+                break;
+            }
+        }
 
         canva.active_layer = canva_find_layer_index_by_id(canva, warped_layer_id);
         if (canva.active_layer < 0)
@@ -306,6 +229,7 @@ namespace poseweaver::ui_canva
         const std::filesystem::path& iso_npz_path,
         const std::filesystem::path& depth_prediction_path,
         const std::filesystem::path& model_input_path,
+        const std::filesystem::path& rig_json_path,
         int source_layer_index,
         std::string* out_error)
     {
@@ -378,6 +302,7 @@ namespace poseweaver::ui_canva
                 canva.height,
                 iso_npz_path.string(),
                 depth_prediction_path.string(),
+                rig_json_path.string(),
                 prediction_from_cloth_scale,
                 prediction_from_cloth_offset_x,
                 prediction_from_cloth_offset_y,
@@ -409,6 +334,9 @@ namespace poseweaver::ui_canva
 
         std::string add_err;
         const auto layer_start = std::chrono::steady_clock::now();
+        const bool include_hidden_output_layers =
+            !canva.sequence_generating
+            && !canva.sequence_waiting_render;
         if (!canva_add_cloth_fitting_layers(
                 canva,
                 source,
@@ -422,6 +350,8 @@ namespace poseweaver::ui_canva
                 std::move(iso_occlusion),
                 std::move(scene_debug),
                 std::move(deformation),
+                std::move(close_to_body),
+                include_hidden_output_layers,
                 &add_err))
         {
             if (out_error)
@@ -443,7 +373,7 @@ namespace poseweaver::ui_canva
         }
 
         console_add_line(state,
-            "Canva: cloth Fitting added no-warp and warped cloth/debug layers (removed="
+            "Canva: cloth Fitting added warped cloth layer (saved debug files, removed="
                 + std::to_string(removed_count)
                 + ", tested=" + std::to_string(tested_count) + ")");
         return true;
@@ -474,11 +404,14 @@ namespace poseweaver::ui_canva
                 canva.cloth_fitting_iso_path,
                 canva.cloth_fitting_depth_path,
                 canva.cloth_fitting_model_input_path,
+                canva.cloth_fitting_rig_json_path,
                 source_idx,
                 &fit_err))
         {
             canva.cloth_fitting_active = false;
             canva.cloth_fitting_status = "Done";
+            if (canva.sequence_waiting_render || canva.sequence_generating || canva.sequence_cloth_frames.empty())
+                canva_sequence_capture_current_frame(state, canva);
             if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)
             {
                 canva.generate_cloth_active = false;
@@ -503,6 +436,67 @@ namespace poseweaver::ui_canva
             console_add_line(state, std::string("Canva: cloth Fitting failed: ")
                 + (fit_err.empty() ? "(unknown error)" : fit_err));
         }
+    }
+
+    bool canva_queue_cloth_fitting_cached_predictions(
+        AppState& state,
+        CanvaState& canva,
+        Renderer& renderer,
+        const CanvaLayer& source_layer,
+        const std::filesystem::path& iso_path,
+        const std::filesystem::path& depth_path,
+        const std::filesystem::path& model_input_path,
+        const std::filesystem::path& rig_json_path,
+        std::string* out_error)
+    {
+        if (canva.cloth_fitting_active)
+        {
+            if (out_error)
+                *out_error = "cloth fitting is already active";
+            return false;
+        }
+        if (iso_path.empty())
+        {
+            if (out_error)
+                *out_error = "missing cached ISO prediction";
+            return false;
+        }
+        if (depth_path.empty())
+        {
+            if (out_error)
+                *out_error = "missing cached depth prediction";
+            return false;
+        }
+        if (state.cloth_fitting_output_dir.empty())
+        {
+            const int sketch_dir_index = std::max(0, canva.sequence_active_sketch_index);
+            canva_prepare_cloth_output_dirs(
+                state,
+                canva,
+                sketch_dir_index,
+                canva_count_cloth_frames_for_sketch(canva, sketch_dir_index));
+        }
+
+        canva.cloth_fitting_active = true;
+        canva.cloth_fitting_waiting_iso = false;
+        canva.cloth_fitting_waiting_depth = false;
+        canva.cloth_fitting_iso_request_id = 0;
+        canva.cloth_fitting_depth_request_id = 0;
+        canva.cloth_fitting_model_input_path = model_input_path;
+        canva.cloth_fitting_iso_path = iso_path;
+        canva.cloth_fitting_depth_path = depth_path;
+        canva.cloth_fitting_rig_json_path = rig_json_path;
+        canva.cloth_fitting_source_layer_id = source_layer.id;
+        canva.cloth_fitting_status = "Depth testing";
+
+        canva_finish_cloth_fitting_if_ready(state, canva, renderer);
+        if (canva.cloth_fitting_status != "Done")
+        {
+            if (out_error)
+                *out_error = "cached cloth fitting failed";
+            return false;
+        }
+        return true;
     }
 
 }

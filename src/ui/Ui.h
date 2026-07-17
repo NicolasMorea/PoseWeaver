@@ -22,6 +22,6 @@ namespace poseweaver
         void draw_main_menu(AppState& state, const AssetIndex& assets);
 		void draw_cloth_view(AppState& state, Renderer& renderer, const UiFrameInfo& frame);
         void draw_controls(AppState& state, const AssetIndex& assets, Renderer& renderer);
-		void draw_console(AppState& state);
+		void draw_console(AppState& state, Renderer& renderer);
     };
 }

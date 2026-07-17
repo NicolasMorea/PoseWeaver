@@ -258,6 +258,7 @@ if(POSEWEAVER_BUILD_APP)
 		src/ui/canva/CanvaPanelPipelineRequests.cpp
 		src/ui/canva/CanvaPanelPipelineUi.cpp
 		src/ui/canva/CanvaPanelPoseLayers.cpp
+		src/ui/canva/CanvaPanelSequence.cpp
 		src/ui/UiInternal.h
 	)
 

@@ -145,7 +145,7 @@ namespace poseweaver
 
             ImGui::SetNextWindowPos(console_pos, ImGuiCond_Always);
             ImGui::SetNextWindowSize(console_size, ImGuiCond_Always);
-            draw_console(state);
+            draw_console(state, renderer);
         }
 
         if (state.soft_cursor_enabled)

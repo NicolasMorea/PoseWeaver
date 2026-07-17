@@ -42,6 +42,15 @@ namespace poseweaver::ui_canva
             ImGuiIO& io = ImGui::GetIO();
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const bool shift = io.KeyShift;
+            const bool sequence_preview = canva.sequence_preview_active;
+            auto& draw_layers = sequence_preview ? canva.sequence_preview_layers : canva.layers;
+            for (auto& layer : draw_layers)
+            {
+                if (layer.dirty)
+                    canva_upload_layer(layer, canva.width, canva.height);
+            }
+            const std::vector<CanvaLayer>& display_layers =
+                draw_layers;
 
             const ImVec2 view_center = ImVec2(view_pos.x + view_size.x * 0.5f, view_pos.y + view_size.y * 0.5f);
 
@@ -104,9 +113,9 @@ namespace poseweaver::ui_canva
             dl->PushClipRect(p0, p1, true);
 
             // Draw layers bottom->top (vector is top->bottom).
-            for (int i = (int)canva.layers.size() - 1; i >= 0; --i)
+            for (int i = (int)display_layers.size() - 1; i >= 0; --i)
             {
-                const auto& layer = canva.layers[(size_t)i];
+                const auto& layer = display_layers[(size_t)i];
                 if (!layer.enabled || layer.texture_id == 0)
                     continue;
                 ImTextureID tid = (ImTextureID)(intptr_t)layer.texture_id;
@@ -135,8 +144,17 @@ namespace poseweaver::ui_canva
                 draw_generate_cloth_steps_in_view(state, canva, dl, steps_anchor);
             }
 
+            if (sequence_preview)
+            {
+                canva.drawing = false;
+                canva.sizing = false;
+                canva.transforming = false;
+                canva.scaling = false;
+                canva.transform_layer = -1;
+            }
+
             // Transform tool: pick + drag active layer.
-            if (canva.tool == CanvaTool::Transform)
+            if (!sequence_preview && canva.tool == CanvaTool::Transform)
             {
                 int hovered_handle = -1;
                 ImVec2 handle_pos[4] = { ImVec2(0, 0), ImVec2(0, 0), ImVec2(0, 0), ImVec2(0, 0) };
@@ -304,7 +322,7 @@ namespace poseweaver::ui_canva
             }
 
             // Brush tool: Shift+drag changes brush size.
-            if (canva.tool == CanvaTool::Brush)
+            if (!sequence_preview && canva.tool == CanvaTool::Brush)
             {
                 const bool left_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
                 const bool middle_down = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
@@ -387,7 +405,8 @@ namespace poseweaver::ui_canva
             dl->PopClipRect();
 
             // Upload textures if needed (after painting).
-            for (auto& layer : canva.layers)
+            auto& upload_layers = sequence_preview ? canva.sequence_preview_layers : canva.layers;
+            for (auto& layer : upload_layers)
             {
                 if (layer.dirty)
                     canva_upload_layer(layer, canva.width, canva.height);

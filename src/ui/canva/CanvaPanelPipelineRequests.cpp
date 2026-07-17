@@ -83,11 +83,11 @@ namespace poseweaver::ui_canva
         out_a = a0 + (a1 - a0) * ty;
     }
 
-    static bool canva_composite_visible_layers_rgba(
+    bool canva_composite_visible_layers_rgba(
         const CanvaState& canva,
         std::vector<unsigned char>* out_rgba,
         std::string* out_error,
-        bool sketch_layers_only = false)
+        bool sketch_layers_only)
     {
         const int w = canva.width;
         const int h = canva.height;
@@ -196,6 +196,70 @@ namespace poseweaver::ui_canva
         return true;
     }
 
+    std::filesystem::path canva_render_frame_dir(int frame_index)
+    {
+        return std::filesystem::path("renders")
+            / ("frame_" + std::to_string(std::max(0, frame_index)));
+    }
+
+    std::filesystem::path canva_render_cloth_frame_dir(int frame_index, int cloth_frame_index)
+    {
+        return canva_render_frame_dir(frame_index)
+            / ("cloth_frame_" + std::to_string(std::max(0, cloth_frame_index)));
+    }
+
+    int canva_count_cloth_frames_for_sketch(const CanvaState& canva, int sketch_frame_index)
+    {
+        if (sketch_frame_index >= 0
+            && sketch_frame_index < (int)canva.sequence_sketch_frames.size())
+            return (int)canva.sequence_sketch_frames[(size_t)sketch_frame_index].cloth_frame_indices.size();
+
+        int count = 0;
+        for (const CanvaSequenceTrackFrame& frame : canva.sequence_cloth_frames)
+        {
+            if (frame.sketch_frame_index == sketch_frame_index)
+                ++count;
+        }
+        return count;
+    }
+
+    void canva_prepare_cloth_output_dirs(
+        AppState& state,
+        CanvaState& canva,
+        int sketch_frame_index,
+        int cloth_frame_index)
+    {
+        const std::filesystem::path frame_dir = canva_render_frame_dir(sketch_frame_index);
+        const std::filesystem::path cloth_frame_dir =
+            canva_render_cloth_frame_dir(sketch_frame_index, cloth_frame_index);
+        canva.sequence_current_frame_dir = frame_dir;
+        canva.sequence_current_cloth_frame_dir = cloth_frame_dir;
+        state.cloth_render_output_dir = cloth_frame_dir.string();
+        state.cloth_fitting_output_dir = cloth_frame_dir.string();
+    }
+
+    void canva_delete_render_frame_dirs()
+    {
+        const std::filesystem::path renders_dir = "renders";
+        std::error_code ec;
+        if (!std::filesystem::exists(renders_dir, ec))
+            return;
+
+        for (const std::filesystem::directory_entry& entry
+             : std::filesystem::directory_iterator(renders_dir, ec))
+        {
+            if (ec)
+                return;
+            if (!entry.is_directory(ec))
+                continue;
+            const std::string name = entry.path().filename().string();
+            if (name.rfind("frame_", 0) != 0)
+                continue;
+            std::filesystem::remove_all(entry.path(), ec);
+            ec.clear();
+        }
+    }
+
      bool canva_save_visible_layers_png(const CanvaState& canva, std::filesystem::path* out_path, std::string* out_error)
     {
         std::vector<unsigned char> out_rgba;
@@ -226,14 +290,36 @@ namespace poseweaver::ui_canva
         std::filesystem::path* out_path,
         std::string* out_error)
     {
-        const int w = canva.width;
-        const int h = canva.height;
+        return canva_save_model_input_png_to_dir(
+            canva,
+            canva_render_frame_dir(0),
+            "canva_model_input",
+            out_path,
+            out_error);
+    }
 
+    bool canva_save_model_input_png_to_dir(
+        const CanvaState& canva,
+        const std::filesystem::path& output_dir,
+        const std::string& stem,
+        std::filesystem::path* out_path,
+        std::string* out_error)
+    {
         std::vector<unsigned char> rgba;
         if (!canva_composite_visible_layers_rgba(canva, &rgba, out_error))
             return false;
 
-        return save_normalized_model_input_png(w, h, rgba, out_path, out_error);
+        const std::filesystem::path dir = output_dir.empty()
+            ? canva_render_frame_dir(0)
+            : output_dir;
+        const std::string filename = stem.empty() ? "canva_model_input" : stem;
+        return save_normalized_model_input_png_to_path(
+            canva.width,
+            canva.height,
+            rgba,
+            dir / (filename + ".png"),
+            out_path,
+            out_error);
     }
 
     static bool canva_preprocess_metadata_exists(const std::filesystem::path& model_input_path)
@@ -305,9 +391,11 @@ namespace poseweaver::ui_canva
         state.cloth_render_fine = fine;
         state.cloth_render_use_current_camera = true;
         state.cloth_render_stroke_reference_path = canva.render_cloth_model_input_path.string();
+        state.cloth_render_camera_rig_path.clear();
         state.cloth_render_target_detail_size =
             std::clamp(state.cloth_render_target_detail_size, 0.0001f, 0.25f);
         state.cloth_render_path.clear();
+        canva_prepare_cloth_output_dirs(state, canva, 0, 0);
         canva.render_cloth_request_id = ++state.cloth_render_request_id;
 
         console_add_line(state, fine
@@ -321,11 +409,20 @@ namespace poseweaver::ui_canva
         CanvaState& canva,
         bool generate_cloth_after,
         bool hide_rig_layer,
-        std::string* out_error)
+        std::string* out_error,
+        const std::filesystem::path& output_dir)
     {
         std::filesystem::path sketch_path;
         std::string err;
-        if (!canva_save_model_input_png(canva, &sketch_path, &err))
+        const bool saved = output_dir.empty()
+            ? canva_save_model_input_png(canva, &sketch_path, &err)
+            : canva_save_model_input_png_to_dir(
+                canva,
+                output_dir,
+                "canva_model_input",
+                &sketch_path,
+                &err);
+        if (!saved)
         {
             if (out_error)
                 *out_error = err.empty() ? "preprocessing failed" : err;
@@ -602,9 +699,27 @@ namespace poseweaver::ui_canva
         }
         canva.layers[(size_t)source_layer_index].enabled = false;
 
+        std::filesystem::path inference_dir = canva.generate_cloth_model_input_path.parent_path();
+        if (inference_dir.empty())
+            inference_dir = canva_render_frame_dir(0);
+        const int fitting_sketch_index =
+            (canva.sequence_generating && canva.sequence_active_sketch_index >= 0)
+                ? canva.sequence_active_sketch_index
+                : 0;
+        canva_prepare_cloth_output_dirs(
+            state,
+            canva,
+            fitting_sketch_index,
+            canva_count_cloth_frames_for_sketch(canva, fitting_sketch_index));
+
         std::filesystem::path sketch_path;
         std::string err;
-        if (!canva_save_model_input_png(canva, &sketch_path, &err))
+        if (!canva_save_model_input_png_to_dir(
+                canva,
+                inference_dir,
+                "canva_model_input",
+                &sketch_path,
+                &err))
         {
             if (out_error)
                 *out_error = err.empty() ? "preprocessing failed" : err;
@@ -651,6 +766,7 @@ namespace poseweaver::ui_canva
         canva.cloth_fitting_model_input_path = sketch_path;
         canva.cloth_fitting_iso_path.clear();
         canva.cloth_fitting_depth_path.clear();
+        canva.cloth_fitting_rig_json_path.clear();
         canva.cloth_fitting_source_layer_id = source_layer.id;
         canva.cloth_fitting_status = "Predicting ISO and depth";
         canva.cloth_fitting_iso_start = std::chrono::steady_clock::now();
