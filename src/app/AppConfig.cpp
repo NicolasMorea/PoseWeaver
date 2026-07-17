@@ -13,6 +13,7 @@
 namespace
 {
     static bool g_read_seen_collision_geometry = false;
+    static bool g_read_seen_simulation_steps = false;
 
     static void* pw_imgui_settings_read_open(ImGuiContext*, ImGuiSettingsHandler* handler, const char* name)
     {
@@ -21,7 +22,21 @@ namespace
         if (std::strcmp(name, "State") != 0)
             return nullptr;
         g_read_seen_collision_geometry = false;
+        g_read_seen_simulation_steps = false;
         return handler->UserData;
+    }
+
+    static void infer_simulation_steps_from_legacy_dt(poseweaver::AppState* state)
+    {
+        if (!state || g_read_seen_simulation_steps)
+            return;
+        const float duration = std::max(0.0f, state->xpbd_params.duration_seconds);
+        const float dt = state->xpbd_params.dt;
+        if (duration > 0.0f && dt > 0.0f && std::isfinite(duration) && std::isfinite(dt))
+            state->xpbd_params.simulation_steps = std::clamp(
+                (int)std::llround((double)duration / (double)dt),
+                1,
+                1000000);
     }
 
     static void pw_imgui_settings_read_line(ImGuiContext*, ImGuiSettingsHandler* handler, void*, const char* line)
@@ -87,6 +102,10 @@ namespace
         {
             state->controls.show_collision_proxy_sequence = (iv != 0);
         }
+        if (std::sscanf(line, "CanvaSequencePoseTransitionFrames=%d", &iv) == 1)
+        {
+            state->canva_sequence_pose_transition_frames = std::clamp(iv, 0, 240);
+        }
 
         if (std::sscanf(line, "SimulationMaxFrames=%d", &iv) == 1)
         {
@@ -134,15 +153,38 @@ namespace
             }
         }
 
+        if (std::sscanf(line, "WindRandomMagnitude=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_magnitude = std::clamp(v, 0.0f, 1e9f);
+        }
+        if (std::sscanf(line, "WindRandomTimeScale=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_time_scale = std::clamp(v, 0.0f, 1000.0f);
+        }
+        if (std::sscanf(line, "WindRandomSpatialScale=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_spatial_scale = std::clamp(v, 0.0f, 1000.0f);
+        }
         if (std::sscanf(line, "WindRandomSpace=%f", &v) == 1)
         {
             if (std::isfinite(v))
-                state->xpbd_params.wind_random_space = std::clamp(v, 0.0f, 1000.0f);
+            {
+                state->xpbd_params.wind_random_spatial_scale = std::clamp(v, 0.0f, 1000.0f);
+                state->xpbd_params.wind_random_magnitude = std::max(
+                    state->xpbd_params.wind_random_magnitude, std::clamp(v, 0.0f, 1e9f));
+            }
         }
         if (std::sscanf(line, "WindRandomTime=%f", &v) == 1)
         {
             if (std::isfinite(v))
-                state->xpbd_params.wind_random_time = std::clamp(v, 0.0f, 1000.0f);
+            {
+                state->xpbd_params.wind_random_time_scale = std::clamp(v, 0.0f, 1000.0f);
+                state->xpbd_params.wind_random_magnitude = std::max(
+                    state->xpbd_params.wind_random_magnitude, std::clamp(v, 0.0f, 1e9f));
+            }
         }
 
         if (std::sscanf(line, "CanvaBrushRadius=%f", &v) == 1)
@@ -202,7 +244,10 @@ namespace
         if (std::sscanf(line, "XpbdDt=%f", &v) == 1)
         {
             if (std::isfinite(v))
+            {
                 state->xpbd_params.dt = std::clamp(v, 1e-6f, 1.0f);
+                infer_simulation_steps_from_legacy_dt(state);
+            }
         }
         if (std::sscanf(line, "SimulationDevice=%d", &iv) == 1)
         {
@@ -213,7 +258,16 @@ namespace
         if (std::sscanf(line, "XpbdDurationSeconds=%f", &v) == 1)
         {
             if (std::isfinite(v))
+            {
                 state->xpbd_params.duration_seconds = std::clamp(v, 0.0f, 3600.0f);
+                infer_simulation_steps_from_legacy_dt(state);
+            }
+        }
+        if (std::sscanf(line, "XpbdSimulationSteps=%d", &iv) == 1)
+        {
+            g_read_seen_simulation_steps = true;
+            state->xpbd_params.simulation_steps = std::clamp(iv, 1, 1000000);
+            state->xpbd_params.dt = poseweaver::solver_dt_seconds(state->xpbd_params);
         }
         if (std::sscanf(line, "XpbdSolverIterations=%d", &iv) == 1)
         {
@@ -313,15 +367,38 @@ namespace
             if (std::isfinite(v))
                 state->xpbd_params.wind_pitch_deg = std::clamp(v, -89.9f, 89.9f);
         }
+        if (std::sscanf(line, "XpbdWindRandomMagnitude=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_magnitude = std::clamp(v, 0.0f, 1e9f);
+        }
+        if (std::sscanf(line, "XpbdWindRandomTimeScale=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_time_scale = std::clamp(v, 0.0f, 1000.0f);
+        }
+        if (std::sscanf(line, "XpbdWindRandomSpatialScale=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.wind_random_spatial_scale = std::clamp(v, 0.0f, 1000.0f);
+        }
         if (std::sscanf(line, "XpbdWindRandomSpace=%f", &v) == 1)
         {
             if (std::isfinite(v))
-                state->xpbd_params.wind_random_space = std::clamp(v, 0.0f, 1000.0f);
+            {
+                state->xpbd_params.wind_random_spatial_scale = std::clamp(v, 0.0f, 1000.0f);
+                state->xpbd_params.wind_random_magnitude = std::max(
+                    state->xpbd_params.wind_random_magnitude, std::clamp(v, 0.0f, 1e9f));
+            }
         }
         if (std::sscanf(line, "XpbdWindRandomTime=%f", &v) == 1)
         {
             if (std::isfinite(v))
-                state->xpbd_params.wind_random_time = std::clamp(v, 0.0f, 1000.0f);
+            {
+                state->xpbd_params.wind_random_time_scale = std::clamp(v, 0.0f, 1000.0f);
+                state->xpbd_params.wind_random_magnitude = std::max(
+                    state->xpbd_params.wind_random_magnitude, std::clamp(v, 0.0f, 1e9f));
+            }
         }
         if (std::sscanf(line, "XpbdCollisionGeometry=%d", &iv) == 1)
         {
@@ -369,8 +446,8 @@ namespace
         buf->appendf("SmoothSequenceLength=%.6f\n", state->controls.smooth_sequence_length);
         buf->appendf("SaveSmplSequence=%d\n", state->controls.save_smpl_sequence ? 1 : 0);
         buf->appendf("ShowCollisionProxySequence=%d\n", state->controls.show_collision_proxy_sequence ? 1 : 0);
+        buf->appendf("CanvaSequencePoseTransitionFrames=%d\n", state->canva_sequence_pose_transition_frames);
 
-        buf->appendf("SimulationMaxFrames=%d\n", state->controls.max_frames);
         buf->appendf("SimulationFps=%.9f\n", state->controls.fps);
         buf->appendf("LightPosX=%.6f\n", state->light_position[0]);
         buf->appendf("LightPosY=%.6f\n", state->light_position[1]);
@@ -389,8 +466,9 @@ namespace
 
         buf->appendf("SimulationDevice=%d\n",
             state->xpbd_params.device == poseweaver::SimulationDevice::Gpu ? 1 : 0);
-        buf->appendf("XpbdDt=%.9f\n", state->xpbd_params.dt);
+        buf->appendf("XpbdDt=%.9f\n", poseweaver::solver_dt_seconds(state->xpbd_params));
         buf->appendf("XpbdDurationSeconds=%.9f\n", state->xpbd_params.duration_seconds);
+        buf->appendf("XpbdSimulationSteps=%d\n", state->xpbd_params.simulation_steps);
         buf->appendf("XpbdSolverIterations=%d\n", state->xpbd_params.solver_iterations);
         buf->appendf("XpbdSubsteps=%d\n", state->xpbd_params.substeps);
         buf->appendf("XpbdGravity=%.9f\n", state->xpbd_params.gravity);
@@ -416,8 +494,9 @@ namespace
         buf->appendf("XpbdWindForce=%.9f\n", state->xpbd_params.wind_force);
         buf->appendf("XpbdWindYawDeg=%.6f\n", state->xpbd_params.wind_yaw_deg);
         buf->appendf("XpbdWindPitchDeg=%.6f\n", state->xpbd_params.wind_pitch_deg);
-        buf->appendf("XpbdWindRandomSpace=%.6f\n", state->xpbd_params.wind_random_space);
-        buf->appendf("XpbdWindRandomTime=%.6f\n", state->xpbd_params.wind_random_time);
+        buf->appendf("XpbdWindRandomMagnitude=%.9f\n", state->xpbd_params.wind_random_magnitude);
+        buf->appendf("XpbdWindRandomTimeScale=%.6f\n", state->xpbd_params.wind_random_time_scale);
+        buf->appendf("XpbdWindRandomSpatialScale=%.6f\n", state->xpbd_params.wind_random_spatial_scale);
         const int collision_geometry = (state->xpbd_params.collision_geometry == poseweaver::CollisionGeometryType::SimplifiedSmpl)
             ? 1
             : (state->xpbd_params.collision_geometry == poseweaver::CollisionGeometryType::SimpleProxy) ? 2 : 0;

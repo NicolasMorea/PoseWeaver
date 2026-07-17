@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -78,6 +79,7 @@ namespace poseweaver
         SimulationDevice device = SimulationDevice::Cpu;
         float dt = 1.0f / 60.0f;
         float duration_seconds = 2.0f;
+        int simulation_steps = 120;
         int solver_iterations = 20;
         int substeps = 2;
         float gravity = -9.81f;
@@ -105,13 +107,26 @@ namespace poseweaver
         float wind_yaw_deg = 0.0f;
         float wind_pitch_deg = 0.0f;
 
-        float wind_random_space = 0.0f;
-        float wind_random_time = 0.0f;
+        float wind_random_magnitude = 0.0f;
+        float wind_random_time_scale = 1.0f;
+        float wind_random_spatial_scale = 1.0f;
 
         CollisionGeometryType collision_geometry = CollisionGeometryType::RawSmpl;
         bool simplify_smpl = false; // Legacy setting, mirrored from collision_geometry for old imgui.ini files.
         float smpl_geometry_percent = 100.0f;
     };
+
+    inline float simulation_dt_seconds(const SimulationXpbdParams& params)
+    {
+        const int steps = std::max(1, params.simulation_steps);
+        const float duration = std::max(0.0f, params.duration_seconds);
+        return duration / (float)steps;
+    }
+
+    inline float solver_dt_seconds(const SimulationXpbdParams& params)
+    {
+        return std::max(1e-6f, simulation_dt_seconds(params));
+    }
 
     struct SelectionState
     {
@@ -206,6 +221,9 @@ namespace poseweaver
         std::array<float, 3> scene_view_target_eye{ 0.0f, 0.0f, 0.0f };
         std::array<float, 3> scene_view_target_direction{ 0.0f, 0.0f, -1.0f };
         std::array<float, 3> scene_view_target_up{ 0.0f, 1.0f, 0.0f };
+        bool scene_view_sequence_rig_overlay_active = false;
+        bool scene_view_sequence_rig_overlay_visible = false;
+        std::string scene_view_sequence_rig_overlay_path;
         bool scene_view_raw_rig_root_valid = false;
         std::array<float, 3> scene_view_raw_rig_root{ 0.0f, 0.0f, 0.0f };
         bool scene_view_raw_rig_height_valid = false;
@@ -243,10 +261,24 @@ namespace poseweaver
         std::uint64_t cloth_simulate_request_id = 0;
         std::uint64_t cloth_clear_simulation_request_id = 0;
         std::uint64_t cloth_cancel_simulation_request_id = 0;
+        bool cloth_simulate_continue_from_last_frame = false;
+        float cloth_simulate_duration_override_seconds = -1.0f;
+        int cloth_simulate_max_frames_override = 0;
+        bool cloth_simulate_pose_transition_enabled = false;
+        std::string cloth_simulate_transition_from_pose_path;
+        int cloth_simulate_pose_transition_frames = 0;
+        bool cloth_simulate_sequence_enabled = false;
+        std::vector<std::string> cloth_simulate_sequence_pose_paths;
+        std::vector<std::string> cloth_simulate_sequence_rig_paths;
+        int cloth_simulate_sequence_frame_rate = 12;
+        int cloth_simulate_sequence_transition_frames = 0;
+        bool cloth_simulate_sequence_initial_smooth = false;
         std::uint64_t cloth_render_request_id = 0;
         std::uint64_t cloth_render_completed_id = 0;
         std::string cloth_render_path;
         std::string cloth_render_stroke_reference_path;
+        std::string cloth_render_output_dir;
+        std::string cloth_render_camera_rig_path;
         bool cloth_render_fine = false;
         bool cloth_render_use_current_camera = false;
         float cloth_render_target_detail_size = 0.01f;
@@ -285,11 +317,13 @@ namespace poseweaver
 
         float canva_brush_radius = 8.0f;
         std::array<float, 4> canva_brush_color{ 0.0f, 0.0f, 0.0f, 1.0f };
+        int canva_sequence_pose_transition_frames = 2;
         float cloth_fitting_depth_margin = 0.0015f;
         float cloth_fitting_depth_margin_pred = 0.05f;
         float cloth_fitting_body_distance_threshold = 0.01f;
         float cloth_fitting_warp_radius = 48.0f;
         float cloth_fitting_warp_force = 1.0f;
+        std::string cloth_fitting_output_dir;
         float iso_distance_threshold = 0.15f;
 
         bool canva_tab_active = false;
