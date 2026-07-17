@@ -93,6 +93,7 @@ namespace poseweaver
             int height,
             const std::string& iso_npz_path,
             const std::string& depth_prediction_path,
+            const std::string& rig_json_path,
             float prediction_from_cloth_scale,
             float prediction_from_cloth_offset_x,
             float prediction_from_cloth_offset_y,
@@ -309,8 +310,13 @@ namespace poseweaver
 
         std::vector<Eigen::MatrixXd> m_cloth_sim_frames;
         std::vector<Eigen::MatrixXd> m_smpl_sim_frames;
+        std::vector<Eigen::MatrixXd> m_cloth_sim_append_prefix_frames;
+        std::vector<Eigen::MatrixXd> m_smpl_sim_append_prefix_frames;
+        std::vector<Eigen::MatrixXd> m_collision_proxy_append_prefix_frames;
+        bool m_cloth_sim_append_result = false;
         std::uint64_t m_cloth_sim_pose_version = 0;
         std::uint64_t m_cloth_sim_garment_version = 0;
+        bool m_cloth_sim_require_pose_version_match = true;
 
         struct ClothSimJobResult
         {

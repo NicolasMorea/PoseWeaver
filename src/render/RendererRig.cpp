@@ -392,6 +392,76 @@ namespace poseweaver
             state.scene_view_smpl_fit_rms = 0.0f;
         };
 
+        if (state.scene_view_sequence_rig_overlay_active)
+        {
+            const std::string desired_overlay = state.scene_view_sequence_rig_overlay_path;
+            if (!state.show_sketch2rig_rig
+                || !state.scene_view_sequence_rig_overlay_visible
+                || desired_overlay.empty())
+            {
+                data.set_visible(false);
+                return;
+            }
+
+            std::string text;
+            std::string err;
+            Eigen::MatrixXd source_joints;
+            std::vector<int> parents;
+            int image_size = 512;
+            if (!read_text_file(desired_overlay, &text, &err)
+                || !parse_sketch2rig_joints(text, &source_joints, &parents, &image_size, &err))
+            {
+                data.set_visible(false);
+                return;
+            }
+
+            const Eigen::MatrixXd camera_joints = sketch2rig_joints_to_camera_scene_axes(
+                source_joints,
+                image_size);
+            Eigen::MatrixXd centered_camera_joints = camera_joints;
+            if (camera_joints.rows() > 0)
+            {
+                const Eigen::Vector3d root_offset = camera_joints.row(0).transpose();
+                centered_camera_joints.rowwise() -= root_offset.transpose();
+
+                double predicted_height = 0.0;
+                const double target_height = ensure_smplh_model_loaded(state, state.selection.gender)
+                    ? smpl_native_height_from_state(m_smplh_model, state)
+                    : 1.6;
+                if (rig_height_if_valid(centered_camera_joints, &predicted_height)
+                    && predicted_height > 1e-6
+                    && std::isfinite(predicted_height)
+                    && target_height > 1e-6
+                    && std::isfinite(target_height))
+                {
+                    const double scene_scale = std::clamp(target_height / predicted_height, 0.05, 20.0);
+                    centered_camera_joints *= scene_scale;
+                }
+            }
+
+            Eigen::MatrixXd V, P1, P2, C;
+            Eigen::MatrixXi F;
+            build_rig_geometry(
+                centered_camera_joints,
+                parents,
+                rig_height_or_default(centered_camera_joints),
+                V,
+                F,
+                P1,
+                P2,
+                C);
+
+            data.clear();
+            data.set_mesh(V, F);
+            data.show_faces = 1;
+            data.show_lines = 0;
+            data.show_overlay = 1;
+            data.set_colors(Eigen::RowVector3d(0.1, 0.4, 1.0));
+            data.add_edges(P1, P2, C);
+            data.set_visible(true);
+            return;
+        }
+
         const std::string desired = state.sketch2rig.last_output_path;
         if (desired.empty())
         {

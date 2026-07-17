@@ -12,11 +12,14 @@
 #include <igl/read_triangle_mesh.h>
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
 #include <limits>
+#include <sstream>
 #include <vector>
 
 #include <stb_image.h>
@@ -312,6 +315,247 @@ namespace poseweaver
 
             core.camera_view_angle = kSketch2RigVerticalFovDeg;
             last_request_id = state.scene_view_snap_to_target_request_id;
+        }
+
+        static bool parse_json_number_at_render(const std::string& text, size_t* pos, double* out_value)
+        {
+            if (!pos || !out_value)
+                return false;
+            while (*pos < text.size() && std::isspace((unsigned char)text[*pos]))
+                ++(*pos);
+            const char* begin = text.c_str() + *pos;
+            char* end = nullptr;
+            const double value = std::strtod(begin, &end);
+            if (end == begin)
+                return false;
+            *out_value = value;
+            *pos = (size_t)(end - text.c_str());
+            return true;
+        }
+
+        static bool parse_json_number_field_render(const std::string& text, const char* key, double* out_value)
+        {
+            const std::string needle = std::string("\"") + key + "\":";
+            const size_t start = text.find(needle);
+            if (start == std::string::npos)
+                return false;
+            size_t pos = start + needle.size();
+            return parse_json_number_at_render(text, &pos, out_value);
+        }
+
+        static bool parse_json_number_array_field_render(
+            const std::string& text,
+            const char* key,
+            std::vector<double>* out_values)
+        {
+            if (!out_values)
+                return false;
+            out_values->clear();
+            const std::string needle = std::string("\"") + key + "\":";
+            const size_t start = text.find(needle);
+            if (start == std::string::npos)
+                return false;
+            size_t pos = text.find('[', start + needle.size());
+            if (pos == std::string::npos)
+                return false;
+            ++pos;
+            while (pos < text.size())
+            {
+                while (pos < text.size() && (std::isspace((unsigned char)text[pos]) || text[pos] == ','))
+                    ++pos;
+                if (pos >= text.size())
+                    break;
+                if (text[pos] == ']')
+                    return true;
+                double value = 0.0;
+                if (!parse_json_number_at_render(text, &pos, &value))
+                    return false;
+                out_values->push_back(value);
+            }
+            return false;
+        }
+
+        static bool read_text_file_render(const std::filesystem::path& path, std::string* out)
+        {
+            std::ifstream in(path);
+            if (!in)
+                return false;
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            *out = ss.str();
+            return true;
+        }
+
+        static bool parse_sketch2rig_joints_render(
+            const std::string& text,
+            Eigen::MatrixXd* out_joints,
+            int* out_image_size)
+        {
+            if (!out_joints)
+                return false;
+            constexpr int kSketchJointCount = 22;
+            double image_size_d = 512.0;
+            (void)parse_json_number_field_render(text, "image_size", &image_size_d);
+            if (out_image_size)
+                *out_image_size = std::clamp((int)std::lround(image_size_d), 2, 8192);
+
+            const size_t joints_key = text.find("\"joints\"");
+            if (joints_key == std::string::npos)
+                return false;
+            size_t pos = text.find('[', joints_key);
+            if (pos == std::string::npos)
+                return false;
+            ++pos;
+
+            Eigen::MatrixXd joints = Eigen::MatrixXd::Zero(kSketchJointCount, 3);
+            int parsed = 0;
+            while (pos < text.size())
+            {
+                const size_t object_begin = text.find('{', pos);
+                const size_t array_end = text.find(']', pos);
+                if (array_end != std::string::npos && (object_begin == std::string::npos || array_end < object_begin))
+                    break;
+                if (object_begin == std::string::npos)
+                    break;
+
+                int depth = 0;
+                size_t object_end = std::string::npos;
+                for (size_t i = object_begin; i < text.size(); ++i)
+                {
+                    if (text[i] == '{')
+                        ++depth;
+                    else if (text[i] == '}')
+                    {
+                        --depth;
+                        if (depth == 0)
+                        {
+                            object_end = i;
+                            break;
+                        }
+                    }
+                }
+                if (object_end == std::string::npos)
+                    break;
+
+                const std::string object = text.substr(object_begin, object_end - object_begin + 1);
+                double index_d = -1.0;
+                std::vector<double> values;
+                if (parse_json_number_field_render(object, "index", &index_d)
+                    && parse_json_number_array_field_render(object, "position", &values)
+                    && values.size() >= 3)
+                {
+                    const int index = (int)std::lround(index_d);
+                    if (index >= 0 && index < kSketchJointCount)
+                    {
+                        joints.row(index) = Eigen::RowVector3d(values[0], values[1], values[2]);
+                        ++parsed;
+                    }
+                }
+                pos = object_end + 1;
+            }
+
+            if (parsed < kSketchJointCount)
+                return false;
+            *out_joints = std::move(joints);
+            return true;
+        }
+
+        static Eigen::MatrixXd sketch2rig_joints_to_camera_scene_axes_render(
+            const Eigen::MatrixXd& joints,
+            int image_size)
+        {
+            const int size = std::max(2, image_size);
+            const double cx = 0.5 * (double)(size - 1);
+            const double cy = 0.5 * (double)(size - 1);
+            const double fx = 0.5 * (double)(size - 1) / std::tan(0.5 * (double)kSketch2RigHorizontalFovRad);
+            const double fy = 0.5 * (double)(size - 1) / std::tan(0.5 * (double)kSketch2RigVerticalFovRad);
+
+            Eigen::MatrixXd out(joints.rows(), 3);
+            out.setZero();
+            for (int i = 0; i < joints.rows(); ++i)
+            {
+                const double px = joints(i, 0);
+                const double py = joints(i, 1);
+                const double z = joints(i, 2);
+                const double u = (px >= -0.25 && px <= 1.25) ? px * (double)(size - 1) : px;
+                const double v = (py >= -0.25 && py <= 1.25) ? py * (double)(size - 1) : py;
+                out(i, 0) = (u - cx) / fx * z;
+                out(i, 1) = -(v - cy) / fy * z;
+                out(i, 2) = -z;
+            }
+            return out;
+        }
+
+        static bool rig_height_if_valid_render(const Eigen::MatrixXd& joints, double* out_height)
+        {
+            if (!out_height || joints.rows() <= 0)
+                return false;
+            const double h = joints.col(1).maxCoeff() - joints.col(1).minCoeff();
+            if (!(h > 1e-6) || !std::isfinite(h))
+                return false;
+            *out_height = h;
+            return true;
+        }
+
+        static double smpl_native_height_from_betas_render(
+            const SmplhModel& model,
+            const Eigen::VectorXd& betas)
+        {
+            const int V = model.vertex_count();
+            const int B = model.beta_count();
+            if (V <= 0 || model.J_regressor.cols() != V)
+                return 1.6;
+
+            Eigen::VectorXd b = Eigen::VectorXd::Zero(std::max(0, B));
+            const int n = std::min<int>((int)betas.size(), B);
+            for (int i = 0; i < n; ++i)
+                b[i] = betas[i];
+
+            Eigen::Map<const Eigen::VectorXd> v_template_flat(model.v_template.data(), (size_t)V * 3);
+            Eigen::VectorXd v_shaped_flat = v_template_flat;
+            if (B > 0)
+                v_shaped_flat.noalias() += model.shapedirs * b;
+
+            Eigen::Map<const MatrixX3dRM> v_shaped(v_shaped_flat.data(), V, 3);
+            const Eigen::MatrixXd joints = model.J_regressor * v_shaped;
+            double h = 0.0;
+            return rig_height_if_valid_render(joints, &h) ? h : 1.6;
+        }
+
+        static bool sketch2rig_camera_eye_render(
+            const std::filesystem::path& rig_path,
+            double target_height,
+            Eigen::Vector3f* out_eye)
+        {
+            if (!out_eye)
+                return false;
+            std::string text;
+            if (rig_path.empty() || !read_text_file_render(rig_path, &text))
+                return false;
+            Eigen::MatrixXd joints;
+            int image_size = 512;
+            if (!parse_sketch2rig_joints_render(text, &joints, &image_size))
+                return false;
+            Eigen::MatrixXd camera_joints = sketch2rig_joints_to_camera_scene_axes_render(joints, image_size);
+            if (camera_joints.rows() <= 0)
+                return false;
+            const Eigen::Vector3d root_offset = camera_joints.row(0).transpose();
+            camera_joints.rowwise() -= root_offset.transpose();
+            double predicted_height = 0.0;
+            double scene_scale = 1.0;
+            if (rig_height_if_valid_render(camera_joints, &predicted_height)
+                && predicted_height > 1e-6
+                && std::isfinite(predicted_height)
+                && target_height > 1e-6
+                && std::isfinite(target_height))
+            {
+                scene_scale = std::clamp(target_height / predicted_height, 0.05, 20.0);
+            }
+            *out_eye = Eigen::Vector3f(
+                (float)(-scene_scale * root_offset.x()),
+                (float)(-scene_scale * root_offset.y()),
+                (float)(-scene_scale * root_offset.z()));
+            return out_eye->allFinite();
         }
 
         static ViewportRect sketch2rig_projection_rect(const ViewportRect& view)
@@ -1709,7 +1953,32 @@ namespace poseweaver
 
         auto& core = m_viewer.core();
         const Eigen::Vector4f old_core_viewport = core.viewport;
-        if (!state.cloth_render_use_current_camera && state.scene_view_target_valid)
+        const std::string render_camera_rig_path = state.cloth_render_camera_rig_path;
+        state.cloth_render_camera_rig_path.clear();
+        if (!state.cloth_render_use_current_camera && !render_camera_rig_path.empty())
+        {
+            Eigen::Vector3f eye;
+            const double target_height = smpl_native_height_from_betas_render(m_smplh_model, m_smplh_params.betas);
+            if (sketch2rig_camera_eye_render(std::filesystem::path(render_camera_rig_path), target_height, &eye))
+            {
+                core.orthographic = false;
+                core.camera_eye = eye;
+                core.camera_center = eye + Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+                core.camera_up = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+                core.camera_zoom = 1.0f;
+                core.camera_base_zoom = 1.0f;
+                core.camera_translation.setZero();
+                core.camera_base_translation.setZero();
+                core.trackball_angle = Eigen::Quaternionf::Identity();
+                core.camera_view_angle = kSketch2RigVerticalFovDeg;
+            }
+            else if (state.scene_view_target_valid)
+            {
+                std::uint64_t force_camera = state.scene_view_snap_to_target_request_id - 1u;
+                apply_target_camera(core, state, force_camera);
+            }
+        }
+        else if (!state.cloth_render_use_current_camera && state.scene_view_target_valid)
         {
             std::uint64_t force_camera = state.scene_view_snap_to_target_request_id - 1u;
             apply_target_camera(core, state, force_camera);
@@ -1842,7 +2111,9 @@ namespace poseweaver
             && match_render_stroke_luminance(out, sketch_stroke_mean);
 
         std::error_code ec;
-        const std::filesystem::path renders_dir = std::filesystem::path("renders");
+        const std::filesystem::path renders_dir = state.cloth_render_output_dir.empty()
+            ? std::filesystem::path("renders")
+            : std::filesystem::path(state.cloth_render_output_dir);
         std::filesystem::create_directories(renders_dir, ec);
         const std::filesystem::path out_path = renders_dir /
             (state.cloth_render_fine ? "canva_fine_cloth.png" : "canva_generated_cloth.png");

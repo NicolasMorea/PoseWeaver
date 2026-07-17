@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -26,6 +27,7 @@ namespace poseweaver
     namespace
     {
         constexpr float kSketch2RigVerticalFovRad = 0.7348438501358032f;
+        constexpr float kSketch2RigHorizontalFovRad = 0.7348438501358032f;
         constexpr float kSketch2RigVerticalFovDeg =
             kSketch2RigVerticalFovRad * 180.0f / 3.14159265358979323846f;
         constexpr int kIsoDimensions = 64;
@@ -529,6 +531,262 @@ namespace poseweaver
             std::ostringstream ss;
             ss << f.rdbuf();
             return ss.str();
+        }
+
+        static bool parse_json_number_at_fit(const std::string& text, size_t* pos, double* out)
+        {
+            if (!pos || !out)
+                return false;
+            const char* begin = text.c_str() + *pos;
+            char* end = nullptr;
+            const double value = std::strtod(begin, &end);
+            if (end == begin || !std::isfinite(value))
+                return false;
+            *out = value;
+            *pos = (size_t)(end - text.c_str());
+            return true;
+        }
+
+        static bool parse_json_number_field_fit(const std::string& text, const char* key, double* out_value)
+        {
+            if (!key || !out_value)
+                return false;
+            const std::string needle = std::string("\"") + key + "\"";
+            const size_t key_pos = text.find(needle);
+            if (key_pos == std::string::npos)
+                return false;
+            size_t pos = text.find(':', key_pos + needle.size());
+            if (pos == std::string::npos)
+                return false;
+            ++pos;
+            while (pos < text.size() && std::isspace((unsigned char)text[pos]))
+                ++pos;
+            return parse_json_number_at_fit(text, &pos, out_value);
+        }
+
+        static bool parse_json_number_array_field_fit(
+            const std::string& text,
+            const char* key,
+            std::vector<double>* out_values)
+        {
+            if (!key || !out_values)
+                return false;
+            out_values->clear();
+            const std::string needle = std::string("\"") + key + "\"";
+            const size_t key_pos = text.find(needle);
+            if (key_pos == std::string::npos)
+                return false;
+            size_t pos = text.find('[', key_pos + needle.size());
+            if (pos == std::string::npos)
+                return false;
+            ++pos;
+            while (pos < text.size())
+            {
+                while (pos < text.size() && (std::isspace((unsigned char)text[pos]) || text[pos] == ','))
+                    ++pos;
+                if (pos >= text.size())
+                    break;
+                if (text[pos] == ']')
+                    return true;
+                double value = 0.0;
+                if (!parse_json_number_at_fit(text, &pos, &value))
+                    return false;
+                out_values->push_back(value);
+            }
+            return false;
+        }
+
+        static bool parse_sketch2rig_joints_fit(
+            const std::string& text,
+            Eigen::MatrixXd* out_joints,
+            int* out_image_size)
+        {
+            if (!out_joints)
+                return false;
+            constexpr int kSketchJointCount = 22;
+            double image_size_d = 512.0;
+            (void)parse_json_number_field_fit(text, "image_size", &image_size_d);
+            if (out_image_size)
+                *out_image_size = std::clamp((int)std::lround(image_size_d), 2, 8192);
+
+            const size_t joints_key = text.find("\"joints\"");
+            if (joints_key == std::string::npos)
+                return false;
+            size_t pos = text.find('[', joints_key);
+            if (pos == std::string::npos)
+                return false;
+            ++pos;
+
+            Eigen::MatrixXd joints = Eigen::MatrixXd::Zero(kSketchJointCount, 3);
+            int parsed = 0;
+            while (pos < text.size())
+            {
+                const size_t object_begin = text.find('{', pos);
+                const size_t array_end = text.find(']', pos);
+                if (array_end != std::string::npos && (object_begin == std::string::npos || array_end < object_begin))
+                    break;
+                if (object_begin == std::string::npos)
+                    break;
+
+                int depth = 0;
+                size_t object_end = std::string::npos;
+                for (size_t i = object_begin; i < text.size(); ++i)
+                {
+                    if (text[i] == '{')
+                        ++depth;
+                    else if (text[i] == '}')
+                    {
+                        --depth;
+                        if (depth == 0)
+                        {
+                            object_end = i;
+                            break;
+                        }
+                    }
+                }
+                if (object_end == std::string::npos)
+                    break;
+
+                const std::string object = text.substr(object_begin, object_end - object_begin + 1);
+                double index_d = -1.0;
+                std::vector<double> values;
+                if (parse_json_number_field_fit(object, "index", &index_d)
+                    && parse_json_number_array_field_fit(object, "position", &values)
+                    && values.size() >= 3)
+                {
+                    const int index = (int)std::lround(index_d);
+                    if (index >= 0 && index < kSketchJointCount)
+                    {
+                        joints.row(index) = Eigen::RowVector3d(values[0], values[1], values[2]);
+                        ++parsed;
+                    }
+                }
+                pos = object_end + 1;
+            }
+
+            if (parsed < kSketchJointCount)
+                return false;
+            *out_joints = std::move(joints);
+            return true;
+        }
+
+        static Eigen::MatrixXd sketch2rig_joints_to_camera_scene_axes_fit(
+            const Eigen::MatrixXd& joints,
+            int image_size)
+        {
+            const int size = std::max(2, image_size);
+            const double cx = 0.5 * (double)(size - 1);
+            const double cy = 0.5 * (double)(size - 1);
+            const double fx = 0.5 * (double)(size - 1) / std::tan(0.5 * (double)kSketch2RigHorizontalFovRad);
+            const double fy = 0.5 * (double)(size - 1) / std::tan(0.5 * (double)kSketch2RigVerticalFovRad);
+
+            Eigen::MatrixXd out(joints.rows(), 3);
+            out.setZero();
+            for (int i = 0; i < joints.rows(); ++i)
+            {
+                const double px = joints(i, 0);
+                const double py = joints(i, 1);
+                const double z = joints(i, 2);
+                const double u = (px >= -0.25 && px <= 1.25) ? px * (double)(size - 1) : px;
+                const double v = (py >= -0.25 && py <= 1.25) ? py * (double)(size - 1) : py;
+                out(i, 0) = (u - cx) / fx * z;
+                out(i, 1) = -(v - cy) / fy * z;
+                out(i, 2) = -z;
+            }
+            return out;
+        }
+
+        static bool rig_height_if_valid_fit(const Eigen::MatrixXd& joints, double* out_height)
+        {
+            if (!out_height || joints.rows() <= 0)
+                return false;
+            const double h = joints.col(1).maxCoeff() - joints.col(1).minCoeff();
+            if (!(h > 1e-6) || !std::isfinite(h))
+                return false;
+            *out_height = h;
+            return true;
+        }
+
+        static double smpl_native_height_from_betas_fit(
+            const SmplhModel& model,
+            const Eigen::VectorXd& betas)
+        {
+            const int V = model.vertex_count();
+            const int B = model.beta_count();
+            if (V <= 0 || model.J_regressor.cols() != V)
+                return 1.6;
+
+            Eigen::VectorXd b = Eigen::VectorXd::Zero(std::max(0, B));
+            const int n = std::min<int>((int)betas.size(), B);
+            for (int i = 0; i < n; ++i)
+                b[i] = betas[i];
+
+            Eigen::Map<const MatrixX3dRM> v_template(model.v_template.data(), V, 3);
+            Eigen::MatrixXd v_shaped = v_template;
+            if (B > 0)
+            {
+                Eigen::Map<const Eigen::VectorXd> v_template_flat(model.v_template.data(), (size_t)V * 3);
+                Eigen::VectorXd v_shaped_flat = v_template_flat;
+                v_shaped_flat.noalias() += model.shapedirs * b;
+                v_shaped = Eigen::Map<const MatrixX3dRM>(v_shaped_flat.data(), V, 3);
+            }
+
+            const Eigen::MatrixXd joints = model.J_regressor * v_shaped;
+            double h = 0.0;
+            return rig_height_if_valid_fit(joints, &h) ? h : 1.6;
+        }
+
+        static bool make_sketch2rig_camera_matrices_fit(
+            const std::filesystem::path& rig_path,
+            const SmplhModel& model,
+            const Eigen::VectorXd& betas,
+            float dnear,
+            float dfar,
+            Eigen::Matrix4f& view,
+            Eigen::Matrix4f& proj)
+        {
+            const std::string text = read_text_file_displacement(rig_path);
+            if (text.empty())
+                return false;
+            Eigen::MatrixXd joints;
+            int image_size = 512;
+            if (!parse_sketch2rig_joints_fit(text, &joints, &image_size))
+                return false;
+            Eigen::MatrixXd camera_joints = sketch2rig_joints_to_camera_scene_axes_fit(joints, image_size);
+            if (camera_joints.rows() <= 0)
+                return false;
+
+            const Eigen::Vector3d root_offset = camera_joints.row(0).transpose();
+            camera_joints.rowwise() -= root_offset.transpose();
+            double predicted_height = 0.0;
+            double scene_scale = 1.0;
+            const double target_height = smpl_native_height_from_betas_fit(model, betas);
+            if (rig_height_if_valid_fit(camera_joints, &predicted_height)
+                && predicted_height > 1e-6
+                && std::isfinite(predicted_height)
+                && target_height > 1e-6
+                && std::isfinite(target_height))
+            {
+                scene_scale = std::clamp(target_height / predicted_height, 0.05, 20.0);
+            }
+
+            const Eigen::Vector3f eye(
+                (float)(-scene_scale * root_offset.x()),
+                (float)(-scene_scale * root_offset.y()),
+                (float)(-scene_scale * root_offset.z()));
+            if (!eye.allFinite())
+                return false;
+
+            igl::look_at(
+                eye,
+                eye + Eigen::Vector3f(0.0f, 0.0f, -1.0f),
+                Eigen::Vector3f(0.0f, 1.0f, 0.0f),
+                view);
+
+            constexpr float kPi = 3.14159265358979323846f;
+            const float f_h = std::tan(kSketch2RigVerticalFovDeg / 360.0f * kPi) * dnear;
+            igl::frustum(-f_h, f_h, -f_h, f_h, dnear, dfar, proj);
+            return true;
         }
 
         static std::string parse_json_string_field_displacement(const std::string& text, const char* key)
@@ -1521,6 +1779,7 @@ namespace poseweaver
         int height,
         const std::string& iso_npz_path_string,
         const std::string& depth_prediction_path_string,
+        const std::string& rig_json_path_string,
         float prediction_from_cloth_scale,
         float prediction_from_cloth_offset_x,
         float prediction_from_cloth_offset_y,
@@ -1569,12 +1828,13 @@ namespace poseweaver
             || !std::isfinite(prediction_from_cloth_offset_x)
             || !std::isfinite(prediction_from_cloth_offset_y))
             return fail("invalid prediction-to-cloth layer transform");
-        if (!state.scene_view_target_valid)
+        if (rig_json_path_string.empty() && !state.scene_view_target_valid)
             return fail("predicted camera view is not available");
 
         ensure_smplh_mesh_loaded(state);
         ensure_garment_mesh_loaded(state);
         handle_garment_posing(state, false);
+        apply_cloth_simulation_frame(state);
 
         if (!m_smplh_loaded || m_smplh_vertices.rows() <= 0 || m_smplh_model.F.rows() <= 0)
             return fail("SMPL mesh is not ready");
@@ -1587,6 +1847,8 @@ namespace poseweaver
         if (garment.V.rows() <= 0 || garment.F.rows() <= 0)
             return fail("cloth mesh is not ready");
         auto& smpl = m_viewer.data(m_smplh_mesh_index);
+        const Eigen::MatrixXd& smpl_vertices_for_iso =
+            (smpl.V.rows() == m_smplh_vertices.rows()) ? smpl.V : m_smplh_vertices;
 
         std::filesystem::path iso_source_path = iso_npz_path_string;
         if (iso_source_path.empty())
@@ -1608,7 +1870,19 @@ namespace poseweaver
         Eigen::Matrix4f view;
         Eigen::Matrix4f proj;
         const auto& core_ref = m_viewer.core();
-        if (!make_target_camera_matrices(state, core_ref.camera_dnear, core_ref.camera_dfar, view, proj))
+        const std::filesystem::path rig_json_path = rig_json_path_string;
+        const bool used_rig_camera =
+            !rig_json_path.empty()
+            && make_sketch2rig_camera_matrices_fit(
+                rig_json_path,
+                m_smplh_model,
+                m_smplh_params.betas,
+                core_ref.camera_dnear,
+                core_ref.camera_dfar,
+                view,
+                proj);
+        if (!used_rig_camera
+            && !make_target_camera_matrices(state, core_ref.camera_dnear, core_ref.camera_dfar, view, proj))
             return fail("could not build predicted camera matrices");
 
         GLint old_framebuffer = 0;
@@ -2174,7 +2448,7 @@ namespace poseweaver
                         vertex_idx,
                         iso_distance_squared)
                     || vertex_idx < 0
-                    || vertex_idx >= m_smplh_vertices.rows()
+                    || vertex_idx >= smpl_vertices_for_iso.rows()
                     || !std::isfinite(iso_distance_squared)
                     || std::sqrt(std::max(0.0f, iso_distance_squared)) > iso_distance_threshold)
                 {
@@ -2193,7 +2467,7 @@ namespace poseweaver
                     dst[3] = 220u;
                 }
 
-                const Eigen::Vector3d p = m_smplh_vertices.row(vertex_idx).transpose();
+                const Eigen::Vector3d p = smpl_vertices_for_iso.row(vertex_idx).transpose();
 
                 float px = 0.0f;
                 float py = 0.0f;
@@ -2439,7 +2713,9 @@ namespace poseweaver
                 + ", removed(no warp/warped)=" + std::to_string(out_removed_count)
                 + "/" + std::to_string(warped_removed_count));
 
-        const std::filesystem::path renders_dir = "renders";
+        const std::filesystem::path renders_dir = state.cloth_fitting_output_dir.empty()
+            ? std::filesystem::path("renders")
+            : std::filesystem::path(state.cloth_fitting_output_dir);
         std::error_code ec;
         std::filesystem::create_directories(renders_dir, ec);
         if (ec)
@@ -2477,7 +2753,7 @@ namespace poseweaver
                     width * 4) == 0)
                 return fail("could not write " + path.string());
         }
-        console_add_line(state, "Cloth fitting debug images saved to renders/");
+        console_add_line(state, "Cloth fitting debug images saved to " + renders_dir.string());
 
         return true;
     }
