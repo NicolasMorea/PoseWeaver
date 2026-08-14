@@ -1394,6 +1394,11 @@ namespace poseweaver
             glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
             glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
             glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
+            glUniform2f(
+                glGetUniformLocation(prog, "viewport_size"),
+                std::max(1.0f, core.viewport(2)),
+                std::max(1.0f, core.viewport(3)));
+            glUniform1f(glGetUniformLocation(prog, "toon_scene_diag"), (float)scene_diag);
 
             glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
             glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
@@ -1413,12 +1418,12 @@ namespace poseweaver
                     glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
                     glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
 
-                    const float outline_width = std::clamp((float)(0.006 * scene_diag), 0.0025f, 0.0200f);
+                    constexpr float kToonOutlinePixels = 3.0f;
                     glEnable(GL_CULL_FACE);
                     glCullFace(GL_FRONT);
                     glDepthMask(GL_FALSE);
                     glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
-                    glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), outline_width);
+                    glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), kToonOutlinePixels);
                     data.meshgl.draw_mesh(true);
 
                     glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
@@ -1904,7 +1909,7 @@ namespace poseweaver
         state.cloth_render_vertex_count = render_mesh->V.rows();
         state.cloth_render_face_count = render_mesh->F.rows();
 
-        constexpr int kOut = 1024;
+        constexpr int kOut = 2048;
         constexpr int kRender = 2048;
 
         GLint old_framebuffer = 0;
@@ -2067,6 +2072,8 @@ namespace poseweaver
         glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
+        glUniform2f(glGetUniformLocation(prog, "viewport_size"), (float)kRender, (float)kRender);
+        glUniform1f(glGetUniformLocation(prog, "toon_scene_diag"), (float)scene_diag);
         glUniform1i(glGetUniformLocation(prog, "is_directional_light"), 0);
         glUniform1i(glGetUniformLocation(prog, "is_shadow_mapping"), 0);
         glUniform1i(glGetUniformLocation(prog, "shadow_pass"), 0);
@@ -2080,12 +2087,12 @@ namespace poseweaver
         glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
         glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
 
-        const float outline_width = std::clamp((float)(0.006 * scene_diag), 0.0025f, 0.0200f);
+        constexpr float kToonOutlinePixels = 6.0f;
         glEnable(GL_CULL_FACE);
         glCullFace(GL_FRONT);
         glDepthMask(GL_FALSE);
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
-        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), outline_width);
+        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), kToonOutlinePixels);
         render_mesh->meshgl.draw_mesh(true);
 
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);

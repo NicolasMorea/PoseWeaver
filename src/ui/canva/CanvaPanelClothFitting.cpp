@@ -69,15 +69,21 @@ namespace poseweaver::ui_canva
         const CanvaLayer& source_layer,
         std::vector<unsigned char> pixels,
         std::vector<unsigned char> warped_pixels,
+        std::vector<unsigned char> pixelated_occluded_pixels,
+        std::vector<unsigned char> unwarped_upscaled_pixels,
         std::vector<unsigned char> debug_pixels,
         std::vector<unsigned char> warped_debug_pixels,
+        std::vector<unsigned char> unfiltered_occlusion_pixels,
         std::vector<unsigned char> occlusion_pixels,
+        std::vector<unsigned char> final_unfiltered_occlusion_pixels,
+        std::vector<unsigned char> final_occlusion_pixels,
         std::vector<unsigned char> scene_occlusion_pixels,
         std::vector<unsigned char> aligned_predicted_depth_occlusion_pixels,
         std::vector<unsigned char> iso_occlusion_pixels,
         std::vector<unsigned char> scene_debug_pixels,
         std::vector<unsigned char> deformation_pixels,
         std::vector<unsigned char> close_to_body_pixels,
+        std::vector<std::vector<unsigned char>> deformation_step_pixels,
         bool include_hidden_output_layers,
         std::string* out_error)
     {
@@ -93,6 +99,18 @@ namespace poseweaver::ui_canva
                 *out_error = "warped fitted pixel buffer is too small";
             return false;
         }
+        if ((int)pixelated_occluded_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "pixelated occluded cloth buffer is too small";
+            return false;
+        }
+        if ((int)unwarped_upscaled_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "unwarped upscaled cloth buffer is too small";
+            return false;
+        }
         if ((int)debug_pixels.size() < canva.width * canva.height * 4)
         {
             if (out_error)
@@ -105,10 +123,28 @@ namespace poseweaver::ui_canva
                 *out_error = "warped debug pixel buffer is too small";
             return false;
         }
+        if ((int)unfiltered_occlusion_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "unfiltered occlusion pixel buffer is too small";
+            return false;
+        }
         if ((int)occlusion_pixels.size() < canva.width * canva.height * 4)
         {
             if (out_error)
-                *out_error = "occlusion pixel buffer is too small";
+                *out_error = "filtered occlusion pixel buffer is too small";
+            return false;
+        }
+        if ((int)final_unfiltered_occlusion_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "final unfiltered occlusion pixel buffer is too small";
+            return false;
+        }
+        if ((int)final_occlusion_pixels.size() < canva.width * canva.height * 4)
+        {
+            if (out_error)
+                *out_error = "final filtered occlusion pixel buffer is too small";
             return false;
         }
         if ((int)scene_occlusion_pixels.size() < canva.width * canva.height * 4)
@@ -146,6 +182,15 @@ namespace poseweaver::ui_canva
             if (out_error)
                 *out_error = "close-to-body pixel buffer is too small";
             return false;
+        }
+        for (const std::vector<unsigned char>& step_pixels : deformation_step_pixels)
+        {
+            if ((int)step_pixels.size() < canva.width * canva.height * 4)
+            {
+                if (out_error)
+                    *out_error = "deformation step pixel buffer is too small";
+                return false;
+            }
         }
         const ImVec2 source_offset = source_layer.offset;
         const float source_scale = source_layer.scale;
@@ -189,15 +234,26 @@ namespace poseweaver::ui_canva
                 canva.layers.insert(insert_pos, std::move(layer));
             };
 
-            add_hidden_layer(std::move(pixels), "Modified cloth", CanvaLayerKind::ClothFitting);
+            add_hidden_layer(std::move(pixelated_occluded_pixels), "Cloth fitting pixelated occluded", CanvaLayerKind::ClothFitting);
+            add_hidden_layer(std::move(unwarped_upscaled_pixels), "Cloth fitting unwarped occlusion-smoothed", CanvaLayerKind::ClothFitting);
             add_hidden_layer(std::move(debug_pixels), "Cloth fitting debug", CanvaLayerKind::ClothFittingDebug);
             add_hidden_layer(std::move(warped_debug_pixels), "Cloth fitting debug (warped)", CanvaLayerKind::ClothFittingWarpedDebug);
-            add_hidden_layer(std::move(occlusion_pixels), "Cloth fitting occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
+            add_hidden_layer(std::move(final_unfiltered_occlusion_pixels), "Cloth fitting final occlusion (unfiltered)", CanvaLayerKind::ClothFittingOcclusionDebug);
+            add_hidden_layer(std::move(final_occlusion_pixels), "Cloth fitting final occlusion (filtered)", CanvaLayerKind::ClothFittingOcclusionDebug);
             add_hidden_layer(std::move(scene_occlusion_pixels), "Cloth fitting true-depth visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
             add_hidden_layer(std::move(aligned_predicted_depth_occlusion_pixels), "Cloth fitting predicted-depth visibility", CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug);
             add_hidden_layer(std::move(iso_occlusion_pixels), "Cloth fitting ISO visibility", CanvaLayerKind::ClothFittingIsoOcclusionDebug);
             add_hidden_layer(std::move(scene_debug_pixels), "Cloth fitting 3D scene debug", CanvaLayerKind::ClothFittingSceneDebug);
             add_hidden_layer(std::move(deformation_pixels), "Cloth fitting deformation", CanvaLayerKind::ClothFittingDeformation);
+            for (int i = 0; i < (int)deformation_step_pixels.size(); ++i)
+            {
+                std::ostringstream name;
+                name << "Cloth fitting deformation step " << std::setw(2) << std::setfill('0') << i;
+                add_hidden_layer(
+                    std::move(deformation_step_pixels[(size_t)i]),
+                    name.str().c_str(),
+                    CanvaLayerKind::ClothFittingDeformation);
+            }
             add_hidden_layer(std::move(close_to_body_pixels), "Cloth fitting close to body", CanvaLayerKind::ClothFittingCloseToBodyDebug);
         }
 
@@ -270,15 +326,21 @@ namespace poseweaver::ui_canva
 
         std::vector<unsigned char> fitted;
         std::vector<unsigned char> warped_fitted;
+        std::vector<unsigned char> pixelated_occluded;
+        std::vector<unsigned char> unwarped_upscaled;
         std::vector<unsigned char> debug;
         std::vector<unsigned char> warped_debug;
+        std::vector<unsigned char> unfiltered_occlusion;
         std::vector<unsigned char> occlusion;
+        std::vector<unsigned char> final_unfiltered_occlusion;
+        std::vector<unsigned char> final_occlusion;
         std::vector<unsigned char> scene_occlusion;
         std::vector<unsigned char> aligned_predicted_depth_occlusion;
         std::vector<unsigned char> iso_occlusion;
         std::vector<unsigned char> scene_debug;
         std::vector<unsigned char> deformation;
         std::vector<unsigned char> close_to_body;
+        std::vector<std::vector<unsigned char>> deformation_steps;
         int tested_count = 0;
         int removed_count = 0;
         float prediction_from_cloth_scale = 1.0f;
@@ -308,15 +370,21 @@ namespace poseweaver::ui_canva
                 prediction_from_cloth_offset_y,
                 fitted,
                 warped_fitted,
+                pixelated_occluded,
+                unwarped_upscaled,
                 debug,
                 warped_debug,
+                unfiltered_occlusion,
                 occlusion,
+                final_unfiltered_occlusion,
+                final_occlusion,
                 scene_occlusion,
                 aligned_predicted_depth_occlusion,
                 iso_occlusion,
                 scene_debug,
                 deformation,
                 close_to_body,
+                deformation_steps,
                 tested_count,
                 removed_count,
                 &fit_err))
@@ -342,15 +410,21 @@ namespace poseweaver::ui_canva
                 source,
                 std::move(fitted),
                 std::move(warped_fitted),
+                std::move(pixelated_occluded),
+                std::move(unwarped_upscaled),
                 std::move(debug),
                 std::move(warped_debug),
+                std::move(unfiltered_occlusion),
                 std::move(occlusion),
+                std::move(final_unfiltered_occlusion),
+                std::move(final_occlusion),
                 std::move(scene_occlusion),
                 std::move(aligned_predicted_depth_occlusion),
                 std::move(iso_occlusion),
                 std::move(scene_debug),
                 std::move(deformation),
                 std::move(close_to_body),
+                std::move(deformation_steps),
                 include_hidden_output_layers,
                 &add_err))
         {
@@ -388,6 +462,11 @@ namespace poseweaver::ui_canva
             || canva.cloth_fitting_waiting_iso
             || canva.cloth_fitting_waiting_depth)
             return;
+        if (canva.cloth_fitting_waiting_source_layer)
+        {
+            canva.cloth_fitting_status = "Waiting for cloth render";
+            return;
+        }
 
         canva.cloth_fitting_status = "Depth testing";
         if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)
@@ -480,6 +559,7 @@ namespace poseweaver::ui_canva
         canva.cloth_fitting_active = true;
         canva.cloth_fitting_waiting_iso = false;
         canva.cloth_fitting_waiting_depth = false;
+        canva.cloth_fitting_waiting_source_layer = false;
         canva.cloth_fitting_iso_request_id = 0;
         canva.cloth_fitting_depth_request_id = 0;
         canva.cloth_fitting_model_input_path = model_input_path;

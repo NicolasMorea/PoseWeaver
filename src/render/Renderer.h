@@ -99,15 +99,21 @@ namespace poseweaver
             float prediction_from_cloth_offset_y,
             std::vector<unsigned char>& out_rgba,
             std::vector<unsigned char>& out_warped_rgba,
+            std::vector<unsigned char>& out_pixelated_occluded_rgba,
+            std::vector<unsigned char>& out_unwarped_upscaled_rgba,
             std::vector<unsigned char>& out_debug_rgba,
             std::vector<unsigned char>& out_warped_debug_rgba,
+            std::vector<unsigned char>& out_unfiltered_occlusion_rgba,
             std::vector<unsigned char>& out_occlusion_rgba,
+            std::vector<unsigned char>& out_final_unfiltered_occlusion_rgba,
+            std::vector<unsigned char>& out_final_occlusion_rgba,
             std::vector<unsigned char>& out_scene_occlusion_rgba,
             std::vector<unsigned char>& out_aligned_predicted_depth_occlusion_rgba,
             std::vector<unsigned char>& out_iso_occlusion_rgba,
             std::vector<unsigned char>& out_scene_debug_rgba,
             std::vector<unsigned char>& out_deformation_rgba,
             std::vector<unsigned char>& out_close_to_body_rgba,
+            std::vector<std::vector<unsigned char>>& out_deformation_steps_rgba,
             int& out_tested_count,
             int& out_removed_count,
             std::string* out_error);
@@ -317,6 +323,7 @@ namespace poseweaver
         std::uint64_t m_cloth_sim_pose_version = 0;
         std::uint64_t m_cloth_sim_garment_version = 0;
         bool m_cloth_sim_require_pose_version_match = true;
+        bool m_cloth_sim_play_on_finish = true;
 
         struct ClothSimJobResult
         {
@@ -347,6 +354,7 @@ namespace poseweaver
         std::string m_cloth_sim_last_error;
 
         bool m_cloth_sim_restart_pending = false;
+        bool m_cloth_sim_restart_play_on_finish = true;
 
         Eigen::MatrixXd m_cloth_sim_reset_frame0;
         bool m_cloth_sim_reset_frame0_valid = false;
@@ -409,6 +417,7 @@ namespace poseweaver
 
         std::string m_smplh_loaded_pose_name;
         Eigen::VectorXd m_smplh_loaded_pose_axis_angle;
+        MatrixX3dRM m_smplh_loaded_direct_vertices;
         std::uint64_t m_smplh_last_pose_reload_request_id = 0;
         bool m_smplh_loaded_pose_mirror_x = false;
         bool m_smplh_mesh_mirror_x = false;
