@@ -590,6 +590,8 @@ namespace poseweaver::ui_canva
             const std::string& gender,
             const std::vector<double>& betas,
             const std::vector<double>& pose,
+            const MatrixX3dRM* direct_vertices,
+            bool mirror_x,
             std::string* out_error)
         {
             std::error_code ec;
@@ -612,8 +614,18 @@ namespace poseweaver::ui_canva
                 const int no_root_fix = 1;
                 cnpy::npz_save(path.string(), "poseweaver_no_root_fix", &no_root_fix, { 1u }, "a");
 
-                const int mirror_x = 1;
-                cnpy::npz_save(path.string(), "poseweaver_mirror_x", &mirror_x, { 1u }, "a");
+                const int mirror_x_flag = mirror_x ? 1 : 0;
+                cnpy::npz_save(path.string(), "poseweaver_mirror_x", &mirror_x_flag, { 1u }, "a");
+
+                if (direct_vertices && direct_vertices->rows() > 0 && direct_vertices->cols() == 3)
+                {
+                    cnpy::npz_save(
+                        path.string(),
+                        "poseweaver_vertices",
+                        direct_vertices->data(),
+                        { (size_t)direct_vertices->rows(), 3u },
+                        "a");
+                }
 
                 std::vector<unsigned char> gender_bytes(gender.begin(), gender.end());
                 if (gender_bytes.empty())
@@ -630,6 +642,60 @@ namespace poseweaver::ui_canva
             }
 
             return true;
+        }
+
+        static bool nlf_flat_vertices_to_poseweaver_scene(
+            const std::vector<double>& vertices_flat,
+            int vertex_count,
+            const std::vector<double>& joints_flat,
+            MatrixX3dRM* out_vertices,
+            std::string* out_error)
+        {
+            if (!out_vertices)
+                return false;
+            out_vertices->resize(0, 0);
+            if (vertex_count <= 0 || vertices_flat.size() < (size_t)vertex_count * 3u)
+            {
+                set_error(out_error, "NLF result is missing fitted vertices3d");
+                return false;
+            }
+
+            Eigen::Vector3d root = Eigen::Vector3d::Zero();
+            if (joints_flat.size() >= 3u)
+            {
+                root = Eigen::Vector3d(
+                    joints_flat[0] / 1000.0,
+                    -joints_flat[1] / 1000.0,
+                    -joints_flat[2] / 1000.0);
+            }
+
+            out_vertices->resize(vertex_count, 3);
+            for (int i = 0; i < vertex_count; ++i)
+            {
+                const size_t k = (size_t)i * 3u;
+                Eigen::Vector3d v(
+                    vertices_flat[k + 0u] / 1000.0,
+                    -vertices_flat[k + 1u] / 1000.0,
+                    -vertices_flat[k + 2u] / 1000.0);
+                v -= root;
+                (*out_vertices)(i, 0) = v.x();
+                (*out_vertices)(i, 1) = v.y();
+                (*out_vertices)(i, 2) = v.z();
+            }
+            return true;
+        }
+
+        static void convert_nlf_pose_to_poseweaver_axes(std::vector<double>& pose)
+        {
+            // NLF SMPL output is in image camera axes: +Y down, +Z forward.
+            // PoseWeaver's generated sketch poses are consumed in +Y up,
+            // camera-facing scene axes, so change the rotation-vector basis
+            // with diag(1, -1, -1) for each local joint rotation.
+            for (size_t i = 0; i + 2u < pose.size(); i += 3u)
+            {
+                pose[i + 1u] = -pose[i + 1u];
+                pose[i + 2u] = -pose[i + 2u];
+            }
         }
     }
 
@@ -679,7 +745,100 @@ namespace poseweaver::ui_canva
             estimate_pose_from_bone_angles(target_joints_for_smpl, rest_joints, model.joint_count());
 
         if (!save_json(out_json_path, rig_json_path, betas_json_path, out_npz_path, gender, betas, pose, target_joints, image_size, out_error)
-            || !save_npz(out_npz_path, gender, betas, pose, out_error))
+            || !save_npz(out_npz_path, gender, betas, pose, nullptr, true, out_error))
+            return false;
+
+        if (out_result)
+        {
+            out_result->json_path = out_json_path;
+            out_result->npz_path = out_npz_path;
+            out_result->gender = gender;
+            out_result->betas = betas;
+            out_result->pose_axis_angle = pose;
+        }
+        return true;
+    }
+
+    bool save_nlf_pose_from_output(
+        const std::filesystem::path& nlf_json_path,
+        const std::filesystem::path& out_json_path,
+        const std::filesystem::path& out_npz_path,
+        SketchPoseBuildResult* out_result,
+        std::string* out_error)
+    {
+        std::string nlf_text;
+        if (!read_text_file(nlf_json_path, &nlf_text, out_error))
+            return false;
+
+        double person_count = 0.0;
+        if (!parse_json_number_field(nlf_text, "person_count", &person_count) || person_count <= 0.0)
+        {
+            set_error(out_error, "NLF result does not contain a detected human");
+            return false;
+        }
+
+        std::vector<RigJoint> rig_joints;
+        if (!parse_rig_joints(nlf_text, &rig_joints, out_error))
+            return false;
+
+        std::vector<double> betas;
+        if (!parse_json_number_array_field(nlf_text, "betas", &betas, out_error))
+            return false;
+        if (betas.empty())
+        {
+            set_error(out_error, "NLF result is missing betas");
+            return false;
+        }
+        constexpr size_t kSmplhBetaCount = 16u;
+        betas.resize(kSmplhBetaCount, 0.0);
+
+        std::vector<double> nlf_pose;
+        if (!parse_json_number_array_field(nlf_text, "pose_axis_angle", &nlf_pose, out_error))
+            return false;
+        if (nlf_pose.empty())
+        {
+            set_error(out_error, "NLF result is missing pose_axis_angle");
+            return false;
+        }
+
+        constexpr size_t kSmplhPoseValueCount = 52u * 3u;
+        std::vector<double> pose(kSmplhPoseValueCount, 0.0);
+        const size_t copy_count = std::min(pose.size(), nlf_pose.size());
+        std::copy(nlf_pose.begin(), nlf_pose.begin() + (std::ptrdiff_t)copy_count, pose.begin());
+        convert_nlf_pose_to_poseweaver_axes(pose);
+
+        std::vector<double> vertices_flat;
+        if (!parse_json_number_array_field(nlf_text, "vertices3d_flat", &vertices_flat, out_error))
+            return false;
+        double vertex_count_d = 0.0;
+        if (!parse_json_number_field(nlf_text, "vertices3d_count", &vertex_count_d))
+        {
+            set_error(out_error, "NLF result is missing vertices3d_count");
+            return false;
+        }
+        std::vector<double> joints_flat;
+        (void)parse_json_number_array_field(nlf_text, "joints3d_flat", &joints_flat, nullptr);
+
+        MatrixX3dRM direct_vertices;
+        if (!nlf_flat_vertices_to_poseweaver_scene(
+                vertices_flat,
+                std::max(0, (int)std::lround(vertex_count_d)),
+                joints_flat,
+                &direct_vertices,
+                out_error))
+            return false;
+
+        std::string gender = parse_json_string_field(nlf_text, "gender");
+        if (gender != "female" && gender != "male" && gender != "neutral")
+            gender = "neutral";
+
+        double image_size_d = 512.0;
+        (void)parse_json_number_field(nlf_text, "image_size", &image_size_d);
+        const int image_size = std::max(2, (int)std::lround(image_size_d));
+
+        const Eigen::MatrixXd target_joints = rig_joints_to_camera_scene_axes(rig_joints, image_size);
+        if (!save_json(out_json_path, nlf_json_path, nlf_json_path, out_npz_path, gender, betas, pose, target_joints, image_size, out_error)
+            || !save_npz(out_npz_path, gender, betas, pose, &direct_vertices, false, out_error))
             return false;
 
         if (out_result)

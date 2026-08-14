@@ -20,7 +20,10 @@ namespace poseweaver
             return true;
 
         const std::filesystem::path base = assets_dir() / "smplh";
-        const std::filesystem::path g = base / ((m_smplh_loaded_gender == SmplType::Male) ? "male" : "female");
+        const std::filesystem::path g = base /
+            (m_smplh_loaded_gender == SmplType::Female
+                ? "female"
+                : (m_smplh_loaded_gender == SmplType::Neutral ? "neutral" : "male"));
 
         const std::filesystem::path candidates[] = {
             base / "uv_layout.obj",

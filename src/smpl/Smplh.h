@@ -57,4 +57,9 @@ namespace poseweaver
 		std::optional<Eigen::VectorXd>* betas_out = nullptr,
 		std::optional<std::string>* gender_out = nullptr,
 		std::string* error_message = nullptr);
+
+	bool smplh_load_pose_npz_vertices(
+		const std::filesystem::path& pose_npz_path,
+		MatrixX3dRM& vertices_out,
+		std::string* error_message = nullptr);
 }

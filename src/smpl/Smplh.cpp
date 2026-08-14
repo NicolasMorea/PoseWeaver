@@ -662,4 +662,39 @@ namespace poseweaver
 
 		return true;
 	}
+
+	bool smplh_load_pose_npz_vertices(
+		const std::filesystem::path& pose_npz_path,
+		MatrixX3dRM& vertices_out,
+		std::string* error_message)
+	{
+		vertices_out.resize(0, 0);
+
+		cnpy::NpyArray vertices;
+		try
+		{
+			vertices = cnpy::npz_load(pose_npz_path.string(), "poseweaver_vertices");
+		}
+		catch (const std::exception& e)
+		{
+			set_error(error_message, std::string("Pose npz has no direct vertices: ") + e.what());
+			return false;
+		}
+
+		if (vertices.word_size != sizeof(double)
+			|| vertices.shape.size() != 2
+			|| vertices.shape[1] != 3)
+		{
+			set_error(error_message, "Pose npz array 'poseweaver_vertices' must be #V x 3 float64");
+			return false;
+		}
+
+		vertices_out.resize((int)vertices.shape[0], 3);
+		const double* data = vertices.data<double>();
+		for (size_t r = 0; r < vertices.shape[0]; ++r)
+			for (size_t c = 0; c < 3; ++c)
+				vertices_out((int)r, (int)c) = data[r * 3u + c];
+
+		return true;
+	}
 }

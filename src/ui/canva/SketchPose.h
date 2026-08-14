@@ -24,4 +24,11 @@ namespace poseweaver::ui_canva
         const std::filesystem::path& out_npz_path,
         SketchPoseBuildResult* out_result,
         std::string* out_error);
+
+    bool save_nlf_pose_from_output(
+        const std::filesystem::path& nlf_json_path,
+        const std::filesystem::path& out_json_path,
+        const std::filesystem::path& out_npz_path,
+        SketchPoseBuildResult* out_result,
+        std::string* out_error);
 }

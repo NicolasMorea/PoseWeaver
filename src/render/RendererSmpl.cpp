@@ -9,6 +9,27 @@
 
 namespace poseweaver
 {
+    namespace
+    {
+        const char* smplh_gender_dir(SmplType gender)
+        {
+            if (gender == SmplType::Female)
+                return "female";
+            if (gender == SmplType::Neutral)
+                return "neutral";
+            return "male";
+        }
+
+        const char* smplh_gender_label(SmplType gender)
+        {
+            if (gender == SmplType::Female)
+                return "Female";
+            if (gender == SmplType::Neutral)
+                return "Neutral";
+            return "Male";
+        }
+    }
+
     bool Renderer::fit_smpl_to_sketch_rig(AppState& state, const Eigen::MatrixXd& vertices)
     {
         state.scene_view_smpl_fit_valid = false;
@@ -139,7 +160,7 @@ namespace poseweaver
         if (m_smplh_loaded && m_smplh_loaded_gender == gender)
             return true;
 
-        const std::filesystem::path model_path = assets_dir() / "smplh" / ((gender == SmplType::Male) ? "male" : "female") / "model.npz";
+        const std::filesystem::path model_path = assets_dir() / "smplh" / smplh_gender_dir(gender) / "model.npz";
         std::string err;
         if (!m_smplh_model.load_from_npz(model_path, &err))
         {
@@ -149,7 +170,7 @@ namespace poseweaver
             return false;
         }
 
-        console_add_line(state, std::string("Loaded SMPLH model: ") + ((gender == SmplType::Male) ? "male" : "female"));
+        console_add_line(state, std::string("Loaded SMPLH model: ") + smplh_gender_dir(gender));
         console_add_line(state,
             std::string("SMPLH mesh: ")
                 + std::to_string(m_smplh_model.vertex_count()) + " vertices, "
@@ -182,6 +203,7 @@ namespace poseweaver
         m_smplh_deform_dirty = true;
         m_smplh_loaded_pose_name.clear();
         m_smplh_loaded_pose_axis_angle.resize(0);
+        m_smplh_loaded_direct_vertices.resize(0, 0);
         m_smplh_last_pose_reload_request_id = 0;
         m_smplh_loaded_pose_mirror_x = false;
         m_smplh_mesh_mirror_x = false;
@@ -195,7 +217,7 @@ namespace poseweaver
     void Renderer::ensure_smplh_mesh_loaded(AppState& state)
     {
         const SmplType gender = state.selection.gender;
-        const std::string desired = (gender == SmplType::Male) ? "SMPLH:Male" : "SMPLH:Female";
+        const std::string desired = std::string("SMPLH:") + smplh_gender_label(gender);
         auto& data = m_viewer.data(m_smplh_mesh_index);
 
         const bool want_visible = state.show_smpl_character;
@@ -262,6 +284,7 @@ namespace poseweaver
                 m_smplh_loaded_pose_name = pose_name;
                 m_smplh_last_pose_reload_request_id = state.pose_asset_reload_request_id;
                 m_smplh_loaded_pose_axis_angle.resize(0);
+                m_smplh_loaded_direct_vertices.resize(0, 0);
                 m_smplh_loaded_pose_mirror_x = false;
                 m_pose_version++;
 
@@ -283,6 +306,21 @@ namespace poseweaver
                     {
                         m_smplh_loaded_pose_axis_angle = std::move(pose_axis_angle);
                         m_smplh_loaded_pose_mirror_x = mirror_x;
+                        MatrixX3dRM direct_vertices;
+                        std::string direct_vertices_err;
+                        if (smplh_load_pose_npz_vertices(pose_path, direct_vertices, &direct_vertices_err))
+                        {
+                            if (direct_vertices.rows() == m_smplh_model.vertex_count()
+                                && direct_vertices.cols() == 3)
+                            {
+                                m_smplh_loaded_direct_vertices = std::move(direct_vertices);
+                                console_add_line(state, "Pose direct vertices loaded: " + pose_name);
+                            }
+                            else
+                            {
+                                console_add_line(state, "Pose direct vertices ignored: vertex count does not match model");
+                            }
+                        }
                         console_add_line(state, std::string("Pose loaded: ") + pose_name);
                     }
                 }
@@ -320,19 +358,28 @@ namespace poseweaver
         bool recomputed_vertices = false;
         if (m_smplh_deform_dirty || m_smplh_vertices.rows() == 0)
         {
-            MatrixX3dRM V_skinned;
-            std::string eval_err;
-            if (!smplh_evaluate_lbs(m_smplh_model, m_smplh_params, V_skinned, &eval_err))
+            Eigen::MatrixXd display_vertices;
+            if (m_smplh_loaded_direct_vertices.rows() == m_smplh_model.vertex_count()
+                && m_smplh_loaded_direct_vertices.cols() == 3)
             {
-                std::fprintf(stderr, "[PoseWeaver] SMPLH LBS eval failed: %s\n", eval_err.c_str());
-                data.clear();
-                data.set_visible(false);
-                m_smplh_mesh_name.clear();
-                return;
+                display_vertices = m_smplh_loaded_direct_vertices;
+            }
+            else
+            {
+                MatrixX3dRM V_skinned;
+                std::string eval_err;
+                if (!smplh_evaluate_lbs(m_smplh_model, m_smplh_params, V_skinned, &eval_err))
+                {
+                    std::fprintf(stderr, "[PoseWeaver] SMPLH LBS eval failed: %s\n", eval_err.c_str());
+                    data.clear();
+                    data.set_visible(false);
+                    m_smplh_mesh_name.clear();
+                    return;
+                }
+                display_vertices = V_skinned;
             }
             if (m_smplh_loaded_pose_mirror_x)
-                V_skinned.col(0) *= -1.0;
-            Eigen::MatrixXd display_vertices = V_skinned;
+                display_vertices.col(0) *= -1.0;
             (void)fit_smpl_to_sketch_rig(state, display_vertices);
             apply_smpl_scene_transform(state, display_vertices);
             m_smplh_vertices = std::move(display_vertices);
