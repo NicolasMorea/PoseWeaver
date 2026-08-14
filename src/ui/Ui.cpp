@@ -10,9 +10,6 @@ namespace poseweaver
 {
     void Ui::draw(AppState& state, const AssetIndex& assets, Renderer& renderer, const UiFrameInfo& frame)
     {
-        ImGui::GetIO().MouseDrawCursor = false;
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
-
         state.canva_tab_active = false;
 
         draw_main_menu(state, assets);
@@ -86,9 +83,6 @@ namespace poseweaver
             ImGui::InvisibleButton("##splitter", splitter_size);
             const bool hovered = ImGui::IsItemHovered();
             const bool active = ImGui::IsItemActive();
-            if (hovered || active)
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImVec2 p0 = ImGui::GetWindowPos();
             const ImVec2 p1 = ImVec2(p0.x + splitter_size.x, p0.y + splitter_size.y);
@@ -126,9 +120,6 @@ namespace poseweaver
             ImGui::InvisibleButton("##hsplitter", splitter_h_size);
             const bool hovered = ImGui::IsItemHovered();
             const bool active = ImGui::IsItemActive();
-            if (hovered || active)
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-
             ImDrawList* dl = ImGui::GetWindowDrawList();
             const ImVec2 p0 = ImGui::GetWindowPos();
             const ImVec2 p1 = ImVec2(p0.x + splitter_h_size.x, p0.y + splitter_h_size.y);
@@ -148,12 +139,5 @@ namespace poseweaver
             draw_console(state, renderer);
         }
 
-        if (state.soft_cursor_enabled)
-        {
-            const ImVec2 mouse = ImGui::GetIO().MousePos;
-            ImDrawList* fg = ImGui::GetForegroundDrawList();
-            fg->AddCircleFilled(mouse, 4.0f, IM_COL32(255, 255, 255, 230));
-            fg->AddCircle(mouse, 4.5f, IM_COL32(0, 0, 0, 180), 0, 1.2f);
-        }
     }
 }

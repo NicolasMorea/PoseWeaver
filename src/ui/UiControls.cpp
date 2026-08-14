@@ -499,6 +499,7 @@ namespace poseweaver
 
                         if (start_button || start_enter)
                         {
+                            state.cloth_simulate_play_on_finish = true;
                             state.cloth_simulate_request_id++;
                             state.controls.simulating = true;
                             state.controls.playing = false;

@@ -386,20 +386,6 @@ namespace poseweaver::ui_canva
                     canva.drawing = false;
                 }
 
-                // Custom cursor: brush size preview circle.
-                if (hovered && in_canvas)
-                {
-                    const float r_px = std::max(0.5f, canva.brush_radius * canva.zoom);
-                    const ImU32 outline = IM_COL32(0, 0, 0, 210);
-
-                    ImVec4 solid = canva.brush_color;
-                    solid.w = 1.0f;
-                    const ImU32 fill = ImGui::ColorConvertFloat4ToU32(solid);
-
-                    dl->AddCircle(mouse, r_px, outline, 0, 1.25f);
-                    dl->AddCircleFilled(mouse, 1.5f, outline);
-                    dl->AddCircleFilled(mouse, 1.0f, fill);
-                }
             }
 
             dl->PopClipRect();

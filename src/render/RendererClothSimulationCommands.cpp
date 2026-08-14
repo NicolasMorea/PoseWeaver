@@ -903,6 +903,8 @@ namespace poseweaver
         m_collision_proxy_sim_frames.clear();
         m_collision_proxy_sim_F.resize(0, 3);
         m_cloth_sim_restart_pending = false;
+        m_cloth_sim_play_on_finish = true;
+        m_cloth_sim_restart_play_on_finish = true;
         m_cloth_sim_reset_frame0_valid = false;
         m_cloth_sim_preview_state.reset();
         m_cloth_sim_preview_enabled.reset();
@@ -957,6 +959,8 @@ namespace poseweaver
         const int sequence_frame_rate = std::clamp(state.cloth_simulate_sequence_frame_rate, 1, 240);
         const int sequence_transition_frames = std::clamp(state.cloth_simulate_sequence_transition_frames, 0, 240);
         const bool sequence_initial_smooth = state.cloth_simulate_sequence_initial_smooth;
+        const bool play_on_finish = state.cloth_simulate_play_on_finish;
+        state.cloth_simulate_play_on_finish = true;
         state.cloth_simulate_continue_from_last_frame = false;
         state.cloth_simulate_duration_override_seconds = -1.0f;
         state.cloth_simulate_max_frames_override = 0;
@@ -973,6 +977,7 @@ namespace poseweaver
         if (m_cloth_sim_job_running)
         {
             m_cloth_sim_restart_pending = true;
+            m_cloth_sim_restart_play_on_finish = play_on_finish;
             process_cloth_cancel_simulation(state);
             console_add_line(state, "Simulation restart requested; cancel requested");
             return;
@@ -1535,6 +1540,7 @@ namespace poseweaver
         m_cloth_sim_pose_version = m_pose_version;
         m_cloth_sim_garment_version = m_garment_version;
         m_cloth_sim_require_pose_version_match = !sequence_override_ready;
+        m_cloth_sim_play_on_finish = play_on_finish;
 
         m_cloth_sim_preview_state = std::make_shared<ClothSimPreviewState>();
         m_cloth_sim_preview_last_seq_applied = 0;
@@ -2227,6 +2233,7 @@ namespace poseweaver
             state.controls.current_frame = 0;
 
             m_cloth_sim_restart_pending = false;
+            state.cloth_simulate_play_on_finish = m_cloth_sim_restart_play_on_finish;
             console_add_line(state, "Restarting cloth simulation…");
             process_cloth_simulate(state);
             return;
@@ -2295,7 +2302,7 @@ namespace poseweaver
         else
         {
             state.controls.current_frame = 0;
-            state.controls.playing = (state.controls.frame_count > 1);
+            state.controls.playing = m_cloth_sim_play_on_finish && (state.controls.frame_count > 1);
         }
 
         console_add_line(state,
