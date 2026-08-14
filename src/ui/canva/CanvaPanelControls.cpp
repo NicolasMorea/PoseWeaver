@@ -129,10 +129,6 @@ namespace poseweaver::ui_canva
                 "Image/video files (*.png, *.jpg, *.jpeg, *.gif, *.mp4)",
                 0);
 
-            // The blocking dialog can desync GLFW's cached cursor mode from
-            // the actual X11/OS cursor state. Force a full restore next frame.
-            state.cursor_restore_request = true;
-
             if (path && path[0] != '\0')
             {
                 std::string err;
@@ -190,7 +186,9 @@ namespace poseweaver::ui_canva
 
         const bool can_predict_2d_pose =
             state.vitpose.service != nullptr
-            && state.vitpose.status == ModelInferenceStatus::Ready;
+            && !canva.vitpose_pending_inference
+            && state.vitpose.status != ModelInferenceStatus::Loading
+            && state.vitpose.status != ModelInferenceStatus::Busy;
         ImGui::BeginDisabled(!can_predict_2d_pose);
         if (ImGui::Button("Predict 2D Pose"))
         {
@@ -203,26 +201,24 @@ namespace poseweaver::ui_canva
                 const std::uint64_t request_id = state.vitpose.next_request_id++;
                 state.vitpose.last_sketch_path = sketch_path.string();
 
-                std::string request_error;
-                if (state.vitpose.service->request_inference(
-                        request_id,
-                        sketch_path,
-                        output_path,
-                        &request_error))
+                canva.vitpose_pending_inference = true;
+                canva.vitpose_pending_request_id = request_id;
+                canva.vitpose_pending_sketch_path = sketch_path;
+                canva.vitpose_pending_output_path = output_path;
+
+                if (state.vitpose.status == ModelInferenceStatus::Ready)
                 {
-                    state.vitpose.status = ModelInferenceStatus::Busy;
-                    state.vitpose.active_request_id = request_id;
-                    state.vitpose.message = "Predicting 2D pose with VitPose...";
-                    console_add_line(state, "Canva: Queued VitPose inference from "
-                        + sketch_path.string());
+                    (void)canva_try_submit_pending_vitpose(state, canva);
                 }
                 else
                 {
-                    state.vitpose.status = ModelInferenceStatus::Error;
-                    state.vitpose.message = request_error.empty()
-                        ? "Failed to queue inference"
-                        : request_error;
-                    console_add_line(state, "VitPose: " + state.vitpose.message);
+                    state.vitpose.message = "Loading VitPose for 2D pose prediction...";
+                    state.vitpose.status = ModelInferenceStatus::Loading;
+                    state.vitpose.service->start(
+                        poseweaver::assets_dir() / "VitPose",
+                        std::filesystem::path(POSEWEAVER_VITPOSE_WORKER),
+                        "vitpose_base_coco_aic_mpii.pth");
+                    console_add_line(state, "Canva: Loading VitPose for 2D pose prediction");
                 }
             }
             else
@@ -235,6 +231,64 @@ namespace poseweaver::ui_canva
 
         if (!state.vitpose.last_output_path.empty())
             ImGui::TextWrapped("Output: %s", state.vitpose.last_output_path.c_str());
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("NLF");
+        ImGui::SameLine();
+        ImGui::TextColored(model_inference_status_color(state.nlf.status), "%s",
+            model_inference_status_text(state.nlf.status));
+
+        if (!state.nlf.message.empty())
+            ImGui::TextWrapped("%s", state.nlf.message.c_str());
+
+        const bool can_predict_nlf_bones =
+            state.nlf.service != nullptr &&
+            state.nlf.status == ModelInferenceStatus::Ready;
+        ImGui::BeginDisabled(!can_predict_nlf_bones);
+        if (ImGui::Button("Predict Bones with NLF"))
+        {
+            std::filesystem::path sketch_path;
+            std::string err;
+            if (canva_save_model_input_png(canva, &sketch_path, &err))
+            {
+                const std::filesystem::path output_path =
+                    sketch_path.parent_path() / "sketch_nlf.json";
+                const std::uint64_t request_id = state.nlf.next_request_id++;
+
+                state.nlf.last_sketch_path = sketch_path.string();
+                console_add_line(state, std::string("Canva: Saved normalized sketch for NLF: ") + sketch_path.string());
+
+                std::string request_err;
+                if (state.nlf.service->request_inference(request_id, sketch_path, output_path, &request_err))
+                {
+                    state.nlf.status = ModelInferenceStatus::Busy;
+                    state.nlf.active_request_id = request_id;
+                    state.nlf.message = "Predicting bones with NLF...";
+                    canva.bone_prediction_debug_mode = 3;
+                    canva.bone_prediction_nlf_confidence = -1.0f;
+                    canva.bone_prediction_debug_status = "NLF running";
+                }
+                else
+                {
+                    state.nlf.status = ModelInferenceStatus::Error;
+                    state.nlf.message = request_err.empty() ? "Failed to queue inference" : request_err;
+                    canva.bone_prediction_debug_mode = 4;
+                    canva.bone_prediction_debug_status = "NLF queue failed";
+                    console_add_line(state, "NLF: " + state.nlf.message);
+                }
+            }
+            else
+            {
+                canva.bone_prediction_debug_mode = 4;
+                canva.bone_prediction_debug_status = "NLF preprocessing failed";
+                console_add_line(state, std::string("Canva: NLF preprocessing failed: ")
+                    + (err.empty() ? "(unknown error)" : err));
+            }
+        }
+        ImGui::EndDisabled();
+
+        if (!state.nlf.last_output_path.empty())
+            ImGui::TextWrapped("Output: %s", state.nlf.last_output_path.c_str());
 
         ImGui::Separator();
         ImGui::TextUnformatted("Sketch2Rig");
@@ -402,8 +456,6 @@ namespace poseweaver::ui_canva
                 "UV PNG files (*.png)",
                 0);
 
-            state.cursor_restore_request = true;
-
             if (path && path[0] != '\0')
             {
                 std::string err;
@@ -566,7 +618,6 @@ namespace poseweaver::ui_canva
                 "ISO NPZ files (*.npz)",
                 0);
 
-            state.cursor_restore_request = true;
             if (path && path[0] != '\0')
             {
                 std::string err;
@@ -757,12 +808,59 @@ namespace poseweaver::ui_canva
             ImGui::TextUnformatted("ISO displacement: projecting offsets...");
 
         ImGui::Separator();
-        const bool can_extract_pose =
-            !canva.extract_pose_active &&
+        const char* bone_prediction_items[] = { "Custom", "NLF" };
+        int preferred_bone_prediction = std::clamp(state.canva_preferred_bone_prediction, 0, 1);
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::Combo(
+                "preferred bone predition",
+                &preferred_bone_prediction,
+                bone_prediction_items,
+                (int)(sizeof(bone_prediction_items) / sizeof(bone_prediction_items[0]))))
+        {
+            state.canva_preferred_bone_prediction = std::clamp(preferred_bone_prediction, 0, 1);
+        }
+        ImVec4 bone_prediction_debug_color = ImVec4(0.72f, 0.72f, 0.72f, 1.0f);
+        switch (canva.bone_prediction_debug_mode)
+        {
+        case 1:
+            bone_prediction_debug_color = ImVec4(0.20f, 0.78f, 0.38f, 1.0f);
+            break;
+        case 2:
+            bone_prediction_debug_color = ImVec4(0.95f, 0.62f, 0.18f, 1.0f);
+            break;
+        case 3:
+            bone_prediction_debug_color = ImVec4(0.34f, 0.60f, 1.0f, 1.0f);
+            break;
+        case 4:
+            bone_prediction_debug_color = ImVec4(0.95f, 0.25f, 0.22f, 1.0f);
+            break;
+        default:
+            break;
+        }
+        ImGui::TextColored(
+            bone_prediction_debug_color,
+            "Bone prediction: %s",
+            canva.bone_prediction_debug_status.empty()
+                ? "Custom pipeline"
+                : canva.bone_prediction_debug_status.c_str());
+        if (canva.bone_prediction_nlf_confidence >= 0.0f)
+        {
+            ImGui::SameLine();
+            ImGui::Text("(NLF %.3f)", (double)canva.bone_prediction_nlf_confidence);
+        }
+
+        const bool custom_bone_models_ready =
             state.sketch2rig.service != nullptr &&
             state.sketch2betas.service != nullptr &&
             state.sketch2rig.status == ModelInferenceStatus::Ready &&
             state.sketch2betas.status == ModelInferenceStatus::Ready;
+        const bool nlf_bone_model_ready =
+            state.nlf.service != nullptr &&
+            state.nlf.status == ModelInferenceStatus::Ready;
+        const bool can_extract_pose =
+            !canva.extract_pose_active &&
+            custom_bone_models_ready &&
+            (state.canva_preferred_bone_prediction == 0 || nlf_bone_model_ready);
         ImGui::BeginDisabled(!can_extract_pose);
         if (ImGui::Button("Extract Pose"))
         {
@@ -1021,10 +1119,18 @@ namespace poseweaver::ui_canva
             "Liquify force",
             &state.cloth_fitting_warp_force,
             0.0f,
-            2.0f,
+            6.0f,
             "%.3f");
         state.cloth_fitting_warp_force =
-            std::clamp(state.cloth_fitting_warp_force, 0.0f, 4.0f);
+            std::clamp(state.cloth_fitting_warp_force, 0.0f, 6.0f);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::InputInt(
+            "Liquify steps",
+            &state.cloth_fitting_warp_steps,
+            1,
+            4);
+        state.cloth_fitting_warp_steps =
+            std::clamp(state.cloth_fitting_warp_steps, 1, 32);
 
         if (ImGui::Button("Add layer"))
         {

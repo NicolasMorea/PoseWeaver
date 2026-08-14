@@ -237,6 +237,7 @@ namespace poseweaver::ui_canva
             && (canva.cloth_fitting_waiting_iso || canva.cloth_fitting_waiting_depth);
         const bool fitting_working =
             canva.cloth_fitting_active
+            && !canva.cloth_fitting_waiting_source_layer
             && !canva.cloth_fitting_waiting_iso
             && !canva.cloth_fitting_waiting_depth;
         const bool show_fitting_steps =
@@ -252,16 +253,30 @@ namespace poseweaver::ui_canva
                 : 0)
             : -1;
 
-        const bool infer_done = done || pose_working || sim_working || render_working || fitting_infer_working || fitting_working;
-        const bool pose_done = done || sim_working || render_working || fitting_infer_working || fitting_working;
-        const bool sequence_done = done || render_working
-            || fitting_infer_working || fitting_working
+        const auto step_finished = [&](GenerateClothStepId step)
+        {
+            return canva.generate_cloth_step_timings[(size_t)generate_cloth_step_index(step)].finished;
+        };
+        const bool infer_done = done
+            || step_finished(GenerateClothStepId::Inference)
+            || pose_working || sim_working || render_working || fitting_infer_working || fitting_working;
+        const bool pose_done = done
+            || step_finished(GenerateClothStepId::Pose)
+            || sim_working || render_working || fitting_infer_working || fitting_working;
+        const bool sequence_done = done
+            || step_finished(GenerateClothStepId::Sequence)
+            || render_working || fitting_working
             || (sim_working && state.controls.sim_pipeline_stage > 0);
-        const bool proxy_done = done || render_working
-            || fitting_infer_working || fitting_working
+        const bool proxy_done = done
+            || step_finished(GenerateClothStepId::Proxy)
+            || render_working || fitting_working
             || (sim_working && state.controls.sim_pipeline_stage > 1);
-        const bool sim_done = done || render_working || fitting_infer_working || fitting_working;
-        const bool render_done = done || fitting_infer_working || fitting_working;
+        const bool sim_done = done
+            || step_finished(GenerateClothStepId::Simulation)
+            || render_working || fitting_working;
+        const bool render_done = done
+            || step_finished(GenerateClothStepId::Render)
+            || fitting_working;
         const bool fitting_infer_done = done || fitting_working
             || canva.generate_cloth_step_timings[(size_t)generate_cloth_step_index(GenerateClothStepId::FittingInference)].finished;
         const bool fitting_done = done
@@ -341,12 +356,24 @@ namespace poseweaver::ui_canva
         {
             for (int i = 0; i < step_count; ++i)
             {
+                const GenerateClothStepTiming& timing = canva.generate_cloth_step_timings[(size_t)i];
                 if (i < failed_step)
-                    steps[i].status = GenerateClothStepStatus::Done;
+                {
+                    if (timing.finished)
+                        steps[i].status = GenerateClothStepStatus::Done;
+                    else if (timing.started)
+                        steps[i].status = GenerateClothStepStatus::Working;
+                    else
+                        steps[i].status = GenerateClothStepStatus::NotStarted;
+                }
                 else if (i == failed_step)
+                {
                     steps[i].status = GenerateClothStepStatus::Failed;
+                }
                 else
+                {
                     steps[i].status = GenerateClothStepStatus::NotStarted;
+                }
             }
         }
 

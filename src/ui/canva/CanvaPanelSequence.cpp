@@ -2,6 +2,7 @@
 
 #include "core/Paths.h"
 #include "render/Renderer.h"
+#include "postproc/PredictionFilters.h"
 #include "smpl/Smplh.h"
 #include "ui/canva/CanvaPreprocess.h"
 #include "ui/canva/SketchPose.h"
@@ -132,10 +133,8 @@ namespace poseweaver::ui_canva
             }
 
             const float s = std::min(
-                1.0f,
-                std::min(
-                    (float)canvas_w / (float)std::max(1, iw),
-                    (float)canvas_h / (float)std::max(1, ih)));
+                (float)canvas_w / (float)std::max(1, iw),
+                (float)canvas_h / (float)std::max(1, ih));
             const int dw = std::clamp((int)std::floor((float)iw * s + 0.5f), 1, canvas_w);
             const int dh = std::clamp((int)std::floor((float)ih * s + 0.5f), 1, canvas_h);
             std::vector<unsigned char> resized =
@@ -421,6 +420,7 @@ namespace poseweaver::ui_canva
         {
             if (!canva.cloth_fitting_model_input_path.empty())
                 canva.sequence_model_input_path = canva.cloth_fitting_model_input_path;
+            canva.sequence_rig_json_path = canva.cloth_fitting_rig_json_path;
             if (!canva.cloth_fitting_iso_path.empty())
                 canva.sequence_iso_path = canva.cloth_fitting_iso_path;
             if (!canva.cloth_fitting_depth_path.empty())
@@ -1236,6 +1236,37 @@ namespace poseweaver::ui_canva
                 return false;
             }
 
+            std::filesystem::path filtered_iso_path;
+            std::filesystem::path filtered_depth_path;
+            std::string filter_err;
+            if (!poseweaver::postproc::filter_isomap_prediction(
+                    frame.iso_path,
+                    &filtered_iso_path,
+                    &filter_err))
+            {
+                frame.inference_status = CanvaFrameInferenceStatus::Failed;
+                canva.sequence_waiting_sketch_inference = false;
+                canva.sequence_status = "Failed";
+                console_add_line(state, "Sequence: failed to filter ISO prediction: "
+                    + (filter_err.empty() ? std::string("(unknown error)") : filter_err));
+                return false;
+            }
+            filter_err.clear();
+            if (!poseweaver::postproc::filter_depth_prediction(
+                    frame.depth_path,
+                    &filtered_depth_path,
+                    &filter_err))
+            {
+                frame.inference_status = CanvaFrameInferenceStatus::Failed;
+                canva.sequence_waiting_sketch_inference = false;
+                canva.sequence_status = "Failed";
+                console_add_line(state, "Sequence: failed to filter depth prediction: "
+                    + (filter_err.empty() ? std::string("(unknown error)") : filter_err));
+                return false;
+            }
+            frame.iso_path = filtered_iso_path;
+            frame.depth_path = filtered_depth_path;
+
             SketchPoseBuildResult result;
             std::string err;
             if (!save_sketch_pose_from_outputs(
@@ -1293,6 +1324,7 @@ namespace poseweaver::ui_canva
             state.controls.current_frame = std::max(0, state.controls.frame_count - 1);
             state.controls.playing = false;
             state.controls.simulating = true;
+            state.cloth_simulate_play_on_finish = false;
             state.cloth_simulate_request_id++;
 
             canva.sequence_waiting_simulation = true;
@@ -1624,6 +1656,7 @@ namespace poseweaver::ui_canva
             state.controls.current_frame = 0;
             state.controls.playing = false;
             state.controls.simulating = true;
+            state.cloth_simulate_play_on_finish = false;
             state.show_smpl = true;
             state.show_smpl_character = true;
             state.show_garment_mesh = true;
@@ -1661,6 +1694,7 @@ namespace poseweaver::ui_canva
             CanvaSequenceTrackFrame& sketch = canva.sequence_sketch_frames[(size_t)sketch_index];
             canva.sequence_active_sketch_index = sketch_index;
             canva.sequence_model_input_path = sketch.model_input_path;
+            canva.sequence_rig_json_path = sketch.rig_json_path;
             canva.sequence_iso_path = sketch.iso_path;
             canva.sequence_depth_path = sketch.depth_path;
             state.controls.current_frame = std::clamp(
@@ -1980,6 +2014,7 @@ namespace poseweaver::ui_canva
                 true);
             sketch_frame.inference_status = CanvaFrameInferenceStatus::Done;
             sketch_frame.model_input_path = canva.sequence_model_input_path;
+            sketch_frame.rig_json_path = canva.sequence_rig_json_path;
             sketch_frame.iso_path = canva.sequence_iso_path;
             sketch_frame.depth_path = canva.sequence_depth_path;
             sketch_frame.gender = cloth_frame.gender;
@@ -1999,6 +2034,7 @@ namespace poseweaver::ui_canva
                     : canva.sequence_current_frame_dir;
             sketch_frame.inference_status = CanvaFrameInferenceStatus::Done;
             sketch_frame.model_input_path = canva.sequence_model_input_path;
+            sketch_frame.rig_json_path = canva.sequence_rig_json_path;
             sketch_frame.iso_path = canva.sequence_iso_path;
             sketch_frame.depth_path = canva.sequence_depth_path;
             if (std::find(
@@ -2094,7 +2130,7 @@ namespace poseweaver::ui_canva
                 return;
             }
 
-            state.controls.playing = true;
+            state.controls.playing = false;
             state.show_smpl = true;
             state.show_smpl_character = true;
             state.show_garment_mesh = true;
@@ -2190,7 +2226,7 @@ namespace poseweaver::ui_canva
                 canva.sequence_fitting_render_index = -1;
                 canva.sequence_sim_batch_amount = 0;
                 canva.sequence_status = "Done";
-                state.controls.playing = true;
+                state.controls.playing = false;
                 console_add_line(state, "Sequence: generation complete");
             }
         }
@@ -2301,6 +2337,8 @@ namespace poseweaver::ui_canva
             && state.sketch2rig.status == ModelInferenceStatus::Ready
             && state.sketch2betas.service != nullptr
             && state.sketch2betas.status == ModelInferenceStatus::Ready
+            && (state.canva_preferred_bone_prediction == 0
+                || (state.nlf.service != nullptr && state.nlf.status == ModelInferenceStatus::Ready))
             && state.sketch2iso.service != nullptr
             && state.sketch2iso.status == ModelInferenceStatus::Ready
             && state.sketch2depth.service != nullptr

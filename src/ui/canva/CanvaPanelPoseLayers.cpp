@@ -78,6 +78,65 @@ namespace poseweaver::ui_canva
         return true;
     }
 
+    static bool canva_parse_json_number_field(const std::string& text, const char* key, double* out_value)
+    {
+        if (!out_value)
+            return false;
+        const std::string needle = std::string("\"") + key + "\"";
+        size_t pos = text.find(needle);
+        if (pos == std::string::npos)
+            return false;
+        pos = text.find(':', pos + needle.size());
+        if (pos == std::string::npos)
+            return false;
+        ++pos;
+        return canva_parse_json_number(text, &pos, out_value);
+    }
+
+    static void canva_parse_sketch2rig_image_dimensions(const std::string& text, int* out_width, int* out_height)
+    {
+        if (!out_width || !out_height)
+            return;
+
+        double width = 0.0;
+        double height = 0.0;
+        if (canva_parse_json_number_field(text, "image_width", &width)
+            && canva_parse_json_number_field(text, "image_height", &height))
+        {
+            *out_width = std::clamp((int)std::lround(width), 1, 32768);
+            *out_height = std::clamp((int)std::lround(height), 1, 32768);
+            return;
+        }
+
+        double image_size = 0.0;
+        if (canva_parse_json_number_field(text, "image_size", &image_size))
+        {
+            const int size = std::clamp((int)std::lround(image_size), 1, 32768);
+            *out_width = size;
+            *out_height = size;
+            return;
+        }
+
+        const std::string image_size_key = "\"image_size\"";
+        const size_t image_size_pos = text.find(image_size_key);
+        const size_t object_begin = image_size_pos == std::string::npos
+            ? std::string::npos
+            : text.find('{', image_size_pos + image_size_key.size());
+        const size_t object_end = object_begin == std::string::npos
+            ? std::string::npos
+            : text.find('}', object_begin + 1);
+        if (object_begin != std::string::npos && object_end != std::string::npos)
+        {
+            const std::string object = text.substr(object_begin, object_end - object_begin + 1);
+            if (canva_parse_json_number_field(object, "width", &width)
+                && canva_parse_json_number_field(object, "height", &height))
+            {
+                *out_width = std::clamp((int)std::lround(width), 1, 32768);
+                *out_height = std::clamp((int)std::lround(height), 1, 32768);
+            }
+        }
+    }
+
     static bool canva_parse_json_position_field(const std::string& object, float* out_x, float* out_y)
     {
         const std::string needle = "\"position\":";
@@ -109,11 +168,17 @@ namespace poseweaver::ui_canva
     static bool canva_load_sketch2rig_joints(
         const std::filesystem::path& json_path,
         std::vector<Sketch2RigJoint2d>* out_joints,
+        int* out_image_width,
+        int* out_image_height,
         std::string* out_error)
     {
         if (!out_joints)
             return false;
         out_joints->clear();
+        if (out_image_width)
+            *out_image_width = 0;
+        if (out_image_height)
+            *out_image_height = 0;
 
         std::ifstream in(json_path);
         if (!in)
@@ -126,6 +191,7 @@ namespace poseweaver::ui_canva
         std::ostringstream ss;
         ss << in.rdbuf();
         const std::string text = ss.str();
+        canva_parse_sketch2rig_image_dimensions(text, out_image_width, out_image_height);
 
         const size_t joints_key = text.find("\"joints\"");
         if (joints_key == std::string::npos)
@@ -213,7 +279,12 @@ namespace poseweaver::ui_canva
         return true;
     }
 
-    static void canva_project_sketch2rig_joints(std::vector<Sketch2RigJoint2d>& joints, int w, int h)
+    static void canva_project_sketch2rig_joints(
+        std::vector<Sketch2RigJoint2d>& joints,
+        int layer_w,
+        int layer_h,
+        int source_w,
+        int source_h)
     {
         float min_x = std::numeric_limits<float>::max();
         float min_y = std::numeric_limits<float>::max();
@@ -232,6 +303,8 @@ namespace poseweaver::ui_canva
 
         const bool looks_normalized =
             min_x >= -0.25f && min_y >= -0.25f && max_x <= 1.25f && max_y <= 1.25f;
+        const int raster_w = source_w > 1 ? source_w : layer_w;
+        const int raster_h = source_h > 1 ? source_h : layer_h;
 
         if (looks_normalized)
         {
@@ -239,27 +312,49 @@ namespace poseweaver::ui_canva
             {
                 if (!joint.valid)
                     continue;
-                joint.x = std::clamp(joint.x, 0.0f, 1.0f) * (float)(w - 1);
-                joint.y = std::clamp(joint.y, 0.0f, 1.0f) * (float)(h - 1);
+                joint.x = std::clamp(joint.x, 0.0f, 1.0f) * (float)(raster_w - 1);
+                joint.y = std::clamp(joint.y, 0.0f, 1.0f) * (float)(raster_h - 1);
             }
-            return;
+        }
+        else if (source_w > 1 && source_h > 1)
+        {
+            for (auto& joint : joints)
+            {
+                if (!joint.valid)
+                    continue;
+                joint.x = std::clamp(joint.x, 0.0f, (float)(source_w - 1));
+                joint.y = std::clamp(joint.y, 0.0f, (float)(source_h - 1));
+            }
+        }
+        else
+        {
+            const float dx = std::max(1e-6f, max_x - min_x);
+            const float dy = std::max(1e-6f, max_y - min_y);
+            const float margin = 0.10f * (float)std::min(layer_w, layer_h);
+            const float scale = std::min(((float)layer_w - 2.0f * margin) / dx, ((float)layer_h - 2.0f * margin) / dy);
+            const float used_w = dx * scale;
+            const float used_h = dy * scale;
+            const float ox = ((float)layer_w - used_w) * 0.5f;
+            const float oy = ((float)layer_h - used_h) * 0.5f;
+
+            for (auto& joint : joints)
+            {
+                if (!joint.valid)
+                    continue;
+                joint.x = ox + (joint.x - min_x) * scale;
+                joint.y = oy + (joint.y - min_y) * scale;
+            }
         }
 
-        const float dx = std::max(1e-6f, max_x - min_x);
-        const float dy = std::max(1e-6f, max_y - min_y);
-        const float margin = 0.10f * (float)std::min(w, h);
-        const float scale = std::min(((float)w - 2.0f * margin) / dx, ((float)h - 2.0f * margin) / dy);
-        const float used_w = dx * scale;
-        const float used_h = dy * scale;
-        const float ox = ((float)w - used_w) * 0.5f;
-        const float oy = ((float)h - used_h) * 0.5f;
+        if (source_w <= 1 || source_h <= 1 || (source_w == layer_w && source_h == layer_h))
+            return;
 
         for (auto& joint : joints)
         {
             if (!joint.valid)
                 continue;
-            joint.x = ox + (joint.x - min_x) * scale;
-            joint.y = oy + (joint.y - min_y) * scale;
+            joint.x *= (float)(layer_w - 1) / (float)(source_w - 1);
+            joint.y *= (float)(layer_h - 1) / (float)(source_h - 1);
         }
     }
 
@@ -271,10 +366,12 @@ namespace poseweaver::ui_canva
         std::string* out_error)
     {
         std::vector<Sketch2RigJoint2d> joints;
-        if (!canva_load_sketch2rig_joints(json_path, &joints, out_error))
+        int image_width = 0;
+        int image_height = 0;
+        if (!canva_load_sketch2rig_joints(json_path, &joints, &image_width, &image_height, out_error))
             return false;
 
-        canva_project_sketch2rig_joints(joints, canva.width, canva.height);
+        canva_project_sketch2rig_joints(joints, canva.width, canva.height, image_width, image_height);
 
         CanvaPreprocessTransform preprocess_transform;
         std::string transform_error;

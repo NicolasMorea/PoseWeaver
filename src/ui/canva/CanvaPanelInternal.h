@@ -162,8 +162,8 @@ namespace poseweaver::ui_canva
 
     struct CanvaState
     {
-        int width = 1024;
-        int height = 1024;
+        int width = 2048;
+        int height = 2048;
 
         float zoom = 1.0f;
         ImVec2 pan = ImVec2(0.0f, 0.0f);
@@ -201,21 +201,34 @@ namespace poseweaver::ui_canva
         std::uint64_t last_sketch2uv_import_request_id = 0;
         std::uint64_t last_sketch2iso_import_request_id = 0;
         std::uint64_t last_sketch2depth_import_request_id = 0;
+        std::uint64_t last_nlf_import_request_id = 0;
         std::uint64_t last_vitpose_import_request_id = 0;
         std::uint64_t ignore_sketch2rig_request_id = 0;
         std::uint64_t ignore_sketch2betas_request_id = 0;
         std::uint64_t ignore_sketch2uv_request_id = 0;
         std::uint64_t ignore_sketch2iso_request_id = 0;
         std::uint64_t ignore_sketch2depth_request_id = 0;
+        std::uint64_t ignore_nlf_request_id = 0;
         std::uint64_t ignore_vitpose_request_id = 0;
         std::uint64_t last_scene_view_snapshot_completed_id = 0;
         std::uint64_t pending_scene_view_snapshot_request_id = 0;
+
+        bool vitpose_pending_inference = false;
+        std::uint64_t vitpose_pending_request_id = 0;
+        std::filesystem::path vitpose_pending_sketch_path;
+        std::filesystem::path vitpose_pending_output_path;
 
         bool extract_pose_active = false;
         bool extract_pose_rig_done = false;
         bool extract_pose_betas_done = false;
         bool extract_pose_hide_rig_layer = false;
         bool extract_pose_generate_cloth_after = false;
+        bool extract_pose_using_nlf = false;
+        bool extract_pose_nlf_fallback_allowed = false;
+        bool extract_pose_direct_nlf = false;
+        int bone_prediction_debug_mode = 0; // 0 custom/idle, 1 NLF success, 2 fallback, 3 running, 4 error.
+        float bone_prediction_nlf_confidence = -1.0f;
+        std::string bone_prediction_debug_status = "Custom pipeline";
         std::uint64_t extract_pose_rig_request_id = 0;
         std::uint64_t extract_pose_betas_request_id = 0;
         std::filesystem::path extract_pose_model_input_path;
@@ -229,6 +242,7 @@ namespace poseweaver::ui_canva
         std::uint64_t generate_cloth_render_request_id = 0;
         std::uint64_t last_cloth_render_completed_id = 0;
         std::filesystem::path generate_cloth_model_input_path;
+        std::filesystem::path generate_cloth_rig_json_path;
         std::string generate_cloth_pose_name;
         std::string generate_cloth_status = "Idle";
         int generate_cloth_failed_step = -1; // 0 inference, 1 pose, 2 sequence, 3 proxy, 4 simulation, 5 render
@@ -276,6 +290,7 @@ namespace poseweaver::ui_canva
         bool cloth_fitting_active = false;
         bool cloth_fitting_waiting_iso = false;
         bool cloth_fitting_waiting_depth = false;
+        bool cloth_fitting_waiting_source_layer = false;
         std::uint64_t cloth_fitting_iso_request_id = 0;
         std::uint64_t cloth_fitting_depth_request_id = 0;
         std::filesystem::path cloth_fitting_model_input_path;
@@ -343,6 +358,7 @@ namespace poseweaver::ui_canva
         std::string sequence_locked_gender;
         std::filesystem::path sequence_pose_transition_from_pose_path;
         std::filesystem::path sequence_model_input_path;
+        std::filesystem::path sequence_rig_json_path;
         std::filesystem::path sequence_iso_path;
         std::filesystem::path sequence_depth_path;
         std::filesystem::path sequence_current_frame_dir;
@@ -451,6 +467,8 @@ namespace poseweaver::ui_canva
         CanvaState& canva,
         const std::filesystem::path& json_path,
         const std::filesystem::path& model_input_path,
+        bool enabled,
+        const std::string& layer_name,
         std::string* out_error);
     bool canva_add_sketch2rig_layer(
         CanvaState& canva,
@@ -539,6 +557,14 @@ namespace poseweaver::ui_canva
         CanvaState& canva,
         const CanvaLayer& source_layer,
         std::string* out_error);
+    bool canva_queue_cloth_fitting_predictions_from_sketch(
+        AppState& state,
+        CanvaState& canva,
+        const std::filesystem::path& sketch_path,
+        const std::filesystem::path& rig_json_path,
+        int source_layer_id,
+        bool wait_for_source_layer,
+        std::string* out_error);
     bool canva_queue_cloth_fitting_cached_predictions(
         AppState& state,
         CanvaState& canva,
@@ -556,6 +582,13 @@ namespace poseweaver::ui_canva
         bool hide_rig_layer,
         std::string* out_error,
         const std::filesystem::path& output_dir = {});
+    bool canva_queue_extract_pose_custom_from_sketch(
+        AppState& state,
+        CanvaState& canva,
+        const std::filesystem::path& sketch_path,
+        bool generate_cloth_after,
+        bool hide_rig_layer,
+        std::string* out_error);
     bool canva_queue_generate_cloth_current_pose(
         AppState& state,
         CanvaState& canva,
@@ -611,6 +644,7 @@ namespace poseweaver::ui_canva
         const std::filesystem::path& model_input_path,
         std::string* out_error);
     bool canva_try_finish_extract_pose(AppState& state, CanvaState& canva);
+    bool canva_try_submit_pending_vitpose(AppState& state, CanvaState& canva);
     void canva_upload_layer(CanvaLayer& layer, int w, int h);
     CanvaState& canva_state();
     void canva_ensure_initialized(AppState& state, CanvaState& canva);

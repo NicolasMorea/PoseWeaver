@@ -106,6 +106,10 @@ namespace
         {
             state->canva_sequence_pose_transition_frames = std::clamp(iv, 0, 240);
         }
+        if (std::sscanf(line, "CanvaPreferredBonePrediction=%d", &iv) == 1)
+        {
+            state->canva_preferred_bone_prediction = std::clamp(iv, 0, 1);
+        }
 
         if (std::sscanf(line, "SimulationMaxFrames=%d", &iv) == 1)
         {
@@ -215,7 +219,11 @@ namespace
         if (std::sscanf(line, "ClothFittingWarpForce=%f", &v) == 1)
         {
             if (std::isfinite(v))
-                state->cloth_fitting_warp_force = std::clamp(v, 0.0f, 4.0f);
+                state->cloth_fitting_warp_force = std::clamp(v, 0.0f, 6.0f);
+        }
+        if (std::sscanf(line, "ClothFittingWarpSteps=%d", &iv) == 1)
+        {
+            state->cloth_fitting_warp_steps = std::clamp(iv, 1, 32);
         }
         if (std::sscanf(line, "IsoDistanceThreshold=%f", &v) == 1)
         {
@@ -447,6 +455,7 @@ namespace
         buf->appendf("SaveSmplSequence=%d\n", state->controls.save_smpl_sequence ? 1 : 0);
         buf->appendf("ShowCollisionProxySequence=%d\n", state->controls.show_collision_proxy_sequence ? 1 : 0);
         buf->appendf("CanvaSequencePoseTransitionFrames=%d\n", state->canva_sequence_pose_transition_frames);
+        buf->appendf("CanvaPreferredBonePrediction=%d\n", std::clamp(state->canva_preferred_bone_prediction, 0, 1));
 
         buf->appendf("SimulationFps=%.9f\n", state->controls.fps);
         buf->appendf("LightPosX=%.6f\n", state->light_position[0]);
@@ -461,6 +470,7 @@ namespace
         buf->appendf("ClothFittingBodyDistanceThreshold=%.9f\n", state->cloth_fitting_body_distance_threshold);
         buf->appendf("ClothFittingWarpRadius=%.6f\n", state->cloth_fitting_warp_radius);
         buf->appendf("ClothFittingWarpForce=%.6f\n", state->cloth_fitting_warp_force);
+        buf->appendf("ClothFittingWarpSteps=%d\n", state->cloth_fitting_warp_steps);
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
 

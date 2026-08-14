@@ -219,18 +219,31 @@ namespace poseweaver::ui_canva
 
         SketchPoseBuildResult result;
         std::string err;
-        if (!save_sketch_pose_from_outputs(
+        const bool saved_pose = canva.extract_pose_direct_nlf
+            ? save_nlf_pose_from_output(
+                canva.extract_pose_rig_path,
+                out_json,
+                out_npz,
+                &result,
+                &err)
+            : save_sketch_pose_from_outputs(
                 canva.extract_pose_rig_path,
                 canva.extract_pose_betas_path,
                 out_json,
                 out_npz,
                 &result,
-                &err))
+                &err);
+        if (!saved_pose)
         {
             console_add_line(state, std::string("Canva: Extract Pose failed: ") + (err.empty() ? "(unknown error)" : err));
             canva.extract_pose_active = false;
             canva.extract_pose_hide_rig_layer = false;
             canva.extract_pose_generate_cloth_after = false;
+            canva.extract_pose_using_nlf = false;
+            canva.extract_pose_nlf_fallback_allowed = false;
+            canva.extract_pose_direct_nlf = false;
+            canva.bone_prediction_debug_mode = 4;
+            canva.bone_prediction_debug_status = "Bone prediction failed";
             canva.generate_cloth_active = false;
             canva.generate_cloth_status = "Failed";
             canva.generate_cloth_failed_step = 0;
@@ -251,6 +264,10 @@ namespace poseweaver::ui_canva
         canva.pending_scene_view_snapshot_model_input_path = canva.extract_pose_model_input_path;
         state.scene_view_snap_to_target_request_id++;
         canva.extract_pose_active = false;
+        canva.extract_pose_using_nlf = false;
+        canva.extract_pose_nlf_fallback_allowed = false;
+        const bool used_direct_nlf = canva.extract_pose_direct_nlf;
+        canva.extract_pose_direct_nlf = false;
         if (canva.extract_pose_generate_cloth_after)
         {
             canva.generate_cloth_active = true;
@@ -259,6 +276,7 @@ namespace poseweaver::ui_canva
             canva.generate_cloth_waiting_render = false;
             if (canva.generate_cloth_model_input_path.empty())
                 canva.generate_cloth_model_input_path = canva.extract_pose_model_input_path;
+            canva.generate_cloth_rig_json_path = canva.extract_pose_rig_path;
             canva.generate_cloth_pose_name = result.npz_path.filename().string();
             canva.extract_pose_generate_cloth_after = false;
             canva.generate_cloth_status = "Posing";
@@ -268,7 +286,13 @@ namespace poseweaver::ui_canva
             console_add_line(state, "Canva: Generate Cloth pose extracted; waiting for pose reload");
         }
         canva.extract_pose_hide_rig_layer = false;
-        console_add_line(state, std::string("Canva: Saved sketch pose JSON: ") + result.json_path.string());
+        canva.extract_pose_using_nlf = false;
+        canva.extract_pose_nlf_fallback_allowed = false;
+        canva.extract_pose_direct_nlf = false;
+        console_add_line(state, std::string(used_direct_nlf
+                ? "Canva: Saved direct NLF pose JSON: "
+                : "Canva: Saved sketch pose JSON: ")
+            + result.json_path.string());
         console_add_line(state, std::string("Canva: Saved sketch pose NPZ: ") + result.npz_path.string());
         return true;
     }
@@ -501,8 +525,8 @@ namespace poseweaver::ui_canva
         const std::string name = canva_basename(file_path);
         CanvaLayer layer = canva_make_layer(w, h, canva.next_layer_id++, name);
 
-        // Ensure the whole image fits within the 1024x1024 canva by downsampling if needed.
-        const float s = std::min(1.0f, std::min((float)w / (float)std::max(1, iw), (float)h / (float)std::max(1, ih)));
+        // Fit the image to the current canva while preserving aspect ratio.
+        const float s = std::min((float)w / (float)std::max(1, iw), (float)h / (float)std::max(1, ih));
         const int dw = std::clamp((int)std::floor((float)iw * s + 0.5f), 1, w);
         const int dh = std::clamp((int)std::floor((float)ih * s + 0.5f), 1, h);
         const std::vector<unsigned char> resized = canva_resample_bilinear_rgba((const unsigned char*)data, iw, ih, dw, dh);
@@ -788,6 +812,8 @@ namespace poseweaver::ui_canva
         CanvaState& canva,
         const std::filesystem::path& json_path,
         const std::filesystem::path& model_input_path,
+        bool enabled,
+        const std::string& layer_name,
         std::string* out_error)
     {
         std::ifstream in(json_path);
@@ -811,9 +837,9 @@ namespace poseweaver::ui_canva
             canva,
             render_path.string(),
             model_input_path,
-            "Sketch2Depth",
+            layer_name,
             CanvaLayerKind::Sketch2Depth,
-            true,
+            enabled,
             out_error);
     }
 

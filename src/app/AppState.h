@@ -261,6 +261,7 @@ namespace poseweaver
         std::uint64_t cloth_simulate_request_id = 0;
         std::uint64_t cloth_clear_simulation_request_id = 0;
         std::uint64_t cloth_cancel_simulation_request_id = 0;
+        bool cloth_simulate_play_on_finish = true;
         bool cloth_simulate_continue_from_last_frame = false;
         float cloth_simulate_duration_override_seconds = -1.0f;
         int cloth_simulate_max_frames_override = 0;
@@ -323,13 +324,13 @@ namespace poseweaver
         float cloth_fitting_body_distance_threshold = 0.01f;
         float cloth_fitting_warp_radius = 48.0f;
         float cloth_fitting_warp_force = 1.0f;
+        int cloth_fitting_warp_steps = 1;
         std::string cloth_fitting_output_dir;
         float iso_distance_threshold = 0.15f;
 
         bool canva_tab_active = false;
         std::uint64_t canva_undo_request_id = 0;
-        bool cursor_restore_request = false;
-        bool soft_cursor_enabled = false;
+        int canva_preferred_bone_prediction = 0; // 0 custom, 1 NLF
 
         std::uint64_t asset_refresh_request_id = 0;
         std::uint64_t pose_asset_reload_request_id = 0;
@@ -340,6 +341,7 @@ namespace poseweaver
         ModelInferenceUiState sketch2uv;
         ModelInferenceUiState sketch2iso;
         ModelInferenceUiState sketch2depth;
+        ModelInferenceUiState nlf;
         ModelInferenceUiState vitpose;
 
         SmplShapeState smpl_shape;

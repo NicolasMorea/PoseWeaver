@@ -20,78 +20,19 @@
 
 namespace
 {
-    static void force_native_cursor_visible(GLFWwindow* window)
-    {
-        if (window)
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    }
-
-    static void show_cursor_on_launch(GLFWwindow* window)
+    static void enforce_default_cursor(GLFWwindow* window)
     {
         if (!window)
             return;
 
         glfwSetCursor(window, nullptr);
-        force_native_cursor_visible(window);
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     }
-
-    struct NativeCursorGuard
-    {
-        GLFWwindow* window = nullptr;
-        GLFWcursor* cursors[ImGuiMouseCursor_COUNT] = {};
-
-        void init(GLFWwindow* w)
-        {
-            window = w;
-            apply(ImGuiMouseCursor_Arrow);
-        }
-
-        void apply(ImGuiMouseCursor requested)
-        {
-            if (!window)
-                return;
-
-            if (requested == ImGuiMouseCursor_None || requested < 0 || requested >= ImGuiMouseCursor_COUNT)
-                requested = ImGuiMouseCursor_Arrow;
-
-            GLFWcursor* cursor = cursors[requested] ? cursors[requested] : cursors[ImGuiMouseCursor_Arrow];
-            if (cursor)
-                glfwSetCursor(window, cursor);
-            else
-                glfwSetCursor(window, nullptr);
-            force_native_cursor_visible(window);
-        }
-
-        void apply_imgui_cursor()
-        {
-            ImGui::GetIO().MouseDrawCursor = false;
-            apply(ImGui::GetMouseCursor());
-        }
-
-        void shutdown()
-        {
-            if (window)
-            {
-                glfwSetCursor(window, nullptr);
-                force_native_cursor_visible(window);
-            }
-            for (GLFWcursor*& cursor : cursors)
-            {
-                if (cursor)
-                {
-                    glfwDestroyCursor(cursor);
-                    cursor = nullptr;
-                }
-            }
-            window = nullptr;
-        }
-    };
 
     struct GlfwAppContext
     {
         poseweaver::Renderer* renderer = nullptr;
         poseweaver::AppState* state = nullptr;
-        NativeCursorGuard* cursor_guard = nullptr;
     };
 
     static void pw_glfw_error_callback(int error, const char* description)
@@ -155,9 +96,7 @@ namespace
         if (!focused)
             return;
 
-        force_native_cursor_visible(window);
-        if (auto* app = app_from(window); app && app->cursor_guard)
-            app->cursor_guard->apply(ImGuiMouseCursor_Arrow);
+        enforce_default_cursor(window);
     }
 
     static void pw_glfw_cursor_enter_callback(GLFWwindow* window, int entered)
@@ -167,9 +106,7 @@ namespace
         if (!entered)
             return;
 
-        force_native_cursor_visible(window);
-        if (auto* app = app_from(window); app && app->cursor_guard)
-            app->cursor_guard->apply_imgui_cursor();
+        enforce_default_cursor(window);
     }
 
     static void pw_glfw_cursor_pos_callback(GLFWwindow* window, double x, double y)
@@ -341,6 +278,7 @@ namespace
 
                 if ((key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) && !ImGui::IsAnyItemActive())
                 {
+                    state.cloth_simulate_play_on_finish = true;
                     state.cloth_simulate_request_id++;
                     state.controls.simulating = true;
                     state.controls.playing = false;
@@ -356,12 +294,6 @@ namespace
         if (auto* app = app_from(window); app && app->state)
         {
             auto& state = *app->state;
-
-            if (key == GLFW_KEY_C && action == GLFW_PRESS)
-            {
-                state.soft_cursor_enabled = !state.soft_cursor_enabled;
-                return;
-            }
 
             const bool have_frames = (state.controls.frame_count > 0);
             const bool can_control_playback = have_frames && !state.controls.simulating;
@@ -435,7 +367,7 @@ int main(int, char**)
     if (window == nullptr)
         return 1;
 
-    show_cursor_on_launch(window);
+    enforce_default_cursor(window);
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
@@ -465,14 +397,14 @@ int main(int, char**)
     poseweaver::ModelInferenceService sketch2uv("Sketch2UV");
     poseweaver::ModelInferenceService sketch2iso("Sketch2ISO");
     poseweaver::ModelInferenceService sketch2depth("Sketch2Depth");
+    poseweaver::ModelInferenceService nlf("NLF");
     poseweaver::ModelInferenceService vitpose("VitPose");
-    NativeCursorGuard cursor_guard;
-    cursor_guard.init(window);
     state.sketch2rig.service = &sketch2rig;
     state.sketch2betas.service = &sketch2betas;
     state.sketch2uv.service = &sketch2uv;
     state.sketch2iso.service = &sketch2iso;
     state.sketch2depth.service = &sketch2depth;
+    state.nlf.service = &nlf;
     state.vitpose.service = &vitpose;
 
     poseweaver::install_imgui_state_settings_handler(state);
@@ -480,10 +412,8 @@ int main(int, char**)
     GlfwAppContext app;
     app.renderer = &renderer;
     app.state = &state;
-    app.cursor_guard = &cursor_guard;
-
     renderer.init(window);
-    cursor_guard.apply(ImGuiMouseCursor_Arrow);
+    enforce_default_cursor(window);
     glfwSetWindowUserPointer(window, &app);
 
     glfwSetWindowFocusCallback(window, pw_glfw_window_focus_callback);
@@ -519,11 +449,10 @@ int main(int, char**)
     sketch2depth.start(
         poseweaver::assets_dir() / "Sketch2Depth",
         std::filesystem::path(POSEWEAVER_SKETCH2DEPTH_WORKER));
-    vitpose.start(
-        poseweaver::assets_dir() / "VitPose",
-        std::filesystem::path(POSEWEAVER_VITPOSE_WORKER),
-        "vitpose_base_coco_aic_mpii.pth");
-
+    nlf.start(
+        poseweaver::assets_dir() / "NLF",
+        std::filesystem::path(POSEWEAVER_NLF_WORKER),
+        "nlf_l_multi.torchscript");
     double last_time = glfwGetTime();
     double play_accum = 0.0;
     std::uint64_t last_asset_refresh_request_id = state.asset_refresh_request_id;
@@ -531,7 +460,7 @@ int main(int, char**)
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
-        force_native_cursor_visible(window);
+        enforce_default_cursor(window);
 
         int fb_w = 0, fb_h = 0;
         glfwGetFramebufferSize(window, &fb_w, &fb_h);
@@ -563,6 +492,7 @@ int main(int, char**)
         sketch2uv.drain_events(state, state.sketch2uv);
         sketch2iso.drain_events(state, state.sketch2iso);
         sketch2depth.drain_events(state, state.sketch2depth);
+        nlf.drain_events(state, state.nlf);
         vitpose.drain_events(state, state.vitpose);
 
         if (state.asset_refresh_request_id != last_asset_refresh_request_id)
@@ -585,20 +515,10 @@ int main(int, char**)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-        force_native_cursor_visible(window);
+        enforce_default_cursor(window);
 
         ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
-        cursor_guard.apply_imgui_cursor();
-
-        if (state.cursor_restore_request)
-        {
-            state.cursor_restore_request = false;
-            // Cycle HIDDEN→NORMAL to force GLFW to re-issue XDefineCursor/SetCursor
-            // even when it believes the mode is already NORMAL (no-op otherwise).
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            cursor_guard.apply(ImGuiMouseCursor_Arrow);
-        }
+        enforce_default_cursor(window);
 
         ImGui::Render();
 
@@ -610,22 +530,22 @@ int main(int, char**)
     }
 
     renderer.shutdown();
-    cursor_guard.apply(ImGuiMouseCursor_Arrow);
+    enforce_default_cursor(window);
     sketch2rig.stop();
     sketch2betas.stop();
     sketch2uv.stop();
     sketch2iso.stop();
     sketch2depth.stop();
+    nlf.stop();
     vitpose.stop();
 
     poseweaver::save_imgui_settings_to_disk();
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
-    cursor_guard.shutdown();
     ImGui::DestroyContext();
 
-    force_native_cursor_visible(window);
+    enforce_default_cursor(window);
     glfwDestroyWindow(window);
     glfwTerminate();
 

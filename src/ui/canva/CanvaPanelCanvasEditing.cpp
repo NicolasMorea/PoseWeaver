@@ -286,6 +286,7 @@ namespace poseweaver::ui_canva
         const std::uint64_t uv_active = state.sketch2uv.active_request_id;
         const std::uint64_t iso_active = state.sketch2iso.active_request_id;
         const std::uint64_t depth_active = state.sketch2depth.active_request_id;
+        const std::uint64_t nlf_active = state.nlf.active_request_id;
         const std::uint64_t vitpose_active = state.vitpose.active_request_id;
 
         CanvaState fresh;
@@ -306,6 +307,8 @@ namespace poseweaver::ui_canva
             std::max(state.sketch2iso.completed_request_id, iso_active);
         fresh.last_sketch2depth_import_request_id =
             std::max(state.sketch2depth.completed_request_id, depth_active);
+        fresh.last_nlf_import_request_id =
+            std::max(state.nlf.completed_request_id, nlf_active);
         fresh.last_vitpose_import_request_id =
             std::max(state.vitpose.completed_request_id, vitpose_active);
         fresh.ignore_sketch2rig_request_id = rig_active;
@@ -313,7 +316,18 @@ namespace poseweaver::ui_canva
         fresh.ignore_sketch2uv_request_id = uv_active;
         fresh.ignore_sketch2iso_request_id = iso_active;
         fresh.ignore_sketch2depth_request_id = depth_active;
+        fresh.ignore_nlf_request_id = nlf_active;
         fresh.ignore_vitpose_request_id = vitpose_active;
+        fresh.vitpose_pending_inference = false;
+        fresh.vitpose_pending_request_id = 0;
+        fresh.vitpose_pending_sketch_path.clear();
+        fresh.vitpose_pending_output_path.clear();
+        fresh.extract_pose_using_nlf = false;
+        fresh.extract_pose_nlf_fallback_allowed = false;
+        fresh.extract_pose_direct_nlf = false;
+        fresh.bone_prediction_debug_mode = 0;
+        fresh.bone_prediction_nlf_confidence = -1.0f;
+        fresh.bone_prediction_debug_status = "Custom pipeline";
         fresh.last_scene_view_snapshot_completed_id = state.scene_view_snapshot_request_id;
         fresh.last_displacement_completed_id = state.canva_displacement_request_id;
         fresh.last_iso_displacement_completed_id = state.canva_iso_displacement_request_id;
@@ -340,6 +354,8 @@ namespace poseweaver::ui_canva
         state.sketch2iso.last_output_path.clear();
         state.sketch2depth.last_sketch_path.clear();
         state.sketch2depth.last_output_path.clear();
+        state.nlf.last_sketch_path.clear();
+        state.nlf.last_output_path.clear();
         state.vitpose.last_sketch_path.clear();
         state.vitpose.last_output_path.clear();
 
