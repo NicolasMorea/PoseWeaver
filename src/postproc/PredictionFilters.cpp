@@ -18,7 +18,7 @@ namespace poseweaver::postproc
 {
     namespace
     {
-        struct IsoFilterParams
+        struct IsoSharpenParams
         {
             float sigma = 2.0f;
             float amount = 3.0f;
@@ -325,7 +325,7 @@ namespace poseweaver::postproc
             int w,
             int h,
             int channels,
-            const IsoFilterParams& params,
+            const IsoSharpenParams& params,
             std::vector<float>* out_gate)
         {
             std::vector<float> side_mean;
@@ -696,7 +696,7 @@ namespace poseweaver::postproc
         }
     }
 
-    bool filter_isomap_prediction(
+    bool sharpen_isomap_prediction(
         const std::filesystem::path& input_npz,
         std::filesystem::path* out_npz,
         std::string* out_error)
@@ -708,7 +708,7 @@ namespace poseweaver::postproc
             return false;
         }
         const std::filesystem::path output_npz =
-            filtered_path_for(input_npz, "_filtered", ".npz");
+            filtered_path_for(input_npz, "_sharpened", ".npz");
 
         int w = 0, h = 0, channels = 0;
         std::vector<float> isomap;
@@ -729,7 +729,7 @@ namespace poseweaver::postproc
                 out_error))
             return false;
 
-        const IsoFilterParams params;
+        const IsoSharpenParams params;
         const size_t pixel_count = (size_t)w * (size_t)h;
         std::vector<float> scale((size_t)channels, 1.0f);
         std::vector<float> normalized(isomap.size(), 0.0f);
@@ -840,7 +840,189 @@ namespace poseweaver::postproc
         catch (const std::exception& e)
         {
             if (out_error)
-                *out_error = std::string("could not write filtered isomap: ") + e.what();
+                *out_error = std::string("could not write sharpened isomap: ") + e.what();
+            return false;
+        }
+
+        if (out_npz)
+            *out_npz = output_npz;
+        return true;
+    }
+
+    bool filter_isomap_continuity(
+        const std::filesystem::path& input_npz,
+        const IsoContinuityFilterParams& requested_params,
+        std::filesystem::path* out_npz,
+        std::string* out_error)
+    {
+        if (input_npz.empty())
+        {
+            if (out_error)
+                *out_error = "missing sharpened isomap path";
+            return false;
+        }
+
+        std::string output_stem = input_npz.stem().string();
+        constexpr const char* sharpened_suffix = "_sharpened";
+        const size_t suffix_size = std::char_traits<char>::length(sharpened_suffix);
+        if (output_stem.size() >= suffix_size
+            && output_stem.compare(output_stem.size() - suffix_size, suffix_size, sharpened_suffix) == 0)
+        {
+            output_stem.resize(output_stem.size() - suffix_size);
+        }
+        const std::filesystem::path output_npz =
+            input_npz.parent_path() / (output_stem + "_filtered_iso.npz");
+
+        int w = 0, h = 0, channels = 0;
+        std::vector<float> isomap;
+        std::vector<uint8_t> mask;
+        std::vector<float> mask_probability;
+        std::vector<float> low;
+        std::vector<float> high;
+        if (!load_iso(
+                input_npz,
+                &w,
+                &h,
+                &channels,
+                &isomap,
+                &mask,
+                &mask_probability,
+                &low,
+                &high,
+                out_error))
+            return false;
+
+        const float strength = std::clamp(requested_params.strength, 0.0f, 1.0f);
+        const float edge_threshold = std::clamp(requested_params.edge_threshold, 1e-4f, 1.0f);
+        const int iterations = std::clamp(requested_params.iterations, 1, 64);
+        const size_t pixel_count = (size_t)w * (size_t)h;
+        const size_t channel_count = (size_t)channels;
+
+        std::vector<float> scale(channel_count, 1.0f);
+        std::vector<float> normalized(isomap.size(), 0.0f);
+        for (int c = 0; c < channels; ++c)
+            scale[(size_t)c] = std::max(high[(size_t)c] - low[(size_t)c], 1e-6f);
+        for (size_t p = 0; p < pixel_count; ++p)
+        {
+            for (int c = 0; c < channels; ++c)
+            {
+                const size_t i = p * channel_count + (size_t)c;
+                normalized[i] = (isomap[i] - low[(size_t)c]) / scale[(size_t)c];
+            }
+        }
+
+        std::vector<float> result = normalized;
+        std::vector<float> next = result;
+        constexpr int offsets[8][2] = {
+            { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 },
+            { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 }
+        };
+        const float inverse_edge_variance = 0.5f / (edge_threshold * edge_threshold);
+        constexpr float diagonal_weight = 0.70710678118f;
+
+        for (int iteration = 0; iteration < iterations; ++iteration)
+        {
+            for (int y = 0; y < h; ++y)
+            {
+                for (int x = 0; x < w; ++x)
+                {
+                    const size_t p = (size_t)y * (size_t)w + (size_t)x;
+                    if (!mask[p])
+                        continue;
+
+                    float total_weight = 0.0f;
+                    float* destination = next.data() + p * channel_count;
+                    std::fill(destination, destination + channel_count, 0.0f);
+                    const float* guide = normalized.data() + p * channel_count;
+
+                    for (const auto& offset : offsets)
+                    {
+                        const int nx = x + offset[0];
+                        const int ny = y + offset[1];
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h)
+                            continue;
+                        const size_t q = (size_t)ny * (size_t)w + (size_t)nx;
+                        if (!mask[q])
+                            continue;
+
+                        const float* neighbor_guide = normalized.data() + q * channel_count;
+                        float normalized_distance_squared = 0.0f;
+                        for (int c = 0; c < channels; ++c)
+                        {
+                            const float delta = guide[c] - neighbor_guide[c];
+                            normalized_distance_squared += delta * delta;
+                        }
+                        normalized_distance_squared /= (float)channels;
+                        const float spatial_weight = offset[0] != 0 && offset[1] != 0
+                            ? diagonal_weight : 1.0f;
+                        const float confidence_weight =
+                            0.25f + 0.75f * std::clamp(mask_probability[q], 0.0f, 1.0f);
+                        const float weight = spatial_weight * confidence_weight
+                            * std::exp(-normalized_distance_squared * inverse_edge_variance);
+                        const float* neighbor = result.data() + q * channel_count;
+                        for (int c = 0; c < channels; ++c)
+                            destination[c] += weight * neighbor[c];
+                        total_weight += weight;
+                    }
+
+                    const float* current = result.data() + p * channel_count;
+                    if (total_weight <= 1e-8f)
+                    {
+                        std::copy(current, current + channel_count, destination);
+                        continue;
+                    }
+                    const float confidence = std::clamp(mask_probability[p], 0.0f, 1.0f);
+                    const float local_strength = std::clamp(
+                        strength * (1.25f - 0.5f * confidence), 0.0f, 1.0f);
+                    const float inverse_weight = 1.0f / total_weight;
+                    for (int c = 0; c < channels; ++c)
+                    {
+                        const float neighborhood_value = destination[c] * inverse_weight;
+                        destination[c] = current[c]
+                            + local_strength * (neighborhood_value - current[c]);
+                    }
+                }
+            }
+            result.swap(next);
+        }
+
+        std::vector<float> filtered(isomap.size(), 0.0f);
+        for (size_t p = 0; p < pixel_count; ++p)
+        {
+            for (int c = 0; c < channels; ++c)
+            {
+                const size_t i = p * channel_count + (size_t)c;
+                filtered[i] = mask[p]
+                    ? result[i] * scale[(size_t)c] + low[(size_t)c]
+                    : isomap[i];
+            }
+        }
+
+        try
+        {
+            cnpy::npz_save(
+                output_npz.string(), "isomap", filtered.data(),
+                { (size_t)h, (size_t)w, channel_count }, "w");
+            cnpy::npz_save(
+                output_npz.string(), "mask", mask.data(),
+                { (size_t)h, (size_t)w }, "a");
+            cnpy::npz_save(
+                output_npz.string(), "mask_probability", mask_probability.data(),
+                { (size_t)h, (size_t)w }, "a");
+            cnpy::npz_save(
+                output_npz.string(), "descriptor_min", low.data(),
+                { channel_count }, "a");
+            cnpy::npz_save(
+                output_npz.string(), "descriptor_max", high.data(),
+                { channel_count }, "a");
+            cnpy::npz_save(output_npz.string(), "continuity_strength", &strength, { 1u }, "a");
+            cnpy::npz_save(output_npz.string(), "continuity_edge_threshold", &edge_threshold, { 1u }, "a");
+            cnpy::npz_save(output_npz.string(), "continuity_iterations", &iterations, { 1u }, "a");
+        }
+        catch (const std::exception& e)
+        {
+            if (out_error)
+                *out_error = std::string("could not write continuity-filtered isomap: ") + e.what();
             return false;
         }
 
