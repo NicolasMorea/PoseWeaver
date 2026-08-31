@@ -20,15 +20,6 @@
 
 namespace
 {
-    static void enforce_default_cursor(GLFWwindow* window)
-    {
-        if (!window)
-            return;
-
-        glfwSetCursor(window, nullptr);
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-    }
-
     struct GlfwAppContext
     {
         poseweaver::Renderer* renderer = nullptr;
@@ -43,6 +34,23 @@ namespace
     static GlfwAppContext* app_from(GLFWwindow* window)
     {
         return static_cast<GlfwAppContext*>(glfwGetWindowUserPointer(window));
+    }
+
+    static void show_visible_cursor(GLFWwindow* window)
+    {
+        if (!window)
+            return;
+
+        if (ImGui::GetCurrentContext())
+        {
+            ImGui::GetIO().MouseDrawCursor = true;
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Arrow);
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        }
+        else
+        {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
     }
 
     static bool cursor_in_cloth_view(GLFWwindow* window, const poseweaver::ViewportRect& r, double x, double y)
@@ -92,21 +100,15 @@ namespace
     static void pw_glfw_window_focus_callback(GLFWwindow* window, int focused)
     {
         ImGui_ImplGlfw_WindowFocusCallback(window, focused);
-
-        if (!focused)
-            return;
-
-        enforce_default_cursor(window);
+        if (focused)
+            show_visible_cursor(window);
     }
 
     static void pw_glfw_cursor_enter_callback(GLFWwindow* window, int entered)
     {
         ImGui_ImplGlfw_CursorEnterCallback(window, entered);
-
-        if (!entered)
-            return;
-
-        enforce_default_cursor(window);
+        if (entered)
+            show_visible_cursor(window);
     }
 
     static void pw_glfw_cursor_pos_callback(GLFWwindow* window, double x, double y)
@@ -197,6 +199,7 @@ namespace
                 g_constraint_dragging = false;
                 app->state->cloth_constraint_drag_active = false;
             }
+            show_visible_cursor(window);
         }
     }
 
@@ -236,6 +239,13 @@ namespace
 
         ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
 
+        const bool plain_key = (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER)) == 0;
+        if (key == GLFW_KEY_C && action == GLFW_PRESS && plain_key)
+        {
+            show_visible_cursor(window);
+            return;
+        }
+
         // Simulation shortcuts work even when ImGui wants the keyboard, except when typing.
         if (auto* app = app_from(window); app && app->state)
         {
@@ -250,7 +260,6 @@ namespace
                     return;
                 }
 
-                const bool plain_key = (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER)) == 0;
                 if (plain_key && key == GLFW_KEY_A)
                 {
                     state.scene_view_snap_to_target_request_id++;
@@ -342,6 +351,7 @@ namespace
 
         // Reserve scene toolbar shortcuts handled in the key callback.
         if (codepoint == (unsigned int)'a' || codepoint == (unsigned int)'A'
+            || codepoint == (unsigned int)'c' || codepoint == (unsigned int)'C'
             || codepoint == (unsigned int)'w' || codepoint == (unsigned int)'W'
             || codepoint == (unsigned int)'x' || codepoint == (unsigned int)'X')
             return;
@@ -367,8 +377,6 @@ int main(int, char**)
     if (window == nullptr)
         return 1;
 
-    enforce_default_cursor(window);
-
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 
@@ -379,7 +387,7 @@ int main(int, char**)
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    ImGui::GetIO().MouseDrawCursor = false;
+    ImGui::GetIO().MouseDrawCursor = true;
 
     ImGui_ImplGlfw_InitForOpenGL(window, false);
 
@@ -413,8 +421,8 @@ int main(int, char**)
     app.renderer = &renderer;
     app.state = &state;
     renderer.init(window);
-    enforce_default_cursor(window);
     glfwSetWindowUserPointer(window, &app);
+    show_visible_cursor(window);
 
     glfwSetWindowFocusCallback(window, pw_glfw_window_focus_callback);
     glfwSetCursorEnterCallback(window, pw_glfw_cursor_enter_callback);
@@ -460,7 +468,7 @@ int main(int, char**)
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
-        enforce_default_cursor(window);
+        show_visible_cursor(window);
 
         int fb_w = 0, fb_h = 0;
         glfwGetFramebufferSize(window, &fb_w, &fb_h);
@@ -515,10 +523,9 @@ int main(int, char**)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
-        enforce_default_cursor(window);
 
         ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
-        enforce_default_cursor(window);
+        show_visible_cursor(window);
 
         ImGui::Render();
 
@@ -530,7 +537,6 @@ int main(int, char**)
     }
 
     renderer.shutdown();
-    enforce_default_cursor(window);
     sketch2rig.stop();
     sketch2betas.stop();
     sketch2uv.stop();
@@ -545,7 +551,7 @@ int main(int, char**)
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    enforce_default_cursor(window);
+    show_visible_cursor(window);
     glfwDestroyWindow(window);
     glfwTerminate();
 
