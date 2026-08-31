@@ -644,7 +644,9 @@ namespace poseweaver::ui_canva
             return true;
         }
 
-        if (state.sketch2uv.service == nullptr || state.sketch2uv.status != ModelInferenceStatus::Ready)
+        if (state.sketch2uv.service == nullptr
+            || (state.sketch2uv.status != ModelInferenceStatus::NotStarted
+                && state.sketch2uv.status != ModelInferenceStatus::Ready))
         {
             if (out_error)
                 *out_error = "Sketch2UV is not ready";
@@ -1225,7 +1227,9 @@ namespace poseweaver::ui_canva
                 out_error);
         }
 
-        if (state.sketch2uv.service == nullptr || state.sketch2uv.status != ModelInferenceStatus::Ready)
+        if (state.sketch2uv.service == nullptr
+            || (state.sketch2uv.status != ModelInferenceStatus::NotStarted
+                && state.sketch2uv.status != ModelInferenceStatus::Ready))
         {
             if (out_error)
                 *out_error = "Sketch2UV is not ready";

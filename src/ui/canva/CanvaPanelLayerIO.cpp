@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cerrno>
 #include <cstdlib>
 #include <cctype>
@@ -254,9 +255,29 @@ namespace poseweaver::ui_canva
         }
 
         canva_apply_sketch_pose_result(state, result);
+        const bool used_direct_nlf = canva.extract_pose_direct_nlf;
         state.show_smpl = true;
         state.show_smpl_character = true;
         state.show_sketch2rig_rig = true;
+        if (used_direct_nlf)
+        {
+            std::string layer_err;
+            if (canva_add_nlf_projected_smpl_layer(
+                    canva,
+                    canva.extract_pose_rig_path,
+                    canva.extract_pose_model_input_path,
+                    &layer_err))
+            {
+                console_add_line(state, "Canva: Added NLF projected SMPL layer");
+                canva.pending_scene_view_snapshot_request_id = 0;
+                canva.pending_scene_view_snapshot_model_input_path.clear();
+            }
+            else
+            {
+                console_add_line(state, std::string("Canva: Failed to add NLF projected SMPL layer: ")
+                    + (layer_err.empty() ? "(unknown error)" : layer_err));
+            }
+        }
         state.scene_view_snapshot_pose_name = result.npz_path.filename().string();
         state.scene_view_snapshot_path.clear();
         state.scene_view_snapshot_use_rigopt_camera = false;
@@ -266,7 +287,6 @@ namespace poseweaver::ui_canva
         canva.extract_pose_active = false;
         canva.extract_pose_using_nlf = false;
         canva.extract_pose_nlf_fallback_allowed = false;
-        const bool used_direct_nlf = canva.extract_pose_direct_nlf;
         canva.extract_pose_direct_nlf = false;
         if (canva.extract_pose_generate_cloth_after)
         {
@@ -684,6 +704,259 @@ namespace poseweaver::ui_canva
                 out_error))
             return false;
         return true;
+    }
+
+    static void canva_blend_rgba(
+        std::vector<unsigned char>& pixels,
+        int w,
+        int h,
+        int x,
+        int y,
+        unsigned char r,
+        unsigned char g,
+        unsigned char b,
+        unsigned char a)
+    {
+        if (x < 0 || y < 0 || x >= w || y >= h || a == 0)
+            return;
+
+        const size_t idx = (((size_t)y * (size_t)w) + (size_t)x) * 4u;
+        const float sa = (float)a / 255.0f;
+        const float da = (float)pixels[idx + 3u] / 255.0f;
+        const float out_a = sa + da * (1.0f - sa);
+        if (out_a <= 1e-6f)
+            return;
+
+        const float sr = (float)r / 255.0f;
+        const float sg = (float)g / 255.0f;
+        const float sb = (float)b / 255.0f;
+        const float dr = (float)pixels[idx + 0u] / 255.0f;
+        const float dg = (float)pixels[idx + 1u] / 255.0f;
+        const float db = (float)pixels[idx + 2u] / 255.0f;
+
+        pixels[idx + 0u] = (unsigned char)std::clamp<int>(
+            (int)(((sr * sa + dr * da * (1.0f - sa)) / out_a) * 255.0f + 0.5f),
+            0,
+            255);
+        pixels[idx + 1u] = (unsigned char)std::clamp<int>(
+            (int)(((sg * sa + dg * da * (1.0f - sa)) / out_a) * 255.0f + 0.5f),
+            0,
+            255);
+        pixels[idx + 2u] = (unsigned char)std::clamp<int>(
+            (int)(((sb * sa + db * da * (1.0f - sa)) / out_a) * 255.0f + 0.5f),
+            0,
+            255);
+        pixels[idx + 3u] = (unsigned char)std::clamp<int>((int)(out_a * 255.0f + 0.5f), 0, 255);
+    }
+
+    static void canva_draw_line_rgba(
+        std::vector<unsigned char>& pixels,
+        int w,
+        int h,
+        float x0,
+        float y0,
+        float x1,
+        float y1,
+        unsigned char r,
+        unsigned char g,
+        unsigned char b,
+        unsigned char a)
+    {
+        const float dx = x1 - x0;
+        const float dy = y1 - y0;
+        const int steps = std::max(1, (int)std::ceil(std::max(std::abs(dx), std::abs(dy))));
+        for (int i = 0; i <= steps; ++i)
+        {
+            const float t = (float)i / (float)steps;
+            const int x = (int)std::lround(x0 + dx * t);
+            const int y = (int)std::lround(y0 + dy * t);
+            canva_blend_rgba(pixels, w, h, x, y, r, g, b, a);
+        }
+    }
+
+    static bool canva_load_smpl_faces(std::vector<std::uint32_t>* out_faces, std::string* out_error)
+    {
+        if (!out_faces)
+            return false;
+        out_faces->clear();
+
+        cnpy::NpyArray faces;
+        try
+        {
+            faces = cnpy::npz_load((assets_dir() / "smplh" / "neutral" / "model.npz").string(), "f");
+        }
+        catch (const std::exception& e)
+        {
+            if (out_error)
+                *out_error = std::string("Failed to load SMPL faces: ") + e.what();
+            return false;
+        }
+
+        if (faces.shape.size() != 2 || faces.shape[1] != 3 || (faces.word_size != 4 && faces.word_size != 8))
+        {
+            if (out_error)
+                *out_error = "SMPL face topology has an unsupported shape or integer type";
+            return false;
+        }
+
+        const size_t n = faces.shape[0] * 3u;
+        out_faces->resize(n);
+        if (faces.word_size == 4)
+        {
+            const std::uint32_t* src = faces.data<std::uint32_t>();
+            std::copy(src, src + n, out_faces->begin());
+        }
+        else
+        {
+            const std::uint64_t* src = faces.data<std::uint64_t>();
+            for (size_t i = 0; i < n; ++i)
+                (*out_faces)[i] = (std::uint32_t)src[i];
+        }
+        return true;
+    }
+
+    static bool canva_render_nlf_projected_smpl_png(
+        const std::string& nlf_text,
+        const std::filesystem::path& out_path,
+        std::string* out_error)
+    {
+        std::vector<float> vertices2d;
+        if (!canva_parse_number_array_field(nlf_text, "vertices2d_flat", &vertices2d, out_error))
+            return false;
+
+        double vertex_count_d = 0.0;
+        if (!canva_parse_number_field(nlf_text, "vertices2d_count", &vertex_count_d))
+        {
+            if (out_error)
+                *out_error = "NLF result is missing vertices2d_count";
+            return false;
+        }
+        const int vertex_count = std::max(0, (int)std::lround(vertex_count_d));
+        if (vertex_count <= 0 || vertices2d.size() < (size_t)vertex_count * 2u)
+        {
+            if (out_error)
+                *out_error = "NLF result has invalid projected SMPL vertices";
+            return false;
+        }
+
+        double image_width_d = 512.0;
+        double image_height_d = 512.0;
+        double image_size_d = 512.0;
+        (void)canva_parse_number_field(nlf_text, "image_size", &image_size_d);
+        if (!canva_parse_number_field(nlf_text, "image_width", &image_width_d))
+            image_width_d = image_size_d;
+        if (!canva_parse_number_field(nlf_text, "image_height", &image_height_d))
+            image_height_d = image_size_d;
+        const int w = std::clamp((int)std::lround(image_width_d), 2, 8192);
+        const int h = std::clamp((int)std::lround(image_height_d), 2, 8192);
+
+        std::vector<std::uint32_t> faces;
+        if (!canva_load_smpl_faces(&faces, out_error))
+            return false;
+
+        std::vector<unsigned char> pixels((size_t)w * (size_t)h * 4u, 0u);
+        constexpr unsigned char r = 10u;
+        constexpr unsigned char g = 122u;
+        constexpr unsigned char b = 219u;
+        constexpr unsigned char face_a = 42u;
+        constexpr unsigned char edge_a = 90u;
+
+        for (size_t f = 0; f + 2u < faces.size(); f += 3u)
+        {
+            const std::uint32_t ia = faces[f + 0u];
+            const std::uint32_t ib = faces[f + 1u];
+            const std::uint32_t ic = faces[f + 2u];
+            if (ia >= (std::uint32_t)vertex_count || ib >= (std::uint32_t)vertex_count || ic >= (std::uint32_t)vertex_count)
+                continue;
+
+            const float ax = vertices2d[(size_t)ia * 2u + 0u];
+            const float ay = vertices2d[(size_t)ia * 2u + 1u];
+            const float bx = vertices2d[(size_t)ib * 2u + 0u];
+            const float by = vertices2d[(size_t)ib * 2u + 1u];
+            const float cx = vertices2d[(size_t)ic * 2u + 0u];
+            const float cy = vertices2d[(size_t)ic * 2u + 1u];
+            if (!std::isfinite(ax) || !std::isfinite(ay)
+                || !std::isfinite(bx) || !std::isfinite(by)
+                || !std::isfinite(cx) || !std::isfinite(cy))
+                continue;
+
+            const float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+            if (std::abs(area) < 1e-6f)
+                continue;
+
+            int x0 = (int)std::floor(std::min({ ax, bx, cx }));
+            int y0 = (int)std::floor(std::min({ ay, by, cy }));
+            int x1 = (int)std::ceil(std::max({ ax, bx, cx }));
+            int y1 = (int)std::ceil(std::max({ ay, by, cy }));
+            x0 = std::clamp(x0, 0, w - 1);
+            y0 = std::clamp(y0, 0, h - 1);
+            x1 = std::clamp(x1, 0, w - 1);
+            y1 = std::clamp(y1, 0, h - 1);
+
+            for (int y = y0; y <= y1; ++y)
+            {
+                const float py = (float)y + 0.5f;
+                for (int x = x0; x <= x1; ++x)
+                {
+                    const float px = (float)x + 0.5f;
+                    const float w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area;
+                    const float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area;
+                    const float w2 = 1.0f - w0 - w1;
+                    if (w0 >= -1e-4f && w1 >= -1e-4f && w2 >= -1e-4f)
+                        canva_blend_rgba(pixels, w, h, x, y, r, g, b, face_a);
+                }
+            }
+
+            canva_draw_line_rgba(pixels, w, h, ax, ay, bx, by, r, g, b, edge_a);
+            canva_draw_line_rgba(pixels, w, h, bx, by, cx, cy, r, g, b, edge_a);
+            canva_draw_line_rgba(pixels, w, h, cx, cy, ax, ay, r, g, b, edge_a);
+        }
+
+        std::error_code ec;
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        if (ec)
+        {
+            if (out_error)
+                *out_error = "Failed to create NLF SMPL render directory: " + ec.message();
+            return false;
+        }
+        if (stbi_write_png(out_path.string().c_str(), w, h, 4, pixels.data(), w * 4) == 0)
+        {
+            if (out_error)
+                *out_error = "Failed to write NLF projected SMPL layer: " + out_path.string();
+            return false;
+        }
+        return true;
+    }
+
+     bool canva_add_nlf_projected_smpl_layer(
+        CanvaState& canva,
+        const std::filesystem::path& nlf_json_path,
+        const std::filesystem::path& model_input_path,
+        std::string* out_error)
+    {
+        std::ifstream in(nlf_json_path);
+        if (!in)
+        {
+            if (out_error)
+                *out_error = "Failed to open NLF JSON: " + nlf_json_path.string();
+            return false;
+        }
+        std::ostringstream ss;
+        ss << in.rdbuf();
+
+        const std::filesystem::path out_path = std::filesystem::path("renders") / "canva_nlf_smpl_layer.png";
+        if (!canva_render_nlf_projected_smpl_png(ss.str(), out_path, out_error))
+            return false;
+
+        return canva_add_preprocess_aligned_png_layer(
+            canva,
+            out_path.string(),
+            model_input_path,
+            "NLF mesh overlay",
+            CanvaLayerKind::Smpl,
+            false,
+            out_error);
     }
 
      bool canva_add_generated_cloth_layer(

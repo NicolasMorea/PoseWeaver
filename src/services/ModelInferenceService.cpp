@@ -45,18 +45,22 @@ namespace poseweaver
         stop();
     }
 
-    void ModelInferenceService::start(
+    void ModelInferenceService::configure(
         const std::filesystem::path& model_dir,
         const std::filesystem::path& worker_script,
         const std::filesystem::path& checkpoint_filename)
+    {
+        m_model_dir = model_dir;
+        m_worker_script = worker_script;
+        m_checkpoint_filename = checkpoint_filename;
+    }
+
+    void ModelInferenceService::start()
     {
         if (m_running.load())
             return;
 
     #if defined(_WIN32)
-        (void)model_dir;
-        (void)worker_script;
-        (void)checkpoint_filename;
         if (!m_windows_unsupported_started)
         {
             m_windows_unsupported_started = true;
@@ -64,10 +68,10 @@ namespace poseweaver
                 m_label + " background worker is not implemented for Windows builds yet", "" });
         }
     #else
-        std::filesystem::path script = worker_script;
+        std::filesystem::path script = m_worker_script;
         if (script.empty())
-            script = model_dir / "inference_worker.py";
-        const std::filesystem::path checkpoint = model_dir / checkpoint_filename;
+            script = m_model_dir / "inference_worker.py";
+        const std::filesystem::path checkpoint = m_model_dir / m_checkpoint_filename;
 
         if (!std::filesystem::exists(script))
         {
@@ -190,12 +194,24 @@ namespace poseweaver
     #endif
     }
 
+    void ModelInferenceService::start(
+        const std::filesystem::path& model_dir,
+        const std::filesystem::path& worker_script,
+        const std::filesystem::path& checkpoint_filename)
+    {
+        configure(model_dir, worker_script, checkpoint_filename);
+        start();
+    }
+
     bool ModelInferenceService::request_inference(
         std::uint64_t request_id,
         const std::filesystem::path& sketch_path,
         const std::filesystem::path& output_path,
         std::string* out_error)
     {
+        if (!m_running.load())
+            start();
+
         if (!m_running.load())
         {
             if (out_error)

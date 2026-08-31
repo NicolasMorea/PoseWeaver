@@ -410,6 +410,11 @@ namespace poseweaver::ui_canva
         {
             for (const CanvaLayer& layer : canva.layers)
             {
+                if (layer.kind == CanvaLayerKind::ClothFittingWarpedSmoothed)
+                    return &layer;
+            }
+            for (const CanvaLayer& layer : canva.layers)
+            {
                 if (layer.kind == CanvaLayerKind::ClothFittingWarped)
                     return &layer;
             }
@@ -812,15 +817,13 @@ namespace poseweaver::ui_canva
             case CanvaLayerKind::GeneratedCloth:
             case CanvaLayerKind::ClothFitting:
             case CanvaLayerKind::ClothFittingWarped:
+            case CanvaLayerKind::ClothFittingWarpedSmoothed:
             case CanvaLayerKind::ClothFittingDebug:
-            case CanvaLayerKind::ClothFittingWarpedDebug:
             case CanvaLayerKind::ClothFittingOcclusionDebug:
             case CanvaLayerKind::ClothFittingSceneOcclusionDebug:
             case CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug:
             case CanvaLayerKind::ClothFittingIsoOcclusionDebug:
-            case CanvaLayerKind::ClothFittingSceneDebug:
             case CanvaLayerKind::ClothFittingDeformation:
-            case CanvaLayerKind::ClothFittingCloseToBodyDebug:
                 return true;
             default:
                 return false;
@@ -1236,20 +1239,43 @@ namespace poseweaver::ui_canva
                 return false;
             }
 
+            std::filesystem::path sharpened_iso_path;
             std::filesystem::path filtered_iso_path;
             std::filesystem::path filtered_depth_path;
             std::string filter_err;
-            if (!poseweaver::postproc::filter_isomap_prediction(
+            if (!poseweaver::postproc::sharpen_isomap_prediction(
                     frame.iso_path,
-                    &filtered_iso_path,
+                    &sharpened_iso_path,
                     &filter_err))
             {
                 frame.inference_status = CanvaFrameInferenceStatus::Failed;
                 canva.sequence_waiting_sketch_inference = false;
                 canva.sequence_status = "Failed";
-                console_add_line(state, "Sequence: failed to filter ISO prediction: "
+                console_add_line(state, "Sequence: failed to sharpen ISO prediction: "
                     + (filter_err.empty() ? std::string("(unknown error)") : filter_err));
                 return false;
+            }
+            filtered_iso_path = sharpened_iso_path;
+            if (state.sketch2iso_continuity_filter_enabled)
+            {
+                const poseweaver::postproc::IsoContinuityFilterParams iso_filter_params{
+                    state.sketch2iso_continuity_filter_strength,
+                    state.sketch2iso_continuity_edge_threshold,
+                    state.sketch2iso_continuity_iterations,
+                };
+                if (!poseweaver::postproc::filter_isomap_continuity(
+                        sharpened_iso_path,
+                        iso_filter_params,
+                        &filtered_iso_path,
+                        &filter_err))
+                {
+                    frame.inference_status = CanvaFrameInferenceStatus::Failed;
+                    canva.sequence_waiting_sketch_inference = false;
+                    canva.sequence_status = "Failed";
+                    console_add_line(state, "Sequence: failed to continuity-filter ISO prediction: "
+                        + (filter_err.empty() ? std::string("(unknown error)") : filter_err));
+                    return false;
+                }
             }
             filter_err.clear();
             if (!poseweaver::postproc::filter_depth_prediction(
@@ -2234,9 +2260,9 @@ namespace poseweaver::ui_canva
 
     void draw_sequence_tab(AppState& state, Renderer& renderer)
     {
+        (void)renderer;
         CanvaState& canva = canva_state();
         canva_ensure_initialized(state, canva);
-        update_canva_frame(state, canva, renderer);
         sequence_update_rig_overlay_for_sim_frame(state, canva);
 
         canva.sequence_frame_rate = std::clamp(canva.sequence_frame_rate, 1, 240);

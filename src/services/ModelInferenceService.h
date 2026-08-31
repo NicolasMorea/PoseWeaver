@@ -20,6 +20,11 @@ namespace poseweaver
         ModelInferenceService(const ModelInferenceService&) = delete;
         ModelInferenceService& operator=(const ModelInferenceService&) = delete;
 
+        void configure(
+            const std::filesystem::path& model_dir,
+            const std::filesystem::path& worker_script = {},
+            const std::filesystem::path& checkpoint_filename = "best.pth");
+        void start();
         void start(
             const std::filesystem::path& model_dir,
             const std::filesystem::path& worker_script = {},
@@ -70,6 +75,9 @@ namespace poseweaver
         std::thread m_reader;
         std::atomic_bool m_running{ false };
         std::string m_label;
+        std::filesystem::path m_model_dir;
+        std::filesystem::path m_worker_script;
+        std::filesystem::path m_checkpoint_filename{ "best.pth" };
 
     #if defined(_WIN32)
         bool m_windows_unsupported_started = false;

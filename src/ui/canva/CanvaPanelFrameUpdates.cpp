@@ -119,6 +119,7 @@ namespace poseweaver::ui_canva
         canva.extract_pose_generate_cloth_after = false;
         canva.extract_pose_using_nlf = false;
         canva.extract_pose_nlf_fallback_allowed = false;
+        canva.extract_pose_waiting_custom_workers = false;
         canva.extract_pose_direct_nlf = false;
         canva.bone_prediction_debug_mode = 4;
         canva.bone_prediction_debug_status = "Bone prediction failed";
@@ -149,6 +150,52 @@ namespace poseweaver::ui_canva
     discard_reset_result(state.vitpose, canva.ignore_vitpose_request_id);
 
     (void)canva_try_submit_pending_vitpose(state, canva);
+
+    if (canva.extract_pose_waiting_custom_workers)
+    {
+        const bool workers_failed =
+            state.sketch2rig.status == ModelInferenceStatus::Error
+            || state.sketch2rig.status == ModelInferenceStatus::Stopped
+            || state.sketch2betas.status == ModelInferenceStatus::Error
+            || state.sketch2betas.status == ModelInferenceStatus::Stopped;
+        if (workers_failed)
+        {
+            canva_fail_extract_pose_pipeline(
+                state,
+                canva,
+                "Canva: Extract Pose fallback failed while loading Custom workers");
+        }
+        else if (state.sketch2rig.status == ModelInferenceStatus::Ready
+            && state.sketch2betas.status == ModelInferenceStatus::Ready)
+        {
+            const bool generate_cloth_after = canva.extract_pose_generate_cloth_after;
+            const bool hide_rig_layer = canva.extract_pose_hide_rig_layer;
+            const float nlf_confidence = canva.bone_prediction_nlf_confidence;
+            const std::filesystem::path sketch_path = canva.extract_pose_model_input_path;
+            canva.extract_pose_waiting_custom_workers = false;
+            std::string fallback_error;
+            if (!canva_queue_extract_pose_custom_from_sketch(
+                    state,
+                    canva,
+                    sketch_path,
+                    generate_cloth_after,
+                    hide_rig_layer,
+                    &fallback_error))
+            {
+                canva_fail_extract_pose_pipeline(
+                    state,
+                    canva,
+                    "Canva: Extract Pose fallback failed: "
+                        + (fallback_error.empty() ? std::string("(unknown error)") : fallback_error));
+            }
+            else
+            {
+                canva.bone_prediction_debug_mode = 2;
+                canva.bone_prediction_nlf_confidence = nlf_confidence;
+                canva.bone_prediction_debug_status = "Fallback to Custom";
+            }
+        }
+    }
 
     // Consume undo requests routed from the GLFW key callback.
     while (canva.last_undo_request_id < state.canva_undo_request_id)
@@ -279,35 +326,18 @@ namespace poseweaver::ui_canva
             }
             else if (canva.extract_pose_nlf_fallback_allowed)
             {
-                const bool generate_cloth_after = canva.extract_pose_generate_cloth_after;
-                const bool hide_rig_layer = canva.extract_pose_hide_rig_layer;
-                const std::filesystem::path sketch_path = canva.extract_pose_model_input_path;
-                std::string fallback_error;
                 console_add_line(state, "Canva: NLF found no human; falling back to Custom bones and betas"
                     " (confidence " + std::to_string(nlf_confidence) + ")");
                 canva.extract_pose_using_nlf = false;
                 canva.extract_pose_nlf_fallback_allowed = false;
                 canva.extract_pose_direct_nlf = false;
-                if (!canva_queue_extract_pose_custom_from_sketch(
-                        state,
-                        canva,
-                        sketch_path,
-                        generate_cloth_after,
-                        hide_rig_layer,
-                        &fallback_error))
-                {
-                    canva_fail_extract_pose_pipeline(
-                        state,
-                        canva,
-                        "Canva: Extract Pose fallback failed: "
-                            + (fallback_error.empty() ? std::string("(unknown error)") : fallback_error));
-                }
-                else
-                {
-                    canva.bone_prediction_debug_mode = 2;
-                    canva.bone_prediction_nlf_confidence = nlf_confidence;
-                    canva.bone_prediction_debug_status = "Fallback to Custom";
-                }
+                state.sketch2rig.service->start();
+                state.sketch2betas.service->start();
+                canva.extract_pose_waiting_custom_workers = true;
+                canva.bone_prediction_debug_mode = 2;
+                canva.bone_prediction_nlf_confidence = nlf_confidence;
+                canva.bone_prediction_debug_status = "Loading Custom fallback";
+                console_add_line(state, "Canva: Loading Sketch2Rig and Sketch2Betas for fallback");
             }
             else
             {
@@ -388,7 +418,7 @@ namespace poseweaver::ui_canva
                         raw_depth_path,
                         state.sketch2depth.last_sketch_path,
                         false,
-                        "Sketch2Depth Unfiltered",
+                        "Depth prediction",
                         &layer_error))
                 {
                     console_add_line(state, "Canva: Failed to add hidden unfiltered depth layer: "
@@ -400,7 +430,7 @@ namespace poseweaver::ui_canva
                         filtered_depth_path,
                         state.sketch2depth.last_sketch_path,
                         false,
-                        "Sketch2Depth Filtered",
+                        "Sharpened depth prediction",
                         &layer_error))
                 {
                     console_add_line(state, "Canva: Failed to add hidden filtered depth layer: "
@@ -433,7 +463,7 @@ namespace poseweaver::ui_canva
                         raw_depth_path,
                         state.sketch2depth.last_sketch_path,
                         false,
-                        "Sketch2Depth Unfiltered",
+                        "Depth prediction",
                         &error))
                 {
                     console_add_line(state, "Canva: Added hidden unfiltered Sketch2Depth layer from "
@@ -452,7 +482,7 @@ namespace poseweaver::ui_canva
                             filtered_depth_path,
                             state.sketch2depth.last_sketch_path,
                             false,
-                            "Sketch2Depth Filtered",
+                            "Sharpened depth prediction",
                             &error))
                     {
                         console_add_line(state, "Canva: Added hidden filtered Sketch2Depth layer from "
@@ -747,15 +777,35 @@ namespace poseweaver::ui_canva
             {
             std::string err;
             const std::filesystem::path raw_iso_path = state.sketch2iso.last_output_path;
+            std::filesystem::path sharpened_iso_path;
             std::filesystem::path filtered_iso_path;
             std::string filter_error;
-            const bool filtered_iso = poseweaver::postproc::filter_isomap_prediction(
+            const bool sharpened_iso = poseweaver::postproc::sharpen_isomap_prediction(
                 raw_iso_path,
-                &filtered_iso_path,
+                &sharpened_iso_path,
                 &filter_error);
-            if (!filtered_iso && is_internal_iso)
+            bool filtered_iso = false;
+            if (sharpened_iso && state.sketch2iso_continuity_filter_enabled)
             {
-                console_add_line(state, "Canva: Sketch2ISO filtering failed: "
+                const poseweaver::postproc::IsoContinuityFilterParams iso_filter_params{
+                    state.sketch2iso_continuity_filter_strength,
+                    state.sketch2iso_continuity_edge_threshold,
+                    state.sketch2iso_continuity_iterations,
+                };
+                filtered_iso = poseweaver::postproc::filter_isomap_continuity(
+                    sharpened_iso_path,
+                    iso_filter_params,
+                    &filtered_iso_path,
+                    &filter_error);
+            }
+            const std::filesystem::path selected_iso_path = filtered_iso
+                ? filtered_iso_path
+                : sharpened_iso_path;
+            const bool required_filter_failed = !sharpened_iso
+                || (state.sketch2iso_continuity_filter_enabled && !filtered_iso);
+            if (required_filter_failed && is_internal_iso)
+            {
+                console_add_line(state, "Canva: Sketch2ISO postprocessing failed: "
                     + (filter_error.empty() ? std::string("(unknown error)") : filter_error));
                 if (is_iso_displacement)
                 {
@@ -775,17 +825,45 @@ namespace poseweaver::ui_canva
                 }
                 return;
             }
-            const bool added_iso = is_internal_iso
-                ? true
-                : canva_add_iso_debug_layer(
+            const int previously_active_layer_id =
+                is_internal_iso
+                && canva.active_layer >= 0
+                && canva.active_layer < (int)canva.layers.size()
+                ? canva.layers[(size_t)canva.active_layer].id
+                : -1;
+            bool added_iso = canva_add_iso_debug_layer(
                     canva,
                     raw_iso_path,
                     state.sketch2iso.last_sketch_path,
-                    "Sketch2ISO Debug",
-                    true,
+                    "Raw ISO prediction",
+                    !is_internal_iso,
                     &err);
+            const int raw_iso_layer_id = added_iso && !canva.layers.empty()
+                ? canva.layers.front().id
+                : -1;
+            if (!added_iso && is_internal_iso)
+            {
+                console_add_line(state, "Canva: Failed to add hidden raw Sketch2ISO layer: "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+                added_iso = true;
+            }
             if (added_iso)
             {
+                if (sharpened_iso)
+                {
+                    std::string layer_error;
+                    if (!canva_add_iso_debug_layer(
+                            canva,
+                            sharpened_iso_path,
+                            state.sketch2iso.last_sketch_path,
+                            "Sharpened ISO prediction",
+                            false,
+                            &layer_error))
+                    {
+                        console_add_line(state, "Canva: Failed to add hidden sharpened Sketch2ISO layer: "
+                            + (layer_error.empty() ? std::string("(unknown error)") : layer_error));
+                    }
+                }
                 if (filtered_iso)
                 {
                     std::string layer_error;
@@ -793,34 +871,39 @@ namespace poseweaver::ui_canva
                             canva,
                             filtered_iso_path,
                             state.sketch2iso.last_sketch_path,
-                            "Sketch2ISO Filtered",
+                            "Filtered ISO prediction",
                             false,
                             &layer_error))
                     {
-                        console_add_line(state, "Canva: Failed to add hidden filtered Sketch2ISO layer: "
+                        console_add_line(state, "Canva: Failed to add hidden continuity-filtered Sketch2ISO layer: "
                             + (layer_error.empty() ? std::string("(unknown error)") : layer_error));
                     }
                 }
-                else
+                if (required_filter_failed)
                 {
-                    console_add_line(state, "Canva: Sketch2ISO filtering failed: "
+                    console_add_line(state, "Canva: Sketch2ISO postprocessing failed: "
                         + (filter_error.empty() ? std::string("(unknown error)") : filter_error));
                 }
+                const int restored_layer_index = canva_find_layer_index_by_id(
+                    canva,
+                    is_internal_iso ? previously_active_layer_id : raw_iso_layer_id);
+                if (restored_layer_index >= 0)
+                    canva.active_layer = restored_layer_index;
                 console_add_line(
                     state,
                     std::string(is_internal_iso
                             ? "Canva: Kept internal Sketch2ISO prediction file at "
                             : "Canva: Added Sketch2ISO debug layer from ")
-                        + (filtered_iso ? filtered_iso_path.string() : raw_iso_path.string()));
+                        + (selected_iso_path.empty() ? raw_iso_path.string() : selected_iso_path.string()));
                 if (is_iso_displacement)
                 {
                     canva.generate_iso_displacement_waiting_iso = false;
                     canva.generate_iso_displacement_waiting_render = true;
                     canva.generate_iso_displacement_status = "Projecting ISO displacement";
                     canva.generate_iso_displacement_npz_path =
-                        filtered_iso_path;
+                        selected_iso_path;
                     state.canva_iso_displacement_npz_path =
-                        filtered_iso_path.string();
+                        selected_iso_path.string();
                     state.canva_iso_displacement_model_input_path =
                         canva.generate_iso_displacement_model_input_path.string();
                     state.canva_iso_displacement_path.clear();
@@ -839,7 +922,7 @@ namespace poseweaver::ui_canva
                             "Sketch2ISO",
                             canva.cloth_fitting_iso_start);
                     canva.cloth_fitting_waiting_iso = false;
-                    canva.cloth_fitting_iso_path = filtered_iso_path;
+                    canva.cloth_fitting_iso_path = selected_iso_path;
                     canva.cloth_fitting_status = canva.cloth_fitting_waiting_depth
                         ? "Waiting for depth" : "Depth testing";
                     canva_finish_cloth_fitting_if_ready(state, canva, renderer);
