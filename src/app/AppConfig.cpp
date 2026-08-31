@@ -314,10 +314,21 @@ namespace
         {
             state->xpbd_params.bend_enabled = (iv != 0);
         }
+        if (std::sscanf(line, "XpbdBendingMethod=%d", &iv) == 1)
+        {
+            state->xpbd_params.bending_method = iv == 1
+                ? poseweaver::BendingMethod::DihedralAngle
+                : poseweaver::BendingMethod::OppositeVertexDistance;
+        }
         if (std::sscanf(line, "XpbdBendCompliance=%f", &v) == 1)
         {
             if (std::isfinite(v))
                 state->xpbd_params.bend_compliance = std::clamp(v, 0.0f, 1000.0f);
+        }
+        if (std::sscanf(line, "XpbdDihedralCompliance=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->xpbd_params.dihedral_compliance = std::clamp(v, 0.0f, 1000.0f);
         }
 
         if (std::sscanf(line, "XpbdCollisionEnabled=%d", &iv) == 1)
@@ -492,7 +503,9 @@ namespace
         buf->appendf("XpbdBaseStretchMult=%.9f\n", state->xpbd_params.base_stretch_mult);
 
         buf->appendf("XpbdBendEnabled=%d\n", state->xpbd_params.bend_enabled ? 1 : 0);
+        buf->appendf("XpbdBendingMethod=%d\n", (int)state->xpbd_params.bending_method);
         buf->appendf("XpbdBendCompliance=%.9f\n", state->xpbd_params.bend_compliance);
+        buf->appendf("XpbdDihedralCompliance=%.9f\n", state->xpbd_params.dihedral_compliance);
 
         buf->appendf("XpbdCollisionEnabled=%d\n", state->xpbd_params.collision_enabled ? 1 : 0);
         buf->appendf("XpbdCollisionCompliance=%.9f\n", state->xpbd_params.collision_compliance);

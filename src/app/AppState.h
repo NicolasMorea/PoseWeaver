@@ -99,7 +99,9 @@ namespace poseweaver
         float base_stretch_mult = 1.0f;
 
         bool bend_enabled = true;
+        BendingMethod bending_method = BendingMethod::OppositeVertexDistance;
         float bend_compliance = 1e-4f;
+        float dihedral_compliance = 1e-6f;
 
         bool collision_enabled = true;
         float collision_compliance = 0.0f;

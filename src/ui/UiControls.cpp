@@ -431,8 +431,34 @@ namespace poseweaver
 
                                 ImGui::Checkbox("Bend", &p.bend_enabled);
                                 ImGui::BeginDisabled(!p.bend_enabled);
-                                ImGui::InputFloat("Bend compliance", &p.bend_compliance, 1e-7f, 1e-6f, "%.8f");
+                                const char* bending_method_items[] = {
+                                    "Opposite vertex distance",
+                                    "Stable dihedral (wrinkles)"
+                                };
+                                int bending_method = (int)p.bending_method;
+                                if (ImGui::Combo(
+                                        "Bending method",
+                                        &bending_method,
+                                        bending_method_items,
+                                        IM_ARRAYSIZE(bending_method_items)))
+                                {
+                                    p.bending_method = bending_method == 1
+                                        ? BendingMethod::DihedralAngle
+                                        : BendingMethod::OppositeVertexDistance;
+                                }
+                                if (p.bending_method == BendingMethod::DihedralAngle)
+                                {
+                                    ImGui::InputFloat(
+                                        "Dihedral compliance", &p.dihedral_compliance, 1e-7f, 1e-6f, "%.8f");
+                                    if (ImGui::IsItemHovered())
+                                        ImGui::SetTooltip("Geometry-weighted discrete-shell bending. Start near 1e-6; lower is crisper, higher is softer.");
+                                }
+                                else
+                                {
+                                    ImGui::InputFloat("Bend compliance", &p.bend_compliance, 1e-7f, 1e-6f, "%.8f");
+                                }
                                 ImGui::EndDisabled();
+                                p.dihedral_compliance = std::max(p.dihedral_compliance, 0.0f);
                                 p.bend_compliance = std::max(p.bend_compliance, 0.0f);
 
                                 ImGui::Checkbox("Collision", &p.collision_enabled);

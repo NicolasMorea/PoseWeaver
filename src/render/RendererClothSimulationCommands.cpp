@@ -1450,7 +1450,9 @@ namespace poseweaver
         xpbd_params.base_stretch_mult = (double)state.xpbd_params.base_stretch_mult;
         xpbd_params.substeps = std::max(1, state.xpbd_params.substeps);
         xpbd_params.bend_enabled = state.xpbd_params.bend_enabled;
+        xpbd_params.bending_method = state.xpbd_params.bending_method;
         xpbd_params.bend_compliance = std::max(0.0, (double)state.xpbd_params.bend_compliance);
+        xpbd_params.dihedral_compliance = std::max(0.0, (double)state.xpbd_params.dihedral_compliance);
         xpbd_params.collision_enabled = state.xpbd_params.collision_enabled;
         xpbd_params.collision_compliance = std::max(0.0, (double)state.xpbd_params.collision_compliance);
         xpbd_params.collision_thickness = (double)state.xpbd_params.collision_thickness;
