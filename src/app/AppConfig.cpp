@@ -228,7 +228,48 @@ namespace
         if (std::sscanf(line, "ClothFittingWarpSteps=%d", &iv) == 1)
         {
             state->cloth_fitting_warp_steps = std::clamp(iv, 1, 32);
+        if (std::sscanf(line, "ClothFittingDebugSmoothingRadius=%d", &iv) == 1)
+            state->cloth_fitting_debug_smoothing_radius = std::clamp(iv, 0, 8);
+        if (std::sscanf(line, "ClothFittingDebugSmoothingPasses=%d", &iv) == 1)
+            state->cloth_fitting_debug_smoothing_passes = std::clamp(iv, 0, 8);
+        if (std::sscanf(line, "ClothFittingDebugMinPatchArea=%d", &iv) == 1)
+            state->cloth_fitting_debug_min_patch_area = std::clamp(iv, 1, 4096);
+        if (std::sscanf(line, "ClothFittingDebugErrorFillRadius=%d", &iv) == 1)
+            state->cloth_fitting_debug_error_fill_radius = std::clamp(iv, 0, 4096);
         }
+        if (std::sscanf(line, "ClothFittingOcclusionCleanupRadius=%d", &iv) == 1)
+        {
+            state->cloth_fitting_occlusion_cleanup_radius = std::clamp(iv, 1, 32);
+        }
+        if (std::sscanf(line, "ClothFittingOcclusionCleanupPasses=%d", &iv) == 1)
+        {
+            state->cloth_fitting_occlusion_cleanup_passes = std::clamp(iv, 0, 8);
+        }
+        if (std::sscanf(line, "ClothFittingOcclusionChaosThreshold=%f", &v) == 1)
+        {
+            if (std::isfinite(v))
+                state->cloth_fitting_occlusion_chaos_threshold = std::clamp(v, 0.01f, 0.5f);
+        }
+        if (std::sscanf(line, "ClothFittingOcclusionMinPatchArea=%d", &iv) == 1)
+        {
+            state->cloth_fitting_occlusion_min_patch_area = std::clamp(iv, 1, 4096);
+        }
+        if (std::sscanf(line, "ClothSmoothingFilterStrength=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_smoothing_filter_strength = std::clamp(v, 0.0f, 1.0f);
+        if (std::sscanf(line, "ClothSmoothingInnerLineWidth=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_smoothing_inner_line_width = std::clamp(v, 0.0f, 20.0f);
+        if (std::sscanf(line, "ClothSmoothingContourRadius=%d", &iv) == 1)
+            state->cloth_smoothing_contour_radius = std::clamp(iv, 1, 32);
+        if (std::sscanf(line, "ClothSmoothingLineGapRadius=%d", &iv) == 1)
+            state->cloth_smoothing_line_gap_radius = std::clamp(iv, 0, 12);
+        if (std::sscanf(line, "Sketch2IsoContinuityFilterEnabled=%d", &iv) == 1)
+            state->sketch2iso_continuity_filter_enabled = iv != 0;
+        if (std::sscanf(line, "Sketch2IsoContinuityFilterStrength=%f", &v) == 1 && std::isfinite(v))
+            state->sketch2iso_continuity_filter_strength = std::clamp(v, 0.0f, 1.0f);
+        if (std::sscanf(line, "Sketch2IsoContinuityEdgeThreshold=%f", &v) == 1 && std::isfinite(v))
+            state->sketch2iso_continuity_edge_threshold = std::clamp(v, 0.001f, 0.25f);
+        if (std::sscanf(line, "Sketch2IsoContinuityIterations=%d", &iv) == 1)
+            state->sketch2iso_continuity_iterations = std::clamp(iv, 1, 32);
         if (std::sscanf(line, "IsoDistanceThreshold=%f", &v) == 1)
         {
             if (std::isfinite(v))
@@ -486,6 +527,22 @@ namespace
         buf->appendf("ClothFittingWarpRadius=%.6f\n", state->cloth_fitting_warp_radius);
         buf->appendf("ClothFittingWarpForce=%.6f\n", state->cloth_fitting_warp_force);
         buf->appendf("ClothFittingWarpSteps=%d\n", state->cloth_fitting_warp_steps);
+        buf->appendf("ClothFittingDebugSmoothingRadius=%d\n", state->cloth_fitting_debug_smoothing_radius);
+        buf->appendf("ClothFittingDebugSmoothingPasses=%d\n", state->cloth_fitting_debug_smoothing_passes);
+        buf->appendf("ClothFittingDebugMinPatchArea=%d\n", state->cloth_fitting_debug_min_patch_area);
+        buf->appendf("ClothFittingDebugErrorFillRadius=%d\n", state->cloth_fitting_debug_error_fill_radius);
+        buf->appendf("ClothFittingOcclusionCleanupRadius=%d\n", state->cloth_fitting_occlusion_cleanup_radius);
+        buf->appendf("ClothFittingOcclusionCleanupPasses=%d\n", state->cloth_fitting_occlusion_cleanup_passes);
+        buf->appendf("ClothFittingOcclusionChaosThreshold=%.6f\n", state->cloth_fitting_occlusion_chaos_threshold);
+        buf->appendf("ClothFittingOcclusionMinPatchArea=%d\n", state->cloth_fitting_occlusion_min_patch_area);
+        buf->appendf("ClothSmoothingFilterStrength=%.6f\n", state->cloth_smoothing_filter_strength);
+        buf->appendf("ClothSmoothingInnerLineWidth=%.6f\n", state->cloth_smoothing_inner_line_width);
+        buf->appendf("ClothSmoothingContourRadius=%d\n", state->cloth_smoothing_contour_radius);
+        buf->appendf("ClothSmoothingLineGapRadius=%d\n", state->cloth_smoothing_line_gap_radius);
+        buf->appendf("Sketch2IsoContinuityFilterEnabled=%d\n", state->sketch2iso_continuity_filter_enabled ? 1 : 0);
+        buf->appendf("Sketch2IsoContinuityFilterStrength=%.6f\n", state->sketch2iso_continuity_filter_strength);
+        buf->appendf("Sketch2IsoContinuityEdgeThreshold=%.6f\n", state->sketch2iso_continuity_edge_threshold);
+        buf->appendf("Sketch2IsoContinuityIterations=%d\n", state->sketch2iso_continuity_iterations);
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
 

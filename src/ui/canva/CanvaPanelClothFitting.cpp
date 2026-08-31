@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <deque>
 #include <sstream>
 #include <utility>
 
@@ -64,155 +65,470 @@ namespace poseweaver::ui_canva
         return name.find("generated cloth") != std::string::npos;
     }
 
+    bool canva_smooth_warped_cloth_layer(
+        const CanvaLayer& source,
+        CanvaLayer& destination,
+        int width,
+        int height,
+        std::string* out_error)
+    {
+        const size_t expected_size = (size_t)width * (size_t)height * 4u;
+        if (width <= 0 || height <= 0 || source.pixels.size() < expected_size)
+        {
+            if (out_error)
+                *out_error = "warped cloth smoothing source is invalid";
+            return false;
+        }
+
+        destination.pixels.assign(expected_size, 0u);
+        int min_x = width;
+        int min_y = height;
+        int max_x = -1;
+        int max_y = -1;
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                if (source.pixels[((size_t)y * (size_t)width + (size_t)x) * 4u + 3u] == 0u)
+                    continue;
+                min_x = std::min(min_x, x);
+                min_y = std::min(min_y, y);
+                max_x = std::max(max_x, x);
+                max_y = std::max(max_y, y);
+            }
+        }
+        if (max_x < min_x || max_y < min_y)
+        {
+            destination.dirty = true;
+            destination.bounds_dirty = true;
+            return true;
+        }
+
+        const float filter_strength =
+            std::clamp(destination.smoothing_filter_strength, 0.0f, 1.0f);
+        const int contour_radius =
+            std::clamp(destination.smoothing_contour_radius, 1, 32);
+        const int line_gap_radius =
+            std::clamp(destination.smoothing_line_gap_radius, 0, 12);
+        const int cleanup_radius = std::max(
+            1,
+            (int)std::lround((float)contour_radius * (0.10f + 0.20f * filter_strength)));
+        const int crop_margin = contour_radius + cleanup_radius + line_gap_radius + 2;
+        min_x = std::max(0, min_x - crop_margin);
+        min_y = std::max(0, min_y - crop_margin);
+        max_x = std::min(width - 1, max_x + crop_margin);
+        max_y = std::min(height - 1, max_y + crop_margin);
+        const int crop_width = max_x - min_x + 1;
+        const int crop_height = max_y - min_y + 1;
+        const size_t crop_pixels = (size_t)crop_width * (size_t)crop_height;
+
+        std::vector<float> samples(crop_pixels * 4u, 0.0f);
+        for (int y = 0; y < crop_height; ++y)
+        {
+            for (int x = 0; x < crop_width; ++x)
+            {
+                const size_t source_index =
+                    ((size_t)(y + min_y) * (size_t)width + (size_t)(x + min_x)) * 4u;
+                const size_t crop_index =
+                    ((size_t)y * (size_t)crop_width + (size_t)x) * 4u;
+                const float alpha = (float)source.pixels[source_index + 3u] / 255.0f;
+                for (int channel = 0; channel < 3; ++channel)
+                    samples[crop_index + (size_t)channel] =
+                        (float)source.pixels[source_index + (size_t)channel] * alpha;
+                samples[crop_index + 3u] = (float)source.pixels[source_index + 3u];
+            }
+        }
+
+        const int kernel_size = contour_radius * 2 + 1;
+        std::vector<float> horizontal(crop_pixels * 4u, 0.0f);
+        std::vector<float> blurred(crop_pixels * 4u, 0.0f);
+        for (int y = 0; y < crop_height; ++y)
+        {
+            float sums[4] = {};
+            for (int x = 0; x <= contour_radius && x < crop_width; ++x)
+            {
+                const size_t index = ((size_t)y * (size_t)crop_width + (size_t)x) * 4u;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += samples[index + (size_t)channel];
+            }
+            for (int x = 0; x < crop_width; ++x)
+            {
+                const size_t index = ((size_t)y * (size_t)crop_width + (size_t)x) * 4u;
+                for (int channel = 0; channel < 4; ++channel)
+                    horizontal[index + (size_t)channel] = sums[channel] / (float)kernel_size;
+                const int remove_x = x - contour_radius;
+                const int add_x = x + contour_radius + 1;
+                if (remove_x >= 0)
+                {
+                    const size_t remove_index =
+                        ((size_t)y * (size_t)crop_width + (size_t)remove_x) * 4u;
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] -= samples[remove_index + (size_t)channel];
+                }
+                if (add_x < crop_width)
+                {
+                    const size_t add_index =
+                        ((size_t)y * (size_t)crop_width + (size_t)add_x) * 4u;
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] += samples[add_index + (size_t)channel];
+                }
+            }
+        }
+        for (int x = 0; x < crop_width; ++x)
+        {
+            float sums[4] = {};
+            for (int y = 0; y <= contour_radius && y < crop_height; ++y)
+            {
+                const size_t index = ((size_t)y * (size_t)crop_width + (size_t)x) * 4u;
+                for (int channel = 0; channel < 4; ++channel)
+                    sums[channel] += horizontal[index + (size_t)channel];
+            }
+            for (int y = 0; y < crop_height; ++y)
+            {
+                const size_t index = ((size_t)y * (size_t)crop_width + (size_t)x) * 4u;
+                for (int channel = 0; channel < 4; ++channel)
+                    blurred[index + (size_t)channel] = sums[channel] / (float)kernel_size;
+                const int remove_y = y - contour_radius;
+                const int add_y = y + contour_radius + 1;
+                if (remove_y >= 0)
+                {
+                    const size_t remove_index =
+                        ((size_t)remove_y * (size_t)crop_width + (size_t)x) * 4u;
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] -= horizontal[remove_index + (size_t)channel];
+                }
+                if (add_y < crop_height)
+                {
+                    const size_t add_index =
+                        ((size_t)add_y * (size_t)crop_width + (size_t)x) * 4u;
+                    for (int channel = 0; channel < 4; ++channel)
+                        sums[channel] += horizontal[add_index + (size_t)channel];
+                }
+            }
+        }
+
+        auto morph_axis = [crop_width, crop_height](
+            const std::vector<unsigned char>& input,
+            int radius,
+            bool horizontal_axis,
+            bool dilate)
+        {
+            if (radius <= 0)
+                return input;
+            std::vector<unsigned char> output(input.size(), 0u);
+            const int major_count = horizontal_axis ? crop_height : crop_width;
+            const int minor_count = horizontal_axis ? crop_width : crop_height;
+            const int full_window = radius * 2 + 1;
+            std::vector<int> prefix((size_t)minor_count + 1u, 0);
+            for (int major = 0; major < major_count; ++major)
+            {
+                prefix[0] = 0;
+                for (int minor = 0; minor < minor_count; ++minor)
+                {
+                    const int x = horizontal_axis ? minor : major;
+                    const int y = horizontal_axis ? major : minor;
+                    prefix[(size_t)minor + 1u] =
+                        prefix[(size_t)minor]
+                        + (input[(size_t)y * (size_t)crop_width + (size_t)x] != 0u ? 1 : 0);
+                }
+                for (int minor = 0; minor < minor_count; ++minor)
+                {
+                    const int begin = std::max(0, minor - radius);
+                    const int finish = std::min(minor_count, minor + radius + 1);
+                    const int count = prefix[(size_t)finish] - prefix[(size_t)begin];
+                    const bool on = dilate ? count > 0 : count == full_window;
+                    const int x = horizontal_axis ? minor : major;
+                    const int y = horizontal_axis ? major : minor;
+                    output[(size_t)y * (size_t)crop_width + (size_t)x] = on ? 1u : 0u;
+                }
+            }
+            return output;
+        };
+        auto morph = [&](const std::vector<unsigned char>& input, int radius, bool dilate)
+        {
+            return morph_axis(
+                morph_axis(input, radius, true, dilate),
+                radius,
+                false,
+                dilate);
+        };
+
+        std::vector<unsigned char> mask(crop_pixels, 0u);
+        for (size_t pixel_index = 0; pixel_index < crop_pixels; ++pixel_index)
+        {
+            mask[pixel_index] =
+                blurred[pixel_index * 4u + 3u] >= 0.5f * 255.0f ? 1u : 0u;
+        }
+        mask = morph(morph(mask, cleanup_radius, true), cleanup_radius, false);
+        mask = morph(morph(mask, cleanup_radius, false), cleanup_radius, true);
+
+        const int far_distance = std::numeric_limits<int>::max();
+        std::vector<int> distance(crop_pixels, far_distance);
+        std::deque<size_t> queue;
+        for (int y = 0; y < crop_height; ++y)
+        {
+            for (int x = 0; x < crop_width; ++x)
+            {
+                const size_t index = (size_t)y * (size_t)crop_width + (size_t)x;
+                if (mask[index] == 0u)
+                    continue;
+                const bool boundary =
+                    x == 0 || y == 0 || x + 1 == crop_width || y + 1 == crop_height
+                    || mask[index - 1u] == 0u
+                    || mask[index + 1u] == 0u
+                    || mask[index - (size_t)crop_width] == 0u
+                    || mask[index + (size_t)crop_width] == 0u;
+                if (boundary)
+                {
+                    distance[index] = 1;
+                    queue.push_back(index);
+                }
+            }
+        }
+        while (!queue.empty())
+        {
+            const size_t index = queue.front();
+            queue.pop_front();
+            const int x = (int)(index % (size_t)crop_width);
+            const int y = (int)(index / (size_t)crop_width);
+            if (x > 0 && mask[index - 1u] != 0u && distance[index - 1u] > distance[index] + 1)
+            {
+                distance[index - 1u] = distance[index] + 1;
+                queue.push_back(index - 1u);
+            }
+            if (x + 1 < crop_width && mask[index + 1u] != 0u
+                && distance[index + 1u] > distance[index] + 1)
+            {
+                distance[index + 1u] = distance[index] + 1;
+                queue.push_back(index + 1u);
+            }
+            if (y > 0 && mask[index - (size_t)crop_width] != 0u
+                && distance[index - (size_t)crop_width] > distance[index] + 1)
+            {
+                distance[index - (size_t)crop_width] = distance[index] + 1;
+                queue.push_back(index - (size_t)crop_width);
+            }
+            if (y + 1 < crop_height && mask[index + (size_t)crop_width] != 0u
+                && distance[index + (size_t)crop_width] > distance[index] + 1)
+            {
+                distance[index + (size_t)crop_width] = distance[index] + 1;
+                queue.push_back(index + (size_t)crop_width);
+            }
+        }
+
+        constexpr std::array<float, 3> shader_tones{ 0.78f, 0.91f, 1.0f };
+        std::array<std::array<unsigned char, 3>, 3> palette{};
+        for (size_t tone = 0; tone < palette.size(); ++tone)
+        {
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                palette[tone][(size_t)channel] = (unsigned char)std::lround(
+                    std::clamp(destination.smoothing_cloth_color[(size_t)channel], 0.0f, 1.0f)
+                    * shader_tones[tone]
+                    * 255.0f);
+            }
+        }
+
+        const float outline_width = std::max(0.0f, destination.smoothing_inner_line_width);
+        std::vector<float> filtered_rgb(crop_pixels * 3u, 0.0f);
+        std::vector<unsigned char> line_mask(crop_pixels, 0u);
+        for (size_t pixel_index = 0; pixel_index < crop_pixels; ++pixel_index)
+        {
+            if (mask[pixel_index] == 0u)
+                continue;
+            const int x = (int)(pixel_index % (size_t)crop_width);
+            const int y = (int)(pixel_index / (size_t)crop_width);
+            const size_t source_index =
+                ((size_t)(y + min_y) * (size_t)width + (size_t)(x + min_x)) * 4u;
+            const size_t blur_index = pixel_index * 4u;
+            const float blur_alpha = std::max(blurred[blur_index + 3u] / 255.0f, 1e-5f);
+            float shader_rgb[3] = {};
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const float blur_color = blurred[blur_index + (size_t)channel] / blur_alpha;
+                shader_rgb[channel] =
+                    source.pixels[source_index + 3u] == 0u
+                    ? blur_color
+                    : (float)source.pixels[source_index + (size_t)channel];
+                filtered_rgb[pixel_index * 3u + (size_t)channel] =
+                    shader_rgb[channel]
+                    + (blur_color - shader_rgb[channel]) * (0.15f * filter_strength);
+            }
+
+            if (source.pixels[source_index + 3u] == 0u)
+                continue;
+            float black_distance = 0.0f;
+            float shader_tone_distance = std::numeric_limits<float>::max();
+            for (int channel = 0; channel < 3; ++channel)
+                black_distance += shader_rgb[channel] * shader_rgb[channel];
+            for (const auto& tone : palette)
+            {
+                float tone_distance = 0.0f;
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    const float delta =
+                        shader_rgb[channel] - (float)tone[(size_t)channel];
+                    tone_distance += delta * delta;
+                }
+                shader_tone_distance = std::min(shader_tone_distance, tone_distance);
+            }
+            line_mask[pixel_index] =
+                black_distance <= shader_tone_distance ? 1u : 0u;
+        }
+        if (line_gap_radius > 0)
+            line_mask = morph(morph(line_mask, line_gap_radius, true), line_gap_radius, false);
+
+        for (int y = 0; y < crop_height; ++y)
+        {
+            for (int x = 0; x < crop_width; ++x)
+            {
+                const size_t pixel_index = (size_t)y * (size_t)crop_width + (size_t)x;
+                if (mask[pixel_index] == 0u)
+                    continue;
+                const size_t output_index =
+                    ((size_t)(y + min_y) * (size_t)width + (size_t)(x + min_x)) * 4u;
+                unsigned char* output = destination.pixels.data() + output_index;
+                const bool outline =
+                    outline_width > 0.0f && (float)distance[pixel_index] <= outline_width;
+                if (outline || line_mask[pixel_index] != 0u)
+                {
+                    output[0] = 0u;
+                    output[1] = 0u;
+                    output[2] = 0u;
+                }
+                else
+                {
+                    size_t selected_tone = 0;
+                    float selected_distance = std::numeric_limits<float>::max();
+                    for (size_t tone = 0; tone < palette.size(); ++tone)
+                    {
+                        float color_distance = 0.0f;
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            const float delta =
+                                filtered_rgb[pixel_index * 3u + (size_t)channel]
+                                - (float)palette[tone][(size_t)channel];
+                            color_distance += delta * delta;
+                        }
+                        if (color_distance < selected_distance)
+                        {
+                            selected_distance = color_distance;
+                            selected_tone = tone;
+                        }
+                    }
+                    output[0] = palette[selected_tone][0];
+                    output[1] = palette[selected_tone][1];
+                    output[2] = palette[selected_tone][2];
+                }
+                output[3] = 255u;
+            }
+        }
+
+        destination.dirty = true;
+        destination.bounds_dirty = true;
+        return true;
+    }
     static bool canva_add_cloth_fitting_layers(
         CanvaState& canva,
         const CanvaLayer& source_layer,
-        std::vector<unsigned char> pixels,
-        std::vector<unsigned char> warped_pixels,
-        std::vector<unsigned char> pixelated_occluded_pixels,
-        std::vector<unsigned char> unwarped_upscaled_pixels,
-        std::vector<unsigned char> debug_pixels,
-        std::vector<unsigned char> warped_debug_pixels,
-        std::vector<unsigned char> unfiltered_occlusion_pixels,
-        std::vector<unsigned char> occlusion_pixels,
-        std::vector<unsigned char> final_unfiltered_occlusion_pixels,
-        std::vector<unsigned char> final_occlusion_pixels,
-        std::vector<unsigned char> scene_occlusion_pixels,
-        std::vector<unsigned char> aligned_predicted_depth_occlusion_pixels,
-        std::vector<unsigned char> iso_occlusion_pixels,
-        std::vector<unsigned char> scene_debug_pixels,
-        std::vector<unsigned char> deformation_pixels,
-        std::vector<unsigned char> close_to_body_pixels,
-        std::vector<std::vector<unsigned char>> deformation_step_pixels,
+        const AppState& state,
+        ClothFittingLayers fitting,
         bool include_hidden_output_layers,
         std::string* out_error)
     {
-        if ((int)pixels.size() < canva.width * canva.height * 4)
+        const size_t expected_size = (size_t)canva.width * (size_t)canva.height * 4u;
+        const auto require_pixels = [&](const std::vector<unsigned char>& pixels, const char* label)
         {
+            if (pixels.size() >= expected_size)
+                return true;
             if (out_error)
-                *out_error = "fitted pixel buffer is too small";
+                *out_error = std::string(label) + " pixel buffer is too small";
             return false;
-        }
-        if ((int)warped_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "warped fitted pixel buffer is too small";
+        };
+        if (!require_pixels(fitting.occluded_cloth, "occluded cloth")
+            || !require_pixels(fitting.warped_cloth, "warped cloth")
+            || !require_pixels(fitting.warped_occluded_cloth, "warped occluded cloth")
+            || !require_pixels(fitting.raw_iso_matching, "raw ISO matching")
+            || !require_pixels(fitting.filtered_iso_matching, "filtered ISO matching")
+            || !require_pixels(fitting.predicted_depth_visibility, "predicted-depth visibility")
+            || !require_pixels(fitting.true_depth_visibility, "true-depth visibility")
+            || !require_pixels(fitting.iso_visibility, "ISO visibility")
+            || !require_pixels(fitting.raw_final_occlusion, "raw final occlusion")
+            || !require_pixels(fitting.filtered_final_occlusion, "filtered final occlusion"))
             return false;
-        }
-        if ((int)pixelated_occluded_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "pixelated occluded cloth buffer is too small";
-            return false;
-        }
-        if ((int)unwarped_upscaled_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "unwarped upscaled cloth buffer is too small";
-            return false;
-        }
-        if ((int)debug_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "debug pixel buffer is too small";
-            return false;
-        }
-        if ((int)warped_debug_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "warped debug pixel buffer is too small";
-            return false;
-        }
-        if ((int)unfiltered_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "unfiltered occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "filtered occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)final_unfiltered_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "final unfiltered occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)final_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "final filtered occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)scene_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "true-depth occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)aligned_predicted_depth_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "aligned predicted-depth occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)iso_occlusion_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "ISO occlusion pixel buffer is too small";
-            return false;
-        }
-        if ((int)scene_debug_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "3D scene debug pixel buffer is too small";
-            return false;
-        }
-        if ((int)deformation_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "deformation map pixel buffer is too small";
-            return false;
-        }
-        if ((int)close_to_body_pixels.size() < canva.width * canva.height * 4)
-        {
-            if (out_error)
-                *out_error = "close-to-body pixel buffer is too small";
-            return false;
-        }
-        for (const std::vector<unsigned char>& step_pixels : deformation_step_pixels)
-        {
-            if ((int)step_pixels.size() < canva.width * canva.height * 4)
-            {
-                if (out_error)
-                    *out_error = "deformation step pixel buffer is too small";
+        for (const auto& step : fitting.deformation_steps)
+            if (!require_pixels(step, "deformation step"))
                 return false;
-            }
-        }
+
+        const std::vector<unsigned char> raw_cloth = source_layer.pixels;
         const ImVec2 source_offset = source_layer.offset;
         const float source_scale = source_layer.scale;
         const int source_layer_id = source_layer.id;
         const bool remove_hidden_source_layer =
             !source_layer.enabled && canva_layer_is_generated_cloth(source_layer);
 
-        CanvaLayer warped_layer = canva_make_layer(
+        CanvaLayer warped_occluded_layer = canva_make_layer(
             canva.width,
             canva.height,
             canva.next_layer_id++,
-            "Modified cloth (warped)");
-        const int warped_layer_id = warped_layer.id;
-        warped_layer.kind = CanvaLayerKind::ClothFittingWarped;
-        warped_layer.pixels = std::move(warped_pixels);
-        warped_layer.offset = source_offset;
-        warped_layer.scale = source_scale;
-        warped_layer.enabled = true;
-        warped_layer.dirty = true;
-        warped_layer.bounds_dirty = true;
+            "Warped occluded cloth");
+        const int warped_occluded_layer_id = warped_occluded_layer.id;
+        warped_occluded_layer.kind = CanvaLayerKind::ClothFittingWarped;
+        warped_occluded_layer.pixels = std::move(fitting.warped_occluded_cloth);
+        warped_occluded_layer.offset = source_offset;
+        warped_occluded_layer.scale = source_scale;
+        warped_occluded_layer.enabled = false;
+        warped_occluded_layer.dirty = true;
+        warped_occluded_layer.bounds_dirty = true;
 
-        canva.layers.insert(canva.layers.begin(), std::move(warped_layer));
+        CanvaLayer smoothed_layer = canva_make_layer(
+            canva.width,
+            canva.height,
+            canva.next_layer_id++,
+            "Smooth result");
+        const int smoothed_layer_id = smoothed_layer.id;
+        smoothed_layer.kind = CanvaLayerKind::ClothFittingWarpedSmoothed;
+        smoothed_layer.offset = source_offset;
+        smoothed_layer.scale = source_scale;
+        smoothed_layer.smoothing_source_layer_id = warped_occluded_layer_id;
+        smoothed_layer.smoothing_filter_strength = state.cloth_smoothing_filter_strength;
+        smoothed_layer.smoothing_inner_line_width = state.cloth_smoothing_inner_line_width;
+        smoothed_layer.smoothing_contour_radius = state.cloth_smoothing_contour_radius;
+        smoothed_layer.smoothing_line_gap_radius = state.cloth_smoothing_line_gap_radius;
+        smoothed_layer.smoothing_cloth_color = state.cloth_ink_color;
+        if (!canva_smooth_warped_cloth_layer(
+                warped_occluded_layer,
+                smoothed_layer,
+                canva.width,
+                canva.height,
+                out_error))
+        {
+            canva_delete_layer_texture(warped_occluded_layer);
+            canva_delete_layer_texture(smoothed_layer);
+            return false;
+        }
+
+        const std::filesystem::path output_dir = state.cloth_fitting_output_dir.empty()
+            ? std::filesystem::path("renders")
+            : std::filesystem::path(state.cloth_fitting_output_dir);
+        const std::filesystem::path smooth_path = output_dir / "cloth_fitting_smooth_result.png";
+        if (stbi_write_png(
+                smooth_path.string().c_str(),
+                canva.width,
+                canva.height,
+                4,
+                smoothed_layer.pixels.data(),
+                canva.width * 4) == 0)
+        {
+            canva_delete_layer_texture(warped_occluded_layer);
+            canva_delete_layer_texture(smoothed_layer);
+            if (out_error)
+                *out_error = "could not write " + smooth_path.string();
+            return false;
+        }
+
+        canva.layers.insert(canva.layers.begin(), std::move(warped_occluded_layer));
+        canva.layers.insert(canva.layers.begin(), std::move(smoothed_layer));
 
         if (include_hidden_output_layers)
         {
@@ -234,27 +550,25 @@ namespace poseweaver::ui_canva
                 canva.layers.insert(insert_pos, std::move(layer));
             };
 
-            add_hidden_layer(std::move(pixelated_occluded_pixels), "Cloth fitting pixelated occluded", CanvaLayerKind::ClothFitting);
-            add_hidden_layer(std::move(unwarped_upscaled_pixels), "Cloth fitting unwarped occlusion-smoothed", CanvaLayerKind::ClothFitting);
-            add_hidden_layer(std::move(debug_pixels), "Cloth fitting debug", CanvaLayerKind::ClothFittingDebug);
-            add_hidden_layer(std::move(warped_debug_pixels), "Cloth fitting debug (warped)", CanvaLayerKind::ClothFittingWarpedDebug);
-            add_hidden_layer(std::move(final_unfiltered_occlusion_pixels), "Cloth fitting final occlusion (unfiltered)", CanvaLayerKind::ClothFittingOcclusionDebug);
-            add_hidden_layer(std::move(final_occlusion_pixels), "Cloth fitting final occlusion (filtered)", CanvaLayerKind::ClothFittingOcclusionDebug);
-            add_hidden_layer(std::move(scene_occlusion_pixels), "Cloth fitting true-depth visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
-            add_hidden_layer(std::move(aligned_predicted_depth_occlusion_pixels), "Cloth fitting predicted-depth visibility", CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug);
-            add_hidden_layer(std::move(iso_occlusion_pixels), "Cloth fitting ISO visibility", CanvaLayerKind::ClothFittingIsoOcclusionDebug);
-            add_hidden_layer(std::move(scene_debug_pixels), "Cloth fitting 3D scene debug", CanvaLayerKind::ClothFittingSceneDebug);
-            add_hidden_layer(std::move(deformation_pixels), "Cloth fitting deformation", CanvaLayerKind::ClothFittingDeformation);
-            for (int i = 0; i < (int)deformation_step_pixels.size(); ++i)
+            add_hidden_layer(raw_cloth, "Raw cloth", CanvaLayerKind::ClothFitting);
+            add_hidden_layer(std::move(fitting.raw_iso_matching), "Raw ISO matching", CanvaLayerKind::ClothFittingDebug);
+            add_hidden_layer(std::move(fitting.filtered_iso_matching), "Filtered ISO matching", CanvaLayerKind::ClothFittingDebug);
+            add_hidden_layer(std::move(fitting.predicted_depth_visibility), "Pred depth visibility", CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug);
+            add_hidden_layer(std::move(fitting.true_depth_visibility), "True depth visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
+            add_hidden_layer(std::move(fitting.iso_visibility), "ISO matching visibility", CanvaLayerKind::ClothFittingIsoOcclusionDebug);
+            add_hidden_layer(std::move(fitting.raw_final_occlusion), "Raw final occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
+            add_hidden_layer(std::move(fitting.filtered_final_occlusion), "Filtered final occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
+            for (int i = 0; i < (int)fitting.deformation_steps.size(); ++i)
             {
                 std::ostringstream name;
-                name << "Cloth fitting deformation step " << std::setw(2) << std::setfill('0') << i;
+                name << "Deformation step " << std::setw(2) << std::setfill('0') << i;
                 add_hidden_layer(
-                    std::move(deformation_step_pixels[(size_t)i]),
+                    std::move(fitting.deformation_steps[(size_t)i]),
                     name.str().c_str(),
                     CanvaLayerKind::ClothFittingDeformation);
             }
-            add_hidden_layer(std::move(close_to_body_pixels), "Cloth fitting close to body", CanvaLayerKind::ClothFittingCloseToBodyDebug);
+            add_hidden_layer(std::move(fitting.occluded_cloth), "Occluded cloth", CanvaLayerKind::ClothFitting);
+            add_hidden_layer(std::move(fitting.warped_cloth), "Warped cloth", CanvaLayerKind::ClothFittingWarped);
         }
 
         if (remove_hidden_source_layer)
@@ -271,7 +585,7 @@ namespace poseweaver::ui_canva
             }
         }
 
-        canva.active_layer = canva_find_layer_index_by_id(canva, warped_layer_id);
+        canva.active_layer = canva_find_layer_index_by_id(canva, smoothed_layer_id);
         if (canva.active_layer < 0)
             canva.active_layer = 0;
         canva_cancel_interactions(canva);
@@ -324,25 +638,7 @@ namespace poseweaver::ui_canva
             return false;
         }
 
-        std::vector<unsigned char> fitted;
-        std::vector<unsigned char> warped_fitted;
-        std::vector<unsigned char> pixelated_occluded;
-        std::vector<unsigned char> unwarped_upscaled;
-        std::vector<unsigned char> debug;
-        std::vector<unsigned char> warped_debug;
-        std::vector<unsigned char> unfiltered_occlusion;
-        std::vector<unsigned char> occlusion;
-        std::vector<unsigned char> final_unfiltered_occlusion;
-        std::vector<unsigned char> final_occlusion;
-        std::vector<unsigned char> scene_occlusion;
-        std::vector<unsigned char> aligned_predicted_depth_occlusion;
-        std::vector<unsigned char> iso_occlusion;
-        std::vector<unsigned char> scene_debug;
-        std::vector<unsigned char> deformation;
-        std::vector<unsigned char> close_to_body;
-        std::vector<std::vector<unsigned char>> deformation_steps;
-        int tested_count = 0;
-        int removed_count = 0;
+        ClothFittingLayers fitting;
         float prediction_from_cloth_scale = 1.0f;
         float prediction_from_cloth_offset_x = 0.0f;
         float prediction_from_cloth_offset_y = 0.0f;
@@ -368,25 +664,7 @@ namespace poseweaver::ui_canva
                 prediction_from_cloth_scale,
                 prediction_from_cloth_offset_x,
                 prediction_from_cloth_offset_y,
-                fitted,
-                warped_fitted,
-                pixelated_occluded,
-                unwarped_upscaled,
-                debug,
-                warped_debug,
-                unfiltered_occlusion,
-                occlusion,
-                final_unfiltered_occlusion,
-                final_occlusion,
-                scene_occlusion,
-                aligned_predicted_depth_occlusion,
-                iso_occlusion,
-                scene_debug,
-                deformation,
-                close_to_body,
-                deformation_steps,
-                tested_count,
-                removed_count,
+                fitting,
                 &fit_err))
         {
             if (out_error)
@@ -405,26 +683,13 @@ namespace poseweaver::ui_canva
         const bool include_hidden_output_layers =
             !canva.sequence_generating
             && !canva.sequence_waiting_render;
+        const int tested_count = fitting.tested_count;
+        const int removed_count = fitting.removed_count;
         if (!canva_add_cloth_fitting_layers(
                 canva,
                 source,
-                std::move(fitted),
-                std::move(warped_fitted),
-                std::move(pixelated_occluded),
-                std::move(unwarped_upscaled),
-                std::move(debug),
-                std::move(warped_debug),
-                std::move(unfiltered_occlusion),
-                std::move(occlusion),
-                std::move(final_unfiltered_occlusion),
-                std::move(final_occlusion),
-                std::move(scene_occlusion),
-                std::move(aligned_predicted_depth_occlusion),
-                std::move(iso_occlusion),
-                std::move(scene_debug),
-                std::move(deformation),
-                std::move(close_to_body),
-                std::move(deformation_steps),
+                state,
+                std::move(fitting),
                 include_hidden_output_layers,
                 &add_err))
         {
@@ -447,7 +712,7 @@ namespace poseweaver::ui_canva
         }
 
         console_add_line(state,
-            "Canva: cloth Fitting added warped cloth layer (saved debug files, removed="
+            "Canva: cloth fitting added smooth result layer (saved fitting layers, removed="
                 + std::to_string(removed_count)
                 + ", tested=" + std::to_string(tested_count) + ")");
         return true;

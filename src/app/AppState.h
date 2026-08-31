@@ -338,7 +338,23 @@ namespace poseweaver
         float cloth_fitting_warp_radius = 48.0f;
         float cloth_fitting_warp_force = 1.0f;
         int cloth_fitting_warp_steps = 1;
+        int cloth_fitting_debug_smoothing_radius = 3;
+        int cloth_fitting_debug_smoothing_passes = 3;
+        int cloth_fitting_debug_min_patch_area = 64;
+        int cloth_fitting_debug_error_fill_radius = 0;
+        int cloth_fitting_occlusion_cleanup_radius = 6;
+        int cloth_fitting_occlusion_cleanup_passes = 2;
+        float cloth_fitting_occlusion_chaos_threshold = 0.20f;
+        int cloth_fitting_occlusion_min_patch_area = 24;
+        float cloth_smoothing_filter_strength = 0.90f;
+        float cloth_smoothing_inner_line_width = 4.0f;
+        int cloth_smoothing_contour_radius = 10;
+        int cloth_smoothing_line_gap_radius = 3;
         std::string cloth_fitting_output_dir;
+        bool sketch2iso_continuity_filter_enabled = true;
+        float sketch2iso_continuity_filter_strength = 0.50f;
+        float sketch2iso_continuity_edge_threshold = 0.04f;
+        int sketch2iso_continuity_iterations = 12;
         float iso_distance_threshold = 0.15f;
 
         bool canva_tab_active = false;

@@ -18,6 +18,23 @@ struct GLFWwindow;
 
 namespace poseweaver
 {
+    struct ClothFittingLayers
+    {
+        std::vector<unsigned char> occluded_cloth;
+        std::vector<unsigned char> warped_cloth;
+        std::vector<unsigned char> warped_occluded_cloth;
+        std::vector<unsigned char> raw_iso_matching;
+        std::vector<unsigned char> filtered_iso_matching;
+        std::vector<unsigned char> predicted_depth_visibility;
+        std::vector<unsigned char> true_depth_visibility;
+        std::vector<unsigned char> iso_visibility;
+        std::vector<unsigned char> raw_final_occlusion;
+        std::vector<unsigned char> filtered_final_occlusion;
+        std::vector<std::vector<unsigned char>> deformation_steps;
+        int tested_count = 0;
+        int removed_count = 0;
+    };
+
     class Renderer
     {
     public:
@@ -97,25 +114,7 @@ namespace poseweaver
             float prediction_from_cloth_scale,
             float prediction_from_cloth_offset_x,
             float prediction_from_cloth_offset_y,
-            std::vector<unsigned char>& out_rgba,
-            std::vector<unsigned char>& out_warped_rgba,
-            std::vector<unsigned char>& out_pixelated_occluded_rgba,
-            std::vector<unsigned char>& out_unwarped_upscaled_rgba,
-            std::vector<unsigned char>& out_debug_rgba,
-            std::vector<unsigned char>& out_warped_debug_rgba,
-            std::vector<unsigned char>& out_unfiltered_occlusion_rgba,
-            std::vector<unsigned char>& out_occlusion_rgba,
-            std::vector<unsigned char>& out_final_unfiltered_occlusion_rgba,
-            std::vector<unsigned char>& out_final_occlusion_rgba,
-            std::vector<unsigned char>& out_scene_occlusion_rgba,
-            std::vector<unsigned char>& out_aligned_predicted_depth_occlusion_rgba,
-            std::vector<unsigned char>& out_iso_occlusion_rgba,
-            std::vector<unsigned char>& out_scene_debug_rgba,
-            std::vector<unsigned char>& out_deformation_rgba,
-            std::vector<unsigned char>& out_close_to_body_rgba,
-            std::vector<std::vector<unsigned char>>& out_deformation_steps_rgba,
-            int& out_tested_count,
-            int& out_removed_count,
+            ClothFittingLayers& out_layers,
             std::string* out_error);
 
         bool garment_to_smpl_mapping_valid() const { return m_garment_to_smpl.valid(); }

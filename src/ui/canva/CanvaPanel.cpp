@@ -35,13 +35,18 @@ namespace poseweaver::ui_canva
         canva.last_undo_request_id = state.canva_undo_request_id;
     }
 
+    void update_canva(AppState& state, Renderer& renderer)
+    {
+        CanvaState& canva = canva_state();
+        canva_ensure_initialized(state, canva);
+        update_canva_frame(state, canva, renderer);
+    }
+
     void draw_canva_tab(AppState& state, Renderer& renderer)
     {
         CanvaState& canva = canva_state();
         canva_ensure_initialized(state, canva);
         canva.active_layer = std::clamp(canva.active_layer, 0, std::max(0, (int)canva.layers.size() - 1));
-
-        update_canva_frame(state, canva, renderer);
 
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const float spacing_x = ImGui::GetStyle().ItemSpacing.x;
@@ -56,6 +61,15 @@ namespace poseweaver::ui_canva
 
         draw_canva_canvas_view(state, canva, renderer, left_w, show_generate_cloth_steps);
         ImGui::SameLine();
-        draw_canva_controls(state, canva, renderer);
+        draw_canva_controls(state, canva, renderer, false);
+    }
+
+    void draw_canva_fitting_controls(AppState& state, Renderer& renderer)
+    {
+        CanvaState& canva = canva_state();
+        canva_ensure_initialized(state, canva);
+        canva.active_layer = std::clamp(canva.active_layer, 0, std::max(0, (int)canva.layers.size() - 1));
+
+        draw_canva_controls(state, canva, renderer, true);
     }
 }

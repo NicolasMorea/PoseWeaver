@@ -4,6 +4,7 @@
 #include "render/Renderer.h"
 #include "smpl/Smplh.h"
 #include "ui/UiInternal.h"
+#include "ui/canva/CanvaPanel.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -608,6 +609,12 @@ namespace poseweaver
                     }
                 }
 
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Fitting"))
+            {
+                ui_canva::draw_canva_fitting_controls(state, renderer);
                 ImGui::EndTabItem();
             }
 

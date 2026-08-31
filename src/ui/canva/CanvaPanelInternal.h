@@ -39,15 +39,13 @@ namespace poseweaver::ui_canva
         IsoDisplacement,
         ClothFitting,
         ClothFittingWarped,
+        ClothFittingWarpedSmoothed,
         ClothFittingDebug,
-        ClothFittingWarpedDebug,
         ClothFittingOcclusionDebug,
         ClothFittingSceneOcclusionDebug,
         ClothFittingAlignedPredictedDepthOcclusionDebug,
         ClothFittingIsoOcclusionDebug,
-        ClothFittingSceneDebug,
-        ClothFittingDeformation,
-        ClothFittingCloseToBodyDebug
+        ClothFittingDeformation
     };
 
     struct CanvaLayer
@@ -74,6 +72,13 @@ namespace poseweaver::ui_canva
         int bounds_min_y = 0;
         int bounds_max_x_excl = 0;
         int bounds_max_y_excl = 0;
+
+        int smoothing_source_layer_id = 0;
+        float smoothing_filter_strength = 0.90f;
+        float smoothing_inner_line_width = 4.0f;
+        int smoothing_contour_radius = 10;
+        int smoothing_line_gap_radius = 3;
+        std::array<float, 3> smoothing_cloth_color{ 1.0f, 1.0f, 1.0f };
     };
 
     struct CanvaUndo
@@ -225,6 +230,7 @@ namespace poseweaver::ui_canva
         bool extract_pose_generate_cloth_after = false;
         bool extract_pose_using_nlf = false;
         bool extract_pose_nlf_fallback_allowed = false;
+        bool extract_pose_waiting_custom_workers = false;
         bool extract_pose_direct_nlf = false;
         int bone_prediction_debug_mode = 0; // 0 custom/idle, 1 NLF success, 2 fallback, 3 running, 4 error.
         float bone_prediction_nlf_confidence = -1.0f;
@@ -488,6 +494,11 @@ namespace poseweaver::ui_canva
         const std::string& file_path,
         const std::filesystem::path& model_input_path,
         std::string* out_error);
+    bool canva_add_nlf_projected_smpl_layer(
+        CanvaState& canva,
+        const std::filesystem::path& nlf_json_path,
+        const std::filesystem::path& model_input_path,
+        std::string* out_error);
     bool canva_add_vitpose_layer(
         CanvaState& canva,
         const std::filesystem::path& json_path,
@@ -535,6 +546,12 @@ namespace poseweaver::ui_canva
     void canva_generate_cloth_update_simulation_phase(const AppState& state, CanvaState& canva);
     CanvaBounds canva_layer_content_bounds(CanvaLayer& layer, int w, int h);
     bool canva_layer_is_generated_cloth(const CanvaLayer& layer);
+    bool canva_smooth_warped_cloth_layer(
+        const CanvaLayer& source,
+        CanvaLayer& destination,
+        int width,
+        int height,
+        std::string* out_error);
     bool canva_load_preprocess_transform(
         const std::filesystem::path& model_input_path,
         CanvaPreprocessTransform* out_transform,
@@ -672,5 +689,5 @@ namespace poseweaver::ui_canva
     const char* model_inference_status_text(ModelInferenceStatus status);
     void update_canva_frame(AppState& state, CanvaState& canva, Renderer& renderer);
     void draw_canva_canvas_view(AppState& state, CanvaState& canva, Renderer& renderer, float left_w, bool show_generate_cloth_steps);
-    void draw_canva_controls(AppState& state, CanvaState& canva, Renderer& renderer);
+    void draw_canva_controls(AppState& state, CanvaState& canva, Renderer& renderer, bool parameters_only);
 }

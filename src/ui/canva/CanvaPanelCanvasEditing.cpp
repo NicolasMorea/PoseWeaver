@@ -30,8 +30,11 @@ namespace poseweaver::ui_canva
             glGenTextures(1, &layer.texture_id);
 
         glBindTexture(GL_TEXTURE_2D, layer.texture_id);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        const GLint texture_filter = layer.kind == CanvaLayerKind::ClothFittingOcclusionDebug
+            ? GL_NEAREST
+            : GL_LINEAR;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, texture_filter);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, texture_filter);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -365,6 +368,7 @@ namespace poseweaver::ui_canva
         state.smpl_shape.betas.fill(0.0f);
 
         state.scene_view_target_valid = false;
+        state.scene_view_target_fov_degrees = 0.0f;
         state.scene_view_sequence_rig_overlay_active = false;
         state.scene_view_sequence_rig_overlay_visible = false;
         state.scene_view_sequence_rig_overlay_path.clear();

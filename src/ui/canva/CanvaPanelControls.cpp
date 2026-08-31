@@ -24,9 +24,10 @@
 
 namespace poseweaver::ui_canva
 {
-    void draw_canva_controls(AppState& state, CanvaState& canva, Renderer& renderer)
+    void draw_canva_controls(
+        AppState& state, CanvaState& canva, Renderer& renderer, bool parameters_only)
     {
-    // Right: brush + layers controls.
+    // Scrollable Canva controls or the fitting-parameters-only view.
     ImGui::BeginChild("##canva_controls", ImVec2(0.0f, 0.0f), true,
         ImGuiWindowFlags_AlwaysVerticalScrollbar);
     {
@@ -35,6 +36,9 @@ namespace poseweaver::ui_canva
             canva.sequence_preview_active = false;
             canva.sequence_preview_frame_id = 0;
         };
+
+        if (!parameters_only)
+        {
 
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.16f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
@@ -401,7 +405,8 @@ namespace poseweaver::ui_canva
 
         const bool can_predict_uv =
             state.sketch2uv.service != nullptr &&
-            state.sketch2uv.status == ModelInferenceStatus::Ready;
+            (state.sketch2uv.status == ModelInferenceStatus::NotStarted
+                || state.sketch2uv.status == ModelInferenceStatus::Ready);
         ImGui::BeginDisabled(!can_predict_uv);
         if (ImGui::Button("Predict UV"))
         {
@@ -642,6 +647,42 @@ namespace poseweaver::ui_canva
 
         if (!state.sketch2iso.last_output_path.empty())
             ImGui::TextWrapped("Output: %s", state.sketch2iso.last_output_path.c_str());
+
+        ImGui::Checkbox(
+            "Continuity filter##sketch2iso_continuity_filter",
+            &state.sketch2iso_continuity_filter_enabled);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Smooths the 64D ISO field within body regions while preserving hard descriptor transitions.");
+        ImGui::BeginDisabled(!state.sketch2iso_continuity_filter_enabled);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Filter strength##sketch2iso_continuity_strength",
+            &state.sketch2iso_continuity_filter_strength,
+            0.0f,
+            1.0f,
+            "%.2f");
+        state.sketch2iso_continuity_filter_strength =
+            std::clamp(state.sketch2iso_continuity_filter_strength, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Edge threshold##sketch2iso_continuity_edge",
+            &state.sketch2iso_continuity_edge_threshold,
+            0.005f,
+            0.15f,
+            "%.3f");
+        state.sketch2iso_continuity_edge_threshold =
+            std::clamp(state.sketch2iso_continuity_edge_threshold, 0.001f, 0.25f);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lower values preserve more boundaries; higher values merge more descriptor variation.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt(
+            "Filter iterations##sketch2iso_continuity_iterations",
+            &state.sketch2iso_continuity_iterations,
+            1,
+            24);
+        state.sketch2iso_continuity_iterations =
+            std::clamp(state.sketch2iso_continuity_iterations, 1, 32);
+        ImGui::EndDisabled();
         if (!state.canva_manual_iso_npz_path.empty())
         {
             ImGui::TextWrapped("Loaded ISO: %s", state.canva_manual_iso_npz_path.c_str());
@@ -665,7 +706,8 @@ namespace poseweaver::ui_canva
             && std::filesystem::exists(std::filesystem::path(state.sketch2uv.last_output_path), rig_opt_ec);
         const bool rig_opt_can_queue_uv =
             state.sketch2uv.service != nullptr
-            && state.sketch2uv.status == ModelInferenceStatus::Ready;
+            && (state.sketch2uv.status == ModelInferenceStatus::NotStarted
+                || state.sketch2uv.status == ModelInferenceStatus::Ready);
         const bool can_optimize_rig =
             rig_opt_pose_available
             && !canva.rig_optimization_active
@@ -731,7 +773,8 @@ namespace poseweaver::ui_canva
             canva_manual_uv_source_path(state, &displacement_loaded_uv_path);
         const bool displacement_can_queue_uv =
             state.sketch2uv.service != nullptr
-            && state.sketch2uv.status == ModelInferenceStatus::Ready;
+            && (state.sketch2uv.status == ModelInferenceStatus::NotStarted
+                || state.sketch2uv.status == ModelInferenceStatus::Ready);
         const bool can_generate_displacement =
             !canva.generate_displacement_active
             && !canva.generate_iso_displacement_active
@@ -859,8 +902,9 @@ namespace poseweaver::ui_canva
             state.nlf.status == ModelInferenceStatus::Ready;
         const bool can_extract_pose =
             !canva.extract_pose_active &&
-            custom_bone_models_ready &&
-            (state.canva_preferred_bone_prediction == 0 || nlf_bone_model_ready);
+            (state.canva_preferred_bone_prediction == 0
+                ? custom_bone_models_ready
+                : nlf_bone_model_ready);
         ImGui::BeginDisabled(!can_extract_pose);
         if (ImGui::Button("Extract Pose"))
         {
@@ -1094,6 +1138,10 @@ namespace poseweaver::ui_canva
             : canva.cloth_fitting_active ? canva.cloth_fitting_status.c_str()
             : !cloth_fitting_models_ready ? "Need ISO + Depth"
             : "Ready");
+        }
+
+        if (parameters_only)
+        {
         ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderFloat("Depth margin (m)", &state.cloth_fitting_depth_margin, 0.0f, 0.02f, "%.5f");
         state.cloth_fitting_depth_margin = std::clamp(state.cloth_fitting_depth_margin, 0.0f, 0.05f);
@@ -1131,6 +1179,101 @@ namespace poseweaver::ui_canva
             4);
         state.cloth_fitting_warp_steps =
             std::clamp(state.cloth_fitting_warp_steps, 1, 32);
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Fitting color-map filter");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt("Shape smoothing radius", &state.cloth_fitting_debug_smoothing_radius, 0, 8, "%d px");
+        state.cloth_fitting_debug_smoothing_radius =
+            std::clamp(state.cloth_fitting_debug_smoothing_radius, 0, 8);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt("Shape smoothing passes", &state.cloth_fitting_debug_smoothing_passes, 0, 8);
+        state.cloth_fitting_debug_smoothing_passes =
+            std::clamp(state.cloth_fitting_debug_smoothing_passes, 0, 8);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::InputInt("Small color patch area", &state.cloth_fitting_debug_min_patch_area, 1, 16);
+        state.cloth_fitting_debug_min_patch_area =
+            std::clamp(state.cloth_fitting_debug_min_patch_area, 1, 4096);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::InputInt("Invalid match fill radius", &state.cloth_fitting_debug_error_fill_radius, 8, 32);
+        state.cloth_fitting_debug_error_fill_radius =
+            std::clamp(state.cloth_fitting_debug_error_fill_radius, 0, 4096);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Maximum distance to a valid nearby color; 0 fills from the nearest color at any distance.");
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Final occlusion cleanup");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt(
+            "Cleanup radius",
+            &state.cloth_fitting_occlusion_cleanup_radius,
+            1,
+            32,
+            "%d px");
+        state.cloth_fitting_occlusion_cleanup_radius =
+            std::clamp(state.cloth_fitting_occlusion_cleanup_radius, 1, 32);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Neighborhood used to recognize and regularize noisy occlusion contours.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt(
+            "Cleanup passes",
+            &state.cloth_fitting_occlusion_cleanup_passes,
+            0,
+            8);
+        state.cloth_fitting_occlusion_cleanup_passes =
+            std::clamp(state.cloth_fitting_occlusion_cleanup_passes, 0, 8);
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Chaos threshold",
+            &state.cloth_fitting_occlusion_chaos_threshold,
+            0.01f,
+            0.5f,
+            "%.3f");
+        state.cloth_fitting_occlusion_chaos_threshold =
+            std::clamp(state.cloth_fitting_occlusion_chaos_threshold, 0.01f, 0.5f);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lower values clean more of the contour; higher values preserve more existing corners.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::InputInt(
+            "Minimum patch area",
+            &state.cloth_fitting_occlusion_min_patch_area,
+            1,
+            16);
+        state.cloth_fitting_occlusion_min_patch_area =
+            std::clamp(state.cloth_fitting_occlusion_min_patch_area, 1, 4096);
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Final cloth filter");
+        ImGui::SliderFloat(
+            "Filter strength",
+            &state.cloth_smoothing_filter_strength,
+            0.0f,
+            1.0f,
+            "%.2f");
+        ImGui::SliderFloat(
+            "Outline width",
+            &state.cloth_smoothing_inner_line_width,
+            0.0f,
+            20.0f,
+            "%.1f px");
+        ImGui::SliderInt(
+            "Contour smoothing radius",
+            &state.cloth_smoothing_contour_radius,
+            1,
+            32,
+            "%d px");
+        ImGui::SliderInt(
+            "Line gap closing",
+            &state.cloth_smoothing_line_gap_radius,
+            0,
+            12,
+            "%d px");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Connects nearby broken stroke fragments into continuous lines.");
+        }
+
+        if (!parameters_only)
+        {
 
         if (ImGui::Button("Add layer"))
         {
@@ -1225,6 +1368,75 @@ namespace poseweaver::ui_canva
             ImGui::PopID();
         }
 
+        if (canva.active_layer >= 0 && canva.active_layer < (int)canva.layers.size())
+        {
+            CanvaLayer& layer = canva.layers[(size_t)canva.active_layer];
+            if (layer.kind == CanvaLayerKind::ClothFittingWarpedSmoothed)
+            {
+                ImGui::Separator();
+                ImGui::TextUnformatted("Warped cloth smoothing");
+                bool smoothing_changed = false;
+                ImGui::SliderFloat(
+                    "Filter strength##smoothed_layer",
+                    &layer.smoothing_filter_strength,
+                    0.0f,
+                    1.0f,
+                    "%.2f");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SliderFloat(
+                    "Outline width##smoothed_layer",
+                    &layer.smoothing_inner_line_width,
+                    0.0f,
+                    20.0f,
+                    "%.1f px");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SliderInt(
+                    "Contour smoothing radius##smoothed_layer",
+                    &layer.smoothing_contour_radius,
+                    1,
+                    32,
+                    "%d px");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SliderInt(
+                    "Line gap closing##smoothed_layer",
+                    &layer.smoothing_line_gap_radius,
+                    0,
+                    12,
+                    "%d px");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                if (smoothing_changed)
+                {
+                    state.cloth_smoothing_filter_strength = layer.smoothing_filter_strength;
+                    state.cloth_smoothing_inner_line_width = layer.smoothing_inner_line_width;
+                    state.cloth_smoothing_contour_radius = layer.smoothing_contour_radius;
+                    state.cloth_smoothing_line_gap_radius = layer.smoothing_line_gap_radius;
+                }
+                if (smoothing_changed)
+                {
+                    const int source_index =
+                        canva_find_layer_index_by_id(canva, layer.smoothing_source_layer_id);
+                    if (source_index >= 0)
+                    {
+                        std::string smoothing_error;
+                        if (!canva_smooth_warped_cloth_layer(
+                                canva.layers[(size_t)source_index],
+                                layer,
+                                canva.width,
+                                canva.height,
+                                &smoothing_error))
+                        {
+                            console_add_line(
+                                state,
+                                "Canva: cloth smoothing failed: "
+                                    + (smoothing_error.empty()
+                                        ? std::string("(unknown error)")
+                                        : smoothing_error));
+                        }
+                    }
+                }
+            }
+        }
+
         ImGui::Separator();
         ImGui::TextUnformatted("Controls:");
         ImGui::BulletText("Brush tool: left mouse");
@@ -1233,6 +1445,7 @@ namespace poseweaver::ui_canva
         ImGui::BulletText("Undo: Ctrl+Z");
         ImGui::BulletText("Pan: middle mouse drag");
         ImGui::BulletText("Zoom: mouse wheel");
+        }
     }
     ImGui::EndChild();
     }

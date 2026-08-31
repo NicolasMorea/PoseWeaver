@@ -33,6 +33,13 @@ namespace poseweaver
             kSketch2RigVerticalFovRad * 180.0f / 3.14159265358979323846f;
         constexpr int kIsoDimensions = 64;
 
+        static bool nearest_mask_pixels(
+            const std::vector<unsigned char>& mask,
+            int width,
+            int height,
+            std::vector<int>& out_x,
+            std::vector<int>& out_y);
+
         static bool rgba_is_color(
             const std::vector<unsigned char>& rgba,
             size_t pixel,
@@ -46,6 +53,236 @@ namespace poseweaver
                 && rgba[i + 0u] == r
                 && rgba[i + 1u] == g
                 && rgba[i + 2u] == b;
+        }
+
+        static std::uint32_t debug_color_at(const std::vector<unsigned char>& rgba, size_t pixel)
+        {
+            const size_t i = pixel * 4u;
+            if (i + 3u >= rgba.size() || rgba[i + 3u] == 0u)
+                return 0xffffffffu;
+            return ((std::uint32_t)rgba[i] << 16u)
+                | ((std::uint32_t)rgba[i + 1u] << 8u)
+                | (std::uint32_t)rgba[i + 2u];
+        }
+
+        static void set_debug_color(
+            std::vector<unsigned char>& rgba,
+            size_t pixel,
+            std::uint32_t color)
+        {
+            const size_t i = pixel * 4u;
+            rgba[i] = (unsigned char)((color >> 16u) & 0xffu);
+            rgba[i + 1u] = (unsigned char)((color >> 8u) & 0xffu);
+            rgba[i + 2u] = (unsigned char)(color & 0xffu);
+            rgba[i + 3u] = 255u;
+        }
+
+        static void filter_cloth_fitting_debug_colors(
+            std::vector<unsigned char>& rgba,
+            int width,
+            int height,
+            int smoothing_radius,
+            int smoothing_passes,
+            int min_patch_area,
+            int error_fill_radius)
+        {
+            constexpr int first_semantic_color = 5;
+            constexpr std::array<std::uint32_t, 12> colors{
+                0x808080u, 0x0060ffu, 0x00c8dcu, 0x000000u,
+                0x303030u, 0xff2020u, 0xff9000u, 0xbe0020u,
+                0x20dc50u, 0xffe000u, 0xff00ffu, 0xa040ffu
+            };
+            const size_t count = (size_t)width * (size_t)height;
+            if (width <= 0 || height <= 0 || rgba.size() < count * 4u)
+                return;
+
+            auto color_index = [&](std::uint32_t color)
+            {
+                for (int i = 0; i < (int)colors.size(); ++i)
+                {
+                    if (colors[(size_t)i] == color)
+                        return i;
+                }
+                return -1;
+            };
+            const auto semantic_color_index = [&](std::uint32_t color)
+            {
+                const int index = color_index(color);
+                return index >= first_semantic_color ? index : -1;
+            };
+            const auto visit_neighbors = [width, height](size_t pixel, bool diagonals, const auto& visit)
+            {
+                const int x = (int)(pixel % (size_t)width);
+                const int y = (int)(pixel / (size_t)width);
+                for (int dy = -1; dy <= 1; ++dy)
+                {
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        if ((dx == 0 && dy == 0) || (!diagonals && dx != 0 && dy != 0))
+                            continue;
+                        const int nx = x + dx;
+                        const int ny = y + dy;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                            visit((size_t)ny * (size_t)width + (size_t)nx);
+                    }
+                }
+            };
+
+            const auto smooth_colors = [&](int radius, int passes)
+            {
+                radius = std::clamp(radius, 0, 8);
+                passes = std::clamp(passes, 0, 8);
+                const int radius_squared = radius * radius;
+                for (int pass = 0; pass < passes && radius > 0; ++pass)
+                {
+                    std::vector<unsigned char> filtered = rgba;
+                    for (int y = 0; y < height; ++y)
+                    {
+                        for (int x = 0; x < width; ++x)
+                        {
+                            const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                            const int current = semantic_color_index(debug_color_at(rgba, pixel));
+                            if (current < 0)
+                                continue;
+                            std::array<int, colors.size()> votes{};
+                            for (int dy = -radius; dy <= radius; ++dy)
+                            {
+                                const int ny = y + dy;
+                                if (ny < 0 || ny >= height)
+                                    continue;
+                                for (int dx = -radius; dx <= radius; ++dx)
+                                {
+                                    const int nx = x + dx;
+                                    if (nx < 0 || nx >= width || dx * dx + dy * dy > radius_squared)
+                                        continue;
+                                    const int candidate = semantic_color_index(debug_color_at(
+                                        rgba, (size_t)ny * (size_t)width + (size_t)nx));
+                                    if (candidate >= 0)
+                                        ++votes[(size_t)candidate];
+                                }
+                            }
+                            int best = current;
+                            for (int candidate = 0; candidate < (int)colors.size(); ++candidate)
+                            {
+                                if (votes[(size_t)candidate] > votes[(size_t)best])
+                                    best = candidate;
+                            }
+                            if (best != current)
+                                set_debug_color(filtered, pixel, colors[(size_t)best]);
+                        }
+                    }
+                    rgba = std::move(filtered);
+                }
+            };
+
+            // Replace body-overlapping matching failures with the nearest reliable
+            // semantic case before smoothing. Grey means there is no ISO body at
+            // that pixel, so it remains an immutable boundary for the filter.
+            std::vector<unsigned char> valid_mask(count, 0u);
+            for (size_t pixel = 0; pixel < count; ++pixel)
+                valid_mask[pixel] = semantic_color_index(debug_color_at(rgba, pixel)) >= 0 ? 1u : 0u;
+
+            std::vector<int> nearest_x;
+            std::vector<int> nearest_y;
+            if (nearest_mask_pixels(valid_mask, width, height, nearest_x, nearest_y))
+            {
+                const int max_distance_squared = error_fill_radius > 0
+                    ? error_fill_radius * error_fill_radius
+                    : std::numeric_limits<int>::max();
+                std::vector<unsigned char> filled = rgba;
+                for (size_t pixel = 0; pixel < count; ++pixel)
+                {
+                    const std::uint32_t source_color = debug_color_at(rgba, pixel);
+                    if (source_color == 0xffffffffu
+                        || source_color == colors[0]
+                        || valid_mask[pixel] != 0u)
+                        continue;
+                    const int x = (int)(pixel % (size_t)width);
+                    const int y = (int)(pixel / (size_t)width);
+                    const int nx = nearest_x[pixel];
+                    const int ny = nearest_y[pixel];
+                    if (nx < 0 || ny < 0)
+                        continue;
+                    const int dx = nx - x;
+                    const int dy = ny - y;
+                    if (dx * dx + dy * dy > max_distance_squared)
+                        continue;
+                    const std::uint32_t color = debug_color_at(
+                        rgba, (size_t)ny * (size_t)width + (size_t)nx);
+                    if (semantic_color_index(color) >= 0)
+                        set_debug_color(filled, pixel, color);
+                }
+                rgba = std::move(filled);
+            }
+
+            smoothing_radius = std::clamp(smoothing_radius, 0, 8);
+            smoothing_passes = std::clamp(smoothing_passes, 0, 8);
+            smooth_colors(smoothing_radius, smoothing_passes);
+
+            min_patch_area = std::clamp(min_patch_area, 1, 4096);
+            std::vector<unsigned char> visited(count, 0u);
+            std::vector<size_t> component;
+            std::vector<size_t> queue;
+            const auto remove_small_patches = [&]()
+            {
+                bool changed = false;
+                std::fill(visited.begin(), visited.end(), 0u);
+                for (size_t seed = 0; seed < count; ++seed)
+                {
+                    const std::uint32_t source_color = debug_color_at(rgba, seed);
+                    if (visited[seed] != 0u || semantic_color_index(source_color) < 0)
+                        continue;
+                    visited[seed] = 1u;
+                    component.clear();
+                    queue.assign(1u, seed);
+                    for (size_t head = 0; head < queue.size(); ++head)
+                    {
+                        const size_t pixel = queue[head];
+                        component.push_back(pixel);
+                        visit_neighbors(pixel, false, [&](size_t neighbor)
+                        {
+                            if (visited[neighbor] == 0u && debug_color_at(rgba, neighbor) == source_color)
+                            {
+                                visited[neighbor] = 1u;
+                                queue.push_back(neighbor);
+                            }
+                        });
+                    }
+                    if ((int)component.size() >= min_patch_area)
+                        continue;
+                    std::array<int, colors.size()> boundary_votes{};
+                    for (const size_t pixel : component)
+                    {
+                        visit_neighbors(pixel, true, [&](size_t neighbor)
+                        {
+                            const int candidate = semantic_color_index(debug_color_at(rgba, neighbor));
+                            if (candidate >= 0 && colors[(size_t)candidate] != source_color)
+                                ++boundary_votes[(size_t)candidate];
+                        });
+                    }
+                    int best = -1;
+                    for (int candidate = 0; candidate < (int)colors.size(); ++candidate)
+                    {
+                        if (boundary_votes[(size_t)candidate] > 0
+                            && (best < 0 || boundary_votes[(size_t)candidate] > boundary_votes[(size_t)best]))
+                            best = candidate;
+                    }
+                    if (best >= 0)
+                    {
+                        for (const size_t pixel : component)
+                            set_debug_color(rgba, pixel, colors[(size_t)best]);
+                        changed = true;
+                    }
+                }
+                return changed;
+            };
+            for (int pass = 0; pass < 3 && remove_small_patches(); ++pass)
+            {}
+
+            if (smoothing_radius > 0 && smoothing_passes > 0)
+                smooth_colors(std::max(1, smoothing_radius - 1), 1);
+            for (int pass = 0; pass < 3 && remove_small_patches(); ++pass)
+            {}
         }
 
         // Exact squared-Euclidean nearest-site transform. The vertical pass is
@@ -503,7 +740,8 @@ namespace poseweaver
             const std::vector<unsigned char>& active,
             int width,
             int height,
-            std::vector<unsigned char>& keep_flags)
+            std::vector<unsigned char>& keep_flags,
+            size_t min_component_size)
         {
             const size_t count = (size_t)width * (size_t)height;
             std::vector<unsigned char> visited(count, 0u);
@@ -553,7 +791,6 @@ namespace poseweaver
                     }
                 }
 
-                const size_t min_component_size = initial_keep ? 2u : 10u;
                 const unsigned char filtered_keep =
                     component.size() < min_component_size
                         ? (initial_keep ? 0u : 1u)
@@ -563,14 +800,154 @@ namespace poseweaver
             }
         }
 
+        static void build_mask_integral(
+            const std::vector<unsigned char>& values,
+            int width,
+            int height,
+            std::vector<int>& integral)
+        {
+            const int stride = width + 1;
+            integral.assign((size_t)stride * (size_t)(height + 1), 0);
+            for (int y = 0; y < height; ++y)
+            {
+                int row_sum = 0;
+                for (int x = 0; x < width; ++x)
+                {
+                    row_sum += values[(size_t)y * (size_t)width + (size_t)x] != 0u ? 1 : 0;
+                    integral[(size_t)(y + 1) * (size_t)stride + (size_t)(x + 1)] =
+                        integral[(size_t)y * (size_t)stride + (size_t)(x + 1)] + row_sum;
+                }
+            }
+        }
+
+        static int mask_integral_sum(
+            const std::vector<int>& integral,
+            int width,
+            int x0,
+            int y0,
+            int x1,
+            int y1)
+        {
+            const int stride = width + 1;
+            return integral[(size_t)y1 * (size_t)stride + (size_t)x1]
+                - integral[(size_t)y0 * (size_t)stride + (size_t)x1]
+                - integral[(size_t)y1 * (size_t)stride + (size_t)x0]
+                + integral[(size_t)y0 * (size_t)stride + (size_t)x0];
+        }
+
+        static void simplify_chaotic_occlusion_regions(
+            const std::vector<unsigned char>& active,
+            int width,
+            int height,
+            int radius,
+            int passes,
+            float chaos_threshold,
+            std::vector<unsigned char>& keep_flags,
+            std::vector<unsigned char>& chaotic_flags)
+        {
+            const size_t count = (size_t)width * (size_t)height;
+            if (active.size() < count || keep_flags.size() < count || width <= 0 || height <= 0)
+                return;
+
+            radius = std::clamp(radius, 1, 32);
+            passes = std::clamp(passes, 0, 8);
+            chaotic_flags.assign(count, 0u);
+            chaos_threshold = std::clamp(chaos_threshold, 0.01f, 0.5f);
+            std::vector<unsigned char> boundary(count, 0u);
+            std::vector<unsigned char> active_keep(count, 0u);
+            std::vector<unsigned char> next(count, 0u);
+            std::vector<int> active_integral;
+            std::vector<int> keep_integral;
+            std::vector<int> boundary_integral;
+            const std::array<std::array<int, 2>, 4> neighbors = {{
+                {{ -1, 0 }},
+                {{ 1, 0 }},
+                {{ 0, -1 }},
+                {{ 0, 1 }},
+            }};
+
+            for (int pass = 0; pass < passes; ++pass)
+            {
+                std::fill(boundary.begin(), boundary.end(), 0u);
+                std::fill(active_keep.begin(), active_keep.end(), 0u);
+                for (int y = 0; y < height; ++y)
+                {
+                    for (int x = 0; x < width; ++x)
+                    {
+                        const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                        if (!active[pixel])
+                            continue;
+                        active_keep[pixel] = keep_flags[pixel];
+                        for (const auto& direction : neighbors)
+                        {
+                            const int nx = x + direction[0];
+                            const int ny = y + direction[1];
+                            if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                                continue;
+                            const size_t neighbor = (size_t)ny * (size_t)width + (size_t)nx;
+                            if (active[neighbor] && keep_flags[neighbor] != keep_flags[pixel])
+                            {
+                                boundary[pixel] = 1u;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                build_mask_integral(active, width, height, active_integral);
+                build_mask_integral(active_keep, width, height, keep_integral);
+                build_mask_integral(boundary, width, height, boundary_integral);
+                next = keep_flags;
+                int changed = 0;
+                for (int y = 0; y < height; ++y)
+                {
+                    for (int x = 0; x < width; ++x)
+                    {
+                        const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                        if (!active[pixel])
+                            continue;
+                        const int x0 = std::max(0, x - radius);
+                        const int y0 = std::max(0, y - radius);
+                        const int x1 = std::min(width, x + radius + 1);
+                        const int y1 = std::min(height, y + radius + 1);
+                        const int active_count = mask_integral_sum(active_integral, width, x0, y0, x1, y1);
+                        if (active_count < 9)
+                            continue;
+                        const int boundary_count = mask_integral_sum(boundary_integral, width, x0, y0, x1, y1);
+                        const float chaos = (float)boundary_count / (float)active_count;
+                        if (chaos < chaos_threshold)
+                            continue;
+                        chaotic_flags[pixel] = 1u;
+
+                        const int keep_count = mask_integral_sum(keep_integral, width, x0, y0, x1, y1);
+                        const int signed_majority = 2 * keep_count - active_count;
+                        const float confidence = std::abs((float)signed_majority) / (float)active_count;
+                        if (confidence < 0.08f)
+                            continue;
+                        const unsigned char filtered = signed_majority >= 0 ? 1u : 0u;
+                        if (filtered != keep_flags[pixel])
+                        {
+                            next[pixel] = filtered;
+                            ++changed;
+                        }
+                    }
+                }
+                keep_flags = std::move(next);
+                if (changed == 0)
+                    break;
+            }
+        }
+
         static void diagonalize_occlusion_edges(
             const std::vector<unsigned char>& active,
+            const std::vector<unsigned char>& eligible,
             int width,
             int height,
             std::vector<unsigned char>& keep_flags)
         {
             const size_t count = (size_t)width * (size_t)height;
-            if (active.size() < count || keep_flags.size() < count || width <= 2 || height <= 2)
+            if (active.size() < count || eligible.size() < count || keep_flags.size() < count
+                || width <= 2 || height <= 2)
                 return;
 
             auto sample = [&](int x, int y, unsigned char& out_keep) -> bool
@@ -591,7 +968,7 @@ namespace poseweaver
                 for (int x = 1; x + 1 < width; ++x)
                 {
                     const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
-                    if (!active[pixel])
+                    if (!active[pixel] || !eligible[pixel])
                         continue;
 
                     const unsigned char current = keep_flags[pixel];
@@ -630,34 +1007,6 @@ namespace poseweaver
                 }
             }
             keep_flags = std::move(next);
-        }
-
-        static void warp_rgba_inverse_categorical(
-            const std::vector<unsigned char>& source,
-            int width,
-            int height,
-            const std::vector<float>& source_x,
-            const std::vector<float>& source_y,
-            std::vector<unsigned char>& out)
-        {
-            const size_t count = (size_t)width * (size_t)height;
-            if (source.size() < count * 4u || source_x.size() < count || source_y.size() < count)
-            {
-                out = source;
-                return;
-            }
-
-            out.assign(count * 4u, 0u);
-            for (size_t target = 0; target < count; ++target)
-            {
-                const int x = (int)std::lround(source_x[target]);
-                const int y = (int)std::lround(source_y[target]);
-                if (x < 0 || y < 0 || x >= width || y >= height)
-                    continue;
-                const size_t source_pixel = (size_t)y * (size_t)width + (size_t)x;
-                for (size_t c = 0; c < 4u; ++c)
-                    out[target * 4u + c] = source[source_pixel * 4u + c];
-            }
         }
 
         struct UvFace
@@ -896,6 +1245,81 @@ namespace poseweaver
             const std::string text = read_text_file_displacement(rig_path);
             if (text.empty())
                 return false;
+
+            // NLF stores a metric camera-space body and its exact 2D
+            // projection. Reusing the flat-depth Sketch2Rig joints here would
+            // silently replace that camera with the custom pipeline's fixed
+            // FOV, causing the fitting render to drift from the sketch.
+            std::vector<double> nlf_joints3d;
+            std::vector<double> nlf_vertices3d;
+            std::vector<double> nlf_vertices2d;
+            double nlf_vertex_count_d = 0.0;
+            double nlf_image_height_d = 0.0;
+            double nlf_image_size_d = 0.0;
+            (void)parse_json_number_field_fit(text, "image_size", &nlf_image_size_d);
+            if (!parse_json_number_field_fit(text, "image_height", &nlf_image_height_d))
+                nlf_image_height_d = nlf_image_size_d;
+            if (parse_json_number_array_field_fit(text, "joints3d_flat", &nlf_joints3d)
+                && nlf_joints3d.size() >= 3u
+                && parse_json_number_array_field_fit(text, "vertices3d_flat", &nlf_vertices3d)
+                && parse_json_number_array_field_fit(text, "vertices2d_flat", &nlf_vertices2d)
+                && parse_json_number_field_fit(text, "vertices3d_count", &nlf_vertex_count_d))
+            {
+                const int vertex_count = std::max(0, (int)std::lround(nlf_vertex_count_d));
+                if (vertex_count > 0
+                    && nlf_image_height_d > 1.0
+                    && nlf_vertices3d.size() >= (size_t)vertex_count * 3u
+                    && nlf_vertices2d.size() >= (size_t)vertex_count * 2u)
+                {
+                    double sum_p = 0.0;
+                    double sum_q = 0.0;
+                    double sum_pp = 0.0;
+                    double sum_pq = 0.0;
+                    int sample_count = 0;
+                    for (int i = 0; i < vertex_count; ++i)
+                    {
+                        const size_t k3 = (size_t)i * 3u;
+                        const size_t k2 = (size_t)i * 2u;
+                        const double z = nlf_vertices3d[k3 + 2u];
+                        if (!(z > 1e-9) || !std::isfinite(z))
+                            continue;
+                        const double p = nlf_vertices3d[k3 + 1u] / z;
+                        const double q = nlf_vertices2d[k2 + 1u];
+                        if (!std::isfinite(p) || !std::isfinite(q))
+                            continue;
+                        sum_p += p;
+                        sum_q += q;
+                        sum_pp += p * p;
+                        sum_pq += p * q;
+                        ++sample_count;
+                    }
+                    const double denom = sum_pp - (sum_p * sum_p) / std::max(1, sample_count);
+                    if (sample_count >= 3 && std::abs(denom) > 1e-12 && std::isfinite(denom))
+                    {
+                        const double focal_y =
+                            (sum_pq - (sum_p * sum_q) / (double)sample_count) / denom;
+                        if (focal_y > 1e-6 && std::isfinite(focal_y))
+                        {
+                            const Eigen::Vector3f eye(
+                                (float)(-nlf_joints3d[0] / 1000.0),
+                                (float)(nlf_joints3d[1] / 1000.0),
+                                (float)(nlf_joints3d[2] / 1000.0));
+                            if (eye.allFinite())
+                            {
+                                igl::look_at(
+                                    eye,
+                                    eye + Eigen::Vector3f(0.0f, 0.0f, -1.0f),
+                                    Eigen::Vector3f(0.0f, 1.0f, 0.0f),
+                                    view);
+                                const float f_h = (float)(0.5 * nlf_image_height_d / focal_y) * dnear;
+                                igl::frustum(-f_h, f_h, -f_h, f_h, dnear, dfar, proj);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
             Eigen::MatrixXd joints;
             int image_size = 512;
             if (!parse_sketch2rig_joints_fit(text, &joints, &image_size))
@@ -1421,7 +1845,12 @@ namespace poseweaver
             igl::look_at(eye, eye + dir, up, view);
 
             constexpr float kPi = 3.14159265358979323846f;
-            const float f_h = std::tan(kSketch2RigVerticalFovDeg / 360.0f * kPi) * dnear;
+            const float fov_degrees =
+                (state.scene_view_target_fov_degrees > 1.0f
+                    && std::isfinite(state.scene_view_target_fov_degrees))
+                ? state.scene_view_target_fov_degrees
+                : kSketch2RigVerticalFovDeg;
+            const float f_h = std::tan(fov_degrees / 360.0f * kPi) * dnear;
             igl::frustum(-f_h, f_h, -f_h, f_h, dnear, dfar, proj);
             return true;
         }
@@ -1682,76 +2111,6 @@ namespace poseweaver
             return normals;
         }
 
-        static void rasterize_thresholded_vertex_distances(
-            const Eigen::MatrixXd& vertices,
-            const Eigen::MatrixXi& faces,
-            const std::vector<float>& vertex_distances,
-            const Eigen::Matrix4f& view,
-            const Eigen::Matrix4f& proj,
-            int width,
-            int height,
-            float threshold,
-            std::vector<unsigned char>& mask)
-        {
-            mask.assign((size_t)width * (size_t)height, 0u);
-            if (width <= 0 || height <= 0 || vertices.rows() <= 0 || faces.rows() <= 0
-                || vertex_distances.size() < (size_t)vertices.rows())
-                return;
-
-            for (int fi = 0; fi < faces.rows(); ++fi)
-            {
-                const int i0 = faces(fi, 0);
-                const int i1 = faces(fi, 1);
-                const int i2 = faces(fi, 2);
-                if (i0 < 0 || i1 < 0 || i2 < 0
-                    || i0 >= vertices.rows() || i1 >= vertices.rows() || i2 >= vertices.rows())
-                    continue;
-
-                float x0 = 0.0f;
-                float y0 = 0.0f;
-                float z0 = 1.0f;
-                float x1 = 0.0f;
-                float y1 = 0.0f;
-                float z1 = 1.0f;
-                float x2 = 0.0f;
-                float y2 = 0.0f;
-                float z2 = 1.0f;
-                if (!project_to_image_depth(view, proj, vertices.row(i0).transpose(), width, height, x0, y0, z0)
-                    || !project_to_image_depth(view, proj, vertices.row(i1).transpose(), width, height, x1, y1, z1)
-                    || !project_to_image_depth(view, proj, vertices.row(i2).transpose(), width, height, x2, y2, z2))
-                    continue;
-
-                const float area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
-                if (!(std::abs(area) > 1e-8f) || !std::isfinite(area))
-                    continue;
-
-                const int min_x = std::clamp((int)std::floor(std::min({ x0, x1, x2 })), 0, width - 1);
-                const int max_x = std::clamp((int)std::ceil(std::max({ x0, x1, x2 })), 0, width - 1);
-                const int min_y = std::clamp((int)std::floor(std::min({ y0, y1, y2 })), 0, height - 1);
-                const int max_y = std::clamp((int)std::ceil(std::max({ y0, y1, y2 })), 0, height - 1);
-                for (int py = min_y; py <= max_y; ++py)
-                {
-                    const float sy = (float)py + 0.5f;
-                    for (int px = min_x; px <= max_x; ++px)
-                    {
-                        const float sx = (float)px + 0.5f;
-                        const float w0 = ((x1 - sx) * (y2 - sy) - (y1 - sy) * (x2 - sx)) / area;
-                        const float w1 = ((x2 - sx) * (y0 - sy) - (y2 - sy) * (x0 - sx)) / area;
-                        const float w2 = 1.0f - w0 - w1;
-                        constexpr float kEdgeEps = -1e-5f;
-                        if (w0 < kEdgeEps || w1 < kEdgeEps || w2 < kEdgeEps)
-                            continue;
-
-                        const float distance =
-                            w0 * vertex_distances[(size_t)i0]
-                            + w1 * vertex_distances[(size_t)i1]
-                            + w2 * vertex_distances[(size_t)i2];
-                        if (distance < threshold)
-                            mask[(size_t)py * (size_t)width + (size_t)px] = 1u;
-                    }
-                }
-            }
-        }
     }
 
     void Renderer::process_canva_displacement_map(AppState& state)
@@ -1981,43 +2340,38 @@ namespace poseweaver
         float prediction_from_cloth_scale,
         float prediction_from_cloth_offset_x,
         float prediction_from_cloth_offset_y,
-        std::vector<unsigned char>& out_rgba,
-        std::vector<unsigned char>& out_warped_rgba,
-        std::vector<unsigned char>& out_pixelated_occluded_rgba,
-        std::vector<unsigned char>& out_unwarped_upscaled_rgba,
-        std::vector<unsigned char>& out_debug_rgba,
-        std::vector<unsigned char>& out_warped_debug_rgba,
-        std::vector<unsigned char>& out_unfiltered_occlusion_rgba,
-        std::vector<unsigned char>& out_occlusion_rgba,
-        std::vector<unsigned char>& out_final_unfiltered_occlusion_rgba,
-        std::vector<unsigned char>& out_final_occlusion_rgba,
-        std::vector<unsigned char>& out_scene_occlusion_rgba,
-        std::vector<unsigned char>& out_aligned_predicted_depth_occlusion_rgba,
-        std::vector<unsigned char>& out_iso_occlusion_rgba,
-        std::vector<unsigned char>& out_scene_debug_rgba,
-        std::vector<unsigned char>& out_deformation_rgba,
-        std::vector<unsigned char>& out_close_to_body_rgba,
-        std::vector<std::vector<unsigned char>>& out_deformation_steps_rgba,
-        int& out_tested_count,
-        int& out_removed_count,
+        ClothFittingLayers& out_layers,
         std::string* out_error)
     {
+        auto& out_rgba = out_layers.occluded_cloth;
+        auto& out_warped_rgba = out_layers.warped_occluded_cloth;
+        auto& out_unfiltered_debug_rgba = out_layers.raw_iso_matching;
+        auto& out_debug_rgba = out_layers.filtered_iso_matching;
+        auto& out_scene_occlusion_rgba = out_layers.true_depth_visibility;
+        auto& out_aligned_predicted_depth_occlusion_rgba =
+            out_layers.predicted_depth_visibility;
+        auto& out_iso_occlusion_rgba = out_layers.iso_visibility;
+        auto& out_unfiltered_occlusion_rgba = out_layers.raw_final_occlusion;
+        auto& out_occlusion_rgba = out_layers.filtered_final_occlusion;
+        auto& out_deformation_steps_rgba = out_layers.deformation_steps;
+        auto& out_tested_count = out_layers.tested_count;
+        auto& out_removed_count = out_layers.removed_count;
+        std::vector<unsigned char> out_scene_debug_rgba;
+        std::vector<unsigned char> out_deformation_rgba;
+
+        out_layers = ClothFittingLayers{};
         out_rgba.clear();
+        out_layers.warped_cloth.clear();
         out_warped_rgba.clear();
-        out_pixelated_occluded_rgba.clear();
-        out_unwarped_upscaled_rgba.clear();
         out_debug_rgba.clear();
-        out_warped_debug_rgba.clear();
+        out_unfiltered_debug_rgba.clear();
         out_unfiltered_occlusion_rgba.clear();
         out_occlusion_rgba.clear();
-        out_final_unfiltered_occlusion_rgba.clear();
-        out_final_occlusion_rgba.clear();
         out_scene_occlusion_rgba.clear();
         out_aligned_predicted_depth_occlusion_rgba.clear();
         out_iso_occlusion_rgba.clear();
         out_scene_debug_rgba.clear();
         out_deformation_rgba.clear();
-        out_close_to_body_rgba.clear();
         out_deformation_steps_rgba.clear();
         out_tested_count = 0;
         out_removed_count = 0;
@@ -2257,7 +2611,6 @@ namespace poseweaver
         out_iso_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_scene_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_deformation_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
-        out_close_to_body_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         std::vector<unsigned char> iso_body_mask((size_t)width * (size_t)height, 0u);
         const float depth_margin = std::clamp(state.cloth_fitting_depth_margin, 0.0f, 0.05f);
         const float depth_margin_pred = std::clamp(state.cloth_fitting_depth_margin_pred, 0.0f, 1.0f);
@@ -2351,11 +2704,15 @@ namespace poseweaver
             dst[0] = occluded ? 255u : 32u;
             dst[1] = occluded ? 48u : 220u;
             dst[2] = occluded ? 48u : 80u;
-            dst[3] = 220u;
+            dst[3] = 255u;
         };
 
         // Keep the depth tests separate here. They are combined with the ISO
         // result only when the final visibility map is built below.
+        const size_t visibility_pixel_count = (size_t)width * (size_t)height;
+        std::vector<unsigned char> rendered_cloth_coverage(
+            visibility_pixel_count,
+            0u);
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
@@ -2363,9 +2720,13 @@ namespace poseweaver
                 const size_t out_pix = (size_t)y * (size_t)width + (size_t)x;
                 const size_t depth_idx =
                     (size_t)(height - 1 - y) * (size_t)width + (size_t)x;
+                if (cloth_rgba[out_pix * 4u + 3u] == 0u)
+                    continue;
                 const float cloth_depth = cloth_depth_gl[depth_idx];
                 if (!(cloth_depth < 0.999999f))
                     continue;
+
+                rendered_cloth_coverage[out_pix] = 1u;
 
                 const float cloth_distance = camera_distance_from_depth01(proj, cloth_depth);
                 const bool true_depth_occluded =
@@ -2385,6 +2746,131 @@ namespace poseweaver
                     out_pix,
                     aligned_predicted_depth_occluded);
             }
+        }
+
+        // The inked cloth silhouette extends beyond the rasterized garment by a
+        // few pixels. Copy the nearest measured visibility into that outline;
+        // defaulting those pixels to visible creates a green halo around red
+        // occlusion regions. Keep this completion limited to unmeasured pixels
+        // so genuine visible cloth next to the body is not swallowed.
+        const int cloth_outline_coverage_radius = std::clamp(
+            (std::min(width, height) + 255) / 256,
+            2,
+            8);
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                if (cloth_rgba[pixel * 4u + 3u] == 0u
+                    || rendered_cloth_coverage[pixel] != 0u)
+                    continue;
+
+                size_t nearest_pixel = visibility_pixel_count;
+                int nearest_distance_squared = std::numeric_limits<int>::max();
+                for (int offset_y = -cloth_outline_coverage_radius;
+                     offset_y <= cloth_outline_coverage_radius;
+                     ++offset_y)
+                {
+                    const int neighbor_y = y + offset_y;
+                    if (neighbor_y < 0 || neighbor_y >= height)
+                        continue;
+                    for (int offset_x = -cloth_outline_coverage_radius;
+                         offset_x <= cloth_outline_coverage_radius;
+                         ++offset_x)
+                    {
+                        const int distance_squared =
+                            offset_x * offset_x + offset_y * offset_y;
+                        if (distance_squared >= nearest_distance_squared)
+                            continue;
+                        const int neighbor_x = x + offset_x;
+                        if (neighbor_x < 0 || neighbor_x >= width)
+                            continue;
+                        const size_t neighbor =
+                            (size_t)neighbor_y * (size_t)width + (size_t)neighbor_x;
+                        if (rendered_cloth_coverage[neighbor] == 0u)
+                            continue;
+                        nearest_pixel = neighbor;
+                        nearest_distance_squared = distance_squared;
+                    }
+                }
+
+                if (nearest_pixel < visibility_pixel_count)
+                {
+                    std::copy_n(
+                        out_scene_occlusion_rgba.data() + nearest_pixel * 4u,
+                        4u,
+                        out_scene_occlusion_rgba.data() + pixel * 4u);
+                    std::copy_n(
+                        out_aligned_predicted_depth_occlusion_rgba.data()
+                            + nearest_pixel * 4u,
+                        4u,
+                        out_aligned_predicted_depth_occlusion_rgba.data()
+                            + pixel * 4u);
+                }
+                else
+                {
+                    set_visibility_pixel(out_scene_occlusion_rgba, pixel, false);
+                    set_visibility_pixel(
+                        out_aligned_predicted_depth_occlusion_rgba,
+                        pixel,
+                        false);
+                }
+            }
+        }
+
+        // Close the remaining one- or two-pixel SMPL raster coverage gap at a
+        // true body boundary. This is conservative only where body occlusion
+        // has already been measured and remains clipped to the raw cloth mask.
+        const int true_depth_coverage_radius = std::clamp(
+            (std::min(width, height) + 1023) / 1024,
+            1,
+            2);
+        std::vector<unsigned char> expanded_true_depth_occlusion(
+            visibility_pixel_count,
+            0u);
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                if (!rgba_is_color(
+                        out_scene_occlusion_rgba,
+                        pixel,
+                        255u,
+                        48u,
+                        48u))
+                    continue;
+
+                for (int offset_y = -true_depth_coverage_radius;
+                     offset_y <= true_depth_coverage_radius;
+                     ++offset_y)
+                {
+                    const int neighbor_y = y + offset_y;
+                    if (neighbor_y < 0 || neighbor_y >= height)
+                        continue;
+                    for (int offset_x = -true_depth_coverage_radius;
+                         offset_x <= true_depth_coverage_radius;
+                         ++offset_x)
+                    {
+                        if (offset_x * offset_x + offset_y * offset_y
+                            > true_depth_coverage_radius * true_depth_coverage_radius)
+                            continue;
+                        const int neighbor_x = x + offset_x;
+                        if (neighbor_x < 0 || neighbor_x >= width)
+                            continue;
+                        const size_t neighbor =
+                            (size_t)neighbor_y * (size_t)width + (size_t)neighbor_x;
+                        if (cloth_rgba[neighbor * 4u + 3u] != 0u)
+                            expanded_true_depth_occlusion[neighbor] = 1u;
+                    }
+                }
+            }
+        }
+        for (size_t pixel = 0; pixel < visibility_pixel_count; ++pixel)
+        {
+            if (expanded_true_depth_occlusion[pixel] != 0u)
+                set_visibility_pixel(out_scene_occlusion_rgba, pixel, true);
         }
 
         console_add_line(
@@ -2470,17 +2956,6 @@ namespace poseweaver
             body_cloth_normal_scaled_thresholds[(size_t)body_vertex] =
                 body_distance_threshold * normal_alignment;
         }
-        std::vector<unsigned char> close_to_body_mask;
-        rasterize_thresholded_vertex_distances(
-            garment.V,
-            garment.F,
-            cloth_body_vertex_distances,
-            view,
-            proj,
-            width,
-            height,
-            body_distance_threshold,
-            close_to_body_mask);
         std::vector<unsigned char> iso_body_close_to_cloth_mask((size_t)width * (size_t)height, 0u);
 
         struct SceneHit
@@ -2587,11 +3062,110 @@ namespace poseweaver
         // grey=no ISO, blue=ISO miss, cyan=projection miss,
         // black=ISO pixel outside source cloth with no cloth over match,
         // dark grey=ISO pixel outside source cloth with cloth over match,
-        // red=no cloth, orange=matching SMPL occludes cloth,
-        // crimson=other SMPL occludes cloth but source cloth remains visible,
+        // red=no cloth, orange=visible SMPL surface occludes cloth,
+        // crimson=legacy ambiguous-body-layer case (accepted but no longer emitted),
         // green=cloth on match, yellow=cloth over other SMPL, magenta=two cloth layers,
         // purple=two cloth layers over another SMPL layer.
         const float iso_distance_threshold = std::max(0.0f, state.iso_distance_threshold);
+        const size_t body_vertex_count = (size_t)smpl_vertices_for_iso.rows();
+        std::vector<float> body_vertex_screen_x(
+            body_vertex_count, std::numeric_limits<float>::quiet_NaN());
+        std::vector<float> body_vertex_screen_y(
+            body_vertex_count, std::numeric_limits<float>::quiet_NaN());
+        std::vector<float> body_vertex_screen_depth(
+            body_vertex_count, std::numeric_limits<float>::quiet_NaN());
+
+        // Build a sparse, visibility-aware screen-space body lookup once. The
+        // network descriptor remains the primary correspondence, but a match is
+        // no longer allowed to jump from torso cloth to an arm elsewhere in the
+        // image merely because that arm descriptor has a slightly lower 64-D
+        // distance. The nearest projected body vertex provides a local candidate
+        // that is scored jointly by descriptor and reprojection distance.
+        const size_t output_pixel_count = (size_t)width * (size_t)height;
+        std::vector<unsigned char> projected_body_seed_mask(output_pixel_count, 0u);
+        std::vector<int> projected_body_seed_vertex(output_pixel_count, -1);
+        std::vector<float> projected_body_seed_score(
+            output_pixel_count, std::numeric_limits<float>::infinity());
+        for (int candidate_vertex = 0;
+             candidate_vertex < smpl_vertices_for_iso.rows();
+             ++candidate_vertex)
+        {
+            float projected_x = 0.0f;
+            float projected_y = 0.0f;
+            float projected_depth = 1.0f;
+            const Eigen::Vector3d point =
+                smpl_vertices_for_iso.row(candidate_vertex).transpose();
+            if (!project_to_image_depth(
+                    view,
+                    proj,
+                    point,
+                    width,
+                    height,
+                    projected_x,
+                    projected_y,
+                    projected_depth))
+                continue;
+
+            body_vertex_screen_x[(size_t)candidate_vertex] = projected_x;
+            body_vertex_screen_y[(size_t)candidate_vertex] = projected_y;
+            body_vertex_screen_depth[(size_t)candidate_vertex] = projected_depth;
+            const int screen_x = (int)std::floor(projected_x);
+            const int screen_y = (int)std::floor(projected_y);
+            if (screen_x < 0 || screen_y < 0 || screen_x >= width || screen_y >= height)
+                continue;
+
+            const size_t screen_pixel =
+                (size_t)screen_y * (size_t)width + (size_t)screen_x;
+            const size_t depth_pixel =
+                (size_t)(height - 1 - screen_y) * (size_t)width + (size_t)screen_x;
+            const float visible_depth = smpl_depth_gl[depth_pixel];
+            const float depth_error = visible_depth < 0.999999f
+                ? std::abs(projected_depth - visible_depth)
+                : 1.0f + projected_depth;
+            const float dx = projected_x - ((float)screen_x + 0.5f);
+            const float dy = projected_y - ((float)screen_y + 0.5f);
+            const float seed_score = depth_error * 4096.0f + dx * dx + dy * dy;
+            if (seed_score < projected_body_seed_score[screen_pixel])
+            {
+                projected_body_seed_score[screen_pixel] = seed_score;
+                projected_body_seed_vertex[screen_pixel] = candidate_vertex;
+                projected_body_seed_mask[screen_pixel] = 1u;
+            }
+        }
+        std::vector<int> nearest_projected_body_x;
+        std::vector<int> nearest_projected_body_y;
+        const bool have_projected_body_lookup = nearest_mask_pixels(
+            projected_body_seed_mask,
+            width,
+            height,
+            nearest_projected_body_x,
+            nearest_projected_body_y);
+        const float spatial_match_radius =
+            std::max(12.0f, 0.03f * (float)std::min(width, height));
+        const float hard_spatial_match_radius = spatial_match_radius * 1.75f;
+        const float local_lookup_radius = spatial_match_radius * 2.5f;
+        const float descriptor_cost_scale =
+            std::max(0.05f, iso_distance_threshold);
+        const float spatial_cost_weight =
+            (descriptor_cost_scale * descriptor_cost_scale)
+            / (spatial_match_radius * spatial_match_radius);
+        const auto descriptor_distance_squared_to_vertex = [&](const float* descriptor, int vertex)
+        {
+            if (!descriptor || vertex < 0 || vertex >= m_iso_vertex_descriptor_count)
+                return std::numeric_limits<float>::infinity();
+            const float* vertex_descriptor = m_iso_vertex_descriptors.data()
+                + (size_t)vertex * (size_t)kIsoDimensions;
+            float distance_squared = 0.0f;
+            for (int channel = 0; channel < kIsoDimensions; ++channel)
+            {
+                const float delta = descriptor[channel] - vertex_descriptor[channel];
+                distance_squared += delta * delta;
+            }
+            return distance_squared;
+        };
+        size_t retained_descriptor_matches = 0u;
+        size_t spatially_corrected_matches = 0u;
+        size_t rejected_distant_matches = 0u;
         for (int y = 0; y < height; ++y)
         {
             const float prediction_layer_y =
@@ -2640,8 +3214,6 @@ namespace poseweaver
                         {
                             const int prediction_x = (int)std::floor(prediction_layer_x);
                             const int prediction_y = (int)std::floor(prediction_layer_y);
-                            const size_t prediction_pix =
-                                (size_t)prediction_y * (size_t)width + (size_t)prediction_x;
                             const size_t depth_idx =
                                 (size_t)(height - 1 - prediction_y) * (size_t)width
                                 + (size_t)prediction_x;
@@ -2651,15 +3223,6 @@ namespace poseweaver
                                 dst[0] = 255u;
                                 dst[1] = 64u;
                                 dst[2] = 32u;
-                                dst[3] = 220u;
-                            }
-                            if (prediction_pix < close_to_body_mask.size()
-                                && close_to_body_mask[prediction_pix] != 0u)
-                            {
-                                unsigned char* dst = out_close_to_body_rgba.data() + out_pix * 4u;
-                                dst[0] = 0u;
-                                dst[1] = 220u;
-                                dst[2] = 255u;
                                 dst[3] = 220u;
                             }
                         }
@@ -2696,19 +3259,104 @@ namespace poseweaver
                     continue;
                 }
 
+                const float* descriptor =
+                    iso_source.descriptors.data() + descriptor_offset;
                 int vertex_idx = -1;
-                float iso_distance_squared = 0.0f;
-                if (!find_nearest_iso_vertex(
-                        iso_source.descriptors.data() + descriptor_offset,
-                        vertex_idx,
-                        iso_distance_squared)
+                float iso_distance_squared = std::numeric_limits<float>::infinity();
+                const bool descriptor_match_found = find_nearest_iso_vertex(
+                    descriptor,
+                    vertex_idx,
+                    iso_distance_squared);
+                bool descriptor_match_valid = descriptor_match_found
+                    && vertex_idx >= 0
+                    && vertex_idx < smpl_vertices_for_iso.rows()
+                    && std::isfinite(iso_distance_squared)
+                    && std::sqrt(std::max(0.0f, iso_distance_squared))
+                        <= iso_distance_threshold;
+                bool used_local_match = false;
+                bool rejected_distant_match = false;
+
+                int local_vertex_idx = -1;
+                float local_screen_distance_squared =
+                    std::numeric_limits<float>::infinity();
+                if (have_projected_body_lookup)
+                {
+                    const int seed_x = nearest_projected_body_x[out_pix];
+                    const int seed_y = nearest_projected_body_y[out_pix];
+                    if (seed_x >= 0 && seed_y >= 0)
+                    {
+                        const size_t seed_pixel =
+                            (size_t)seed_y * (size_t)width + (size_t)seed_x;
+                        local_vertex_idx = projected_body_seed_vertex[seed_pixel];
+                        if (local_vertex_idx >= 0
+                            && local_vertex_idx < smpl_vertices_for_iso.rows())
+                        {
+                            const float local_dx =
+                                body_vertex_screen_x[(size_t)local_vertex_idx]
+                                - ((float)x + 0.5f);
+                            const float local_dy =
+                                body_vertex_screen_y[(size_t)local_vertex_idx]
+                                - ((float)y + 0.5f);
+                            local_screen_distance_squared =
+                                local_dx * local_dx + local_dy * local_dy;
+                            if (local_screen_distance_squared
+                                > local_lookup_radius * local_lookup_radius)
+                                local_vertex_idx = -1;
+                        }
+                    }
+                }
+
+                if (local_vertex_idx >= 0)
+                {
+                    const float local_descriptor_distance_squared =
+                        descriptor_distance_squared_to_vertex(descriptor, local_vertex_idx);
+                    float descriptor_screen_distance_squared =
+                        std::numeric_limits<float>::infinity();
+                    if (descriptor_match_valid)
+                    {
+                        const float match_dx = body_vertex_screen_x[(size_t)vertex_idx]
+                            - ((float)x + 0.5f);
+                        const float match_dy = body_vertex_screen_y[(size_t)vertex_idx]
+                            - ((float)y + 0.5f);
+                        descriptor_screen_distance_squared =
+                            match_dx * match_dx + match_dy * match_dy;
+                    }
+
+                    const float descriptor_cost = iso_distance_squared
+                        + spatial_cost_weight * descriptor_screen_distance_squared;
+                    const float local_cost = local_descriptor_distance_squared
+                        + spatial_cost_weight * local_screen_distance_squared;
+                    const bool descriptor_jumps_across_image = descriptor_match_valid
+                        && descriptor_screen_distance_squared
+                            > hard_spatial_match_radius * hard_spatial_match_radius;
+                    if (!descriptor_match_valid
+                        || descriptor_jumps_across_image
+                        || local_cost < descriptor_cost)
+                    {
+                        vertex_idx = local_vertex_idx;
+                        iso_distance_squared = local_descriptor_distance_squared;
+                        descriptor_match_valid = true;
+                        used_local_match = true;
+                        rejected_distant_match = descriptor_jumps_across_image;
+                    }
+                }
+
+                if (!descriptor_match_valid
                     || vertex_idx < 0
-                    || vertex_idx >= smpl_vertices_for_iso.rows()
-                    || !std::isfinite(iso_distance_squared)
-                    || std::sqrt(std::max(0.0f, iso_distance_squared)) > iso_distance_threshold)
+                    || vertex_idx >= smpl_vertices_for_iso.rows())
                 {
                     set_debug_pixel(out_pix, 0u, 96u, 255u);
                     continue;
+                }
+
+                if (source_cloth_pixel)
+                {
+                    if (used_local_match)
+                        ++spatially_corrected_matches;
+                    else
+                        ++retained_descriptor_matches;
+                    if (rejected_distant_match)
+                        ++rejected_distant_matches;
                 }
 
                 const bool iso_matched_body_close_to_cloth =
@@ -2728,19 +3376,31 @@ namespace poseweaver
                     dst[3] = 220u;
                 }
 
-                const Eigen::Vector3d p = smpl_vertices_for_iso.row(vertex_idx).transpose();
-
-                float px = 0.0f;
-                float py = 0.0f;
-                float body_depth = 1.0f;
-                if (!project_to_image_depth(view, proj, p, width, height, px, py, body_depth))
+                const float projected_body_x = body_vertex_screen_x[(size_t)vertex_idx];
+                const float projected_body_y = body_vertex_screen_y[(size_t)vertex_idx];
+                const float projected_body_depth = body_vertex_screen_depth[(size_t)vertex_idx];
+                if (!std::isfinite(projected_body_x)
+                    || !std::isfinite(projected_body_y)
+                    || !std::isfinite(projected_body_depth))
                 {
                     set_debug_pixel(out_pix, 0u, 200u, 220u);
                     continue;
                 }
 
-                const int sx = (int)std::floor(px);
-                const int sy = (int)std::floor(py);
+                // A spatial correction means the global descriptor pointed at a
+                // different place in the image. Classify that pixel at its own
+                // visible raster surface instead of at the discrete nearby
+                // vertex. The latter is commonly a few millimetres behind the
+                // triangle interpolation and used to create alternating yellow
+                // bands over an otherwise continuous green torso.
+                const float sample_x = used_local_match
+                    ? (float)x + 0.5f
+                    : projected_body_x;
+                const float sample_y = used_local_match
+                    ? (float)y + 0.5f
+                    : projected_body_y;
+                const int sx = (int)std::floor(sample_x);
+                const int sy = (int)std::floor(sample_y);
                 if (sx < 0 || sy < 0 || sx >= width || sy >= height)
                 {
                     set_debug_pixel(out_pix, 0u, 200u, 220u);
@@ -2755,18 +3415,23 @@ namespace poseweaver
                     ? cloth_second_depth_cpu[depth_idx]
                     : 1.0f;
                 const bool cloth_present_at_body = cloth_depth < 0.999999f;
+                const float visible_smpl_depth = smpl_depth_gl[depth_idx];
+                const bool visible_smpl_present = visible_smpl_depth < 0.999999f;
+                const float body_depth = used_local_match && visible_smpl_present
+                    ? visible_smpl_depth
+                    : projected_body_depth;
                 const bool cloth_on_top_of_match =
                     cloth_present_at_body
                     && cloth_depth + depth_margin < body_depth;
-                const float nearest_smpl_depth = smpl_depth_gl[depth_idx] < 0.999999f
-                    ? smpl_depth_gl[depth_idx]
+                const float nearest_smpl_depth = visible_smpl_present
+                    ? visible_smpl_depth
                     : body_depth;
                 const bool other_smpl_layer_on_top = nearest_smpl_depth + depth_margin < body_depth;
                 const bool two_cloth_layers_on_top =
                     cloth_second_depth < 0.999999f
                     && cloth_second_depth + depth_margin < body_depth;
-                const bool smpl_visible_on_top = !cloth_present_at_body
-                    || nearest_smpl_depth + depth_margin < cloth_depth;
+                const bool body_in_front_of_cloth = cloth_present_at_body
+                    && nearest_smpl_depth + depth_margin < cloth_depth;
                 if (source_cloth_pixel && !cloth_present_at_body && !other_smpl_layer_on_top)
                 {
                     unsigned char* dst = out_deformation_rgba.data() + out_pix * 4u;
@@ -2782,19 +3447,19 @@ namespace poseweaver
                     else
                         set_debug_pixel(out_pix, 0u, 0u, 0u);
                 }
-                else if (smpl_visible_on_top)
+                else if (!cloth_present_at_body)
                 {
-                    if (other_smpl_layer_on_top)
-                    {
-                        set_debug_pixel(out_pix, 190u, 0u, 32u);
-                    }
-                    else
-                    {
-                        if (!cloth_present_at_body)
-                            set_debug_pixel(out_pix, 255u, 32u, 32u);
-                        else
-                            set_debug_pixel(out_pix, 255u, 144u, 0u);
-                    }
+                    set_debug_pixel(out_pix, 255u, 32u, 32u);
+                }
+                else if (body_in_front_of_cloth)
+                {
+                    // The visible body surface decides the occlusion. Comparing the
+                    // matched vertex against the front depth first used to label a
+                    // whole limb crimson whenever ISO selected the back side of that
+                    // limb (or a nearby triangle interpolated slightly in front).
+                    // Both cases are physically the same here: body is in front of
+                    // the rendered cloth, so the stable class is orange.
+                    set_debug_pixel(out_pix, 255u, 144u, 0u);
                 }
                 else if (other_smpl_layer_on_top && two_cloth_layers_on_top)
                 {
@@ -2815,15 +3480,37 @@ namespace poseweaver
             }
         }
 
+        console_add_line(
+            state,
+            "Cloth fitting ISO correspondence: descriptor="
+                + std::to_string(retained_descriptor_matches)
+                + ", spatially corrected="
+                + std::to_string(spatially_corrected_matches)
+                + ", distant jumps rejected="
+                + std::to_string(rejected_distant_matches));
+
         for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel)
         {
-            if (cloth_rgba[pixel * 4u + 3u] == 0u || out_debug_rgba[pixel * 4u + 3u] == 0u)
+            if (cloth_rgba[pixel * 4u + 3u] == 0u)
+                out_debug_rgba[pixel * 4u + 3u] = 0u;
+        }
+        out_unfiltered_debug_rgba = out_debug_rgba;
+        filter_cloth_fitting_debug_colors(
+            out_debug_rgba,
+            width,
+            height,
+            state.cloth_fitting_debug_smoothing_radius,
+            state.cloth_fitting_debug_smoothing_passes,
+            state.cloth_fitting_debug_min_patch_area,
+            state.cloth_fitting_debug_error_fill_radius);
+        for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel)
+        {
+            if (cloth_rgba[pixel * 4u + 3u] == 0u)
                 continue;
 
             const bool iso_occluded =
                 rgba_is_color(out_debug_rgba, pixel, 255u, 32u, 32u)
-                || rgba_is_color(out_debug_rgba, pixel, 255u, 144u, 0u)
-                || rgba_is_color(out_debug_rgba, pixel, 190u, 0u, 32u);
+                || rgba_is_color(out_debug_rgba, pixel, 255u, 144u, 0u);
             set_visibility_pixel(out_iso_occlusion_rgba, pixel, iso_occluded);
         }
 
@@ -2932,20 +3619,25 @@ namespace poseweaver
             }
         };
 
-        auto apply_visibility = [&](std::vector<unsigned char>& cloth,
-                                    const std::vector<unsigned char>& debug,
-                                    const std::vector<unsigned char>& scene_debug,
-                                    const std::vector<unsigned char>& scene_occlusion,
-                                    const std::vector<unsigned char>& aligned_predicted_depth_occlusion,
-                                    std::vector<unsigned char>& unfiltered_occlusion,
-                                    std::vector<unsigned char>& filtered_occlusion,
-                                    std::vector<unsigned char>* pre_diagonal_cloth,
-                                    int& removed_count)
+        struct OcclusionResult
+        {
+            std::vector<unsigned char> visible_cloth;
+            std::vector<unsigned char> unfiltered_layer;
+            std::vector<unsigned char> filtered_layer;
+            int removed_count = 0;
+        };
+
+        auto build_occlusion = [&](const std::vector<unsigned char>& cloth,
+                                   const std::vector<unsigned char>& debug,
+                                   const std::vector<unsigned char>& scene_debug,
+                                   const std::vector<unsigned char>& scene_occlusion,
+                                   const std::vector<unsigned char>& aligned_predicted_depth_occlusion)
         {
             const size_t count = (size_t)width * (size_t)height;
-            unfiltered_occlusion.assign(count * 4u, 0u);
-            filtered_occlusion.assign(count * 4u, 0u);
-            removed_count = 0;
+            OcclusionResult result;
+            result.visible_cloth = cloth;
+            result.unfiltered_layer.assign(count * 4u, 0u);
+            result.filtered_layer.assign(count * 4u, 0u);
             std::vector<unsigned char> active(count, 0u);
             std::vector<unsigned char> keep_flags(count, 0u);
 
@@ -2955,19 +3647,17 @@ namespace poseweaver
                 occlusion_pixel[0] = keep ? 32u : 255u;
                 occlusion_pixel[1] = keep ? 220u : 48u;
                 occlusion_pixel[2] = keep ? 80u : 48u;
-                occlusion_pixel[3] = 220u;
+                occlusion_pixel[3] = 255u;
             };
 
             for (size_t pixel = 0; pixel < count; ++pixel)
             {
-                unsigned char* cloth_pixel = cloth.data() + pixel * 4u;
-                if (cloth_pixel[3] == 0u)
+                if (cloth[pixel * 4u + 3u] == 0u)
                     continue;
                 active[pixel] = 1u;
 
                 const bool depth_occluded =
-                    scene_occlusion[pixel * 4u + 3u] == 0u
-                    || rgba_is_color(scene_occlusion, pixel, 255u, 48u, 48u);
+                    rgba_is_color(scene_occlusion, pixel, 255u, 48u, 48u);
                 bool keep = !depth_occluded;
                 const bool iso_green = rgba_is_color(debug, pixel, 32u, 220u, 80u);
                 const bool iso_orange = rgba_is_color(debug, pixel, 255u, 144u, 0u);
@@ -2985,21 +3675,26 @@ namespace poseweaver
                     keep = false;
 
                 keep_flags[pixel] = keep ? 1u : 0u;
-                write_occlusion_pixel(unfiltered_occlusion, pixel, keep);
+                write_occlusion_pixel(result.unfiltered_layer, pixel, keep);
             }
 
-            filter_small_occlusion_components(active, width, height, keep_flags);
-            if (pre_diagonal_cloth)
-            {
-                *pre_diagonal_cloth = cloth;
-                for (size_t pixel = 0; pixel < count; ++pixel)
-                {
-                    if (active[pixel] && !keep_flags[pixel])
-                        (*pre_diagonal_cloth)[pixel * 4u + 3u] = 0u;
-                }
-            }
-            diagonalize_occlusion_edges(active, width, height, keep_flags);
-            filter_small_occlusion_components(active, width, height, keep_flags);
+            const size_t min_patch_area = (size_t)std::clamp(
+                state.cloth_fitting_occlusion_min_patch_area,
+                1,
+                4096);
+            filter_small_occlusion_components(active, width, height, keep_flags, min_patch_area);
+            std::vector<unsigned char> chaotic_regions;
+            simplify_chaotic_occlusion_regions(
+                active,
+                width,
+                height,
+                state.cloth_fitting_occlusion_cleanup_radius,
+                state.cloth_fitting_occlusion_cleanup_passes,
+                state.cloth_fitting_occlusion_chaos_threshold,
+                keep_flags,
+                chaotic_regions);
+            diagonalize_occlusion_edges(active, chaotic_regions, width, height, keep_flags);
+            filter_small_occlusion_components(active, width, height, keep_flags, min_patch_area);
 
             for (size_t pixel = 0; pixel < count; ++pixel)
             {
@@ -3007,42 +3702,36 @@ namespace poseweaver
                     continue;
 
                 const bool keep = keep_flags[pixel] != 0u;
-                write_occlusion_pixel(filtered_occlusion, pixel, keep);
+                write_occlusion_pixel(result.filtered_layer, pixel, keep);
                 if (!keep)
                 {
-                    cloth[pixel * 4u + 3u] = 0u;
-                    ++removed_count;
+                    result.visible_cloth[pixel * 4u + 3u] = 0u;
+                    ++result.removed_count;
                 }
             }
+            return result;
         };
 
-        apply_visibility(
-            out_rgba,
+        OcclusionResult initial_occlusion = build_occlusion(
+            cloth_rgba,
             out_debug_rgba,
             out_scene_debug_rgba,
             out_scene_occlusion_rgba,
-            out_aligned_predicted_depth_occlusion_rgba,
-            out_unfiltered_occlusion_rgba,
-            out_occlusion_rgba,
-            &out_pixelated_occluded_rgba,
-            out_removed_count);
-        out_unwarped_upscaled_rgba = out_rgba;
+            out_aligned_predicted_depth_occlusion_rgba);
+        out_rgba = std::move(initial_occlusion.visible_cloth);
+        out_unfiltered_occlusion_rgba = std::move(initial_occlusion.unfiltered_layer);
+        out_occlusion_rgba = std::move(initial_occlusion.filtered_layer);
+        out_removed_count = initial_occlusion.removed_count;
         rebuild_deformation_from_warped_layers(
-            out_unwarped_upscaled_rgba,
+            cloth_rgba,
             out_scene_debug_rgba,
             out_deformation_rgba);
 
-        // Red deformation pixels pull cloth toward the closest valid ISO/body
-        // pixel. Purple deformation pixels extend cloth away from their nearest
-        // source cloth pixel. Recompute the map after each smaller 2D warp so
-        // residual red regions shrink progressively.
-        std::vector<unsigned char> current_cloth = out_unwarped_upscaled_rgba;
-        std::vector<unsigned char> current_debug = out_debug_rgba;
-        std::vector<unsigned char> current_scene_debug = out_scene_debug_rgba;
-        std::vector<unsigned char> current_scene_occlusion = out_scene_occlusion_rgba;
-        std::vector<unsigned char> current_aligned_predicted_depth_occlusion =
-            out_aligned_predicted_depth_occlusion_rgba;
-        std::vector<unsigned char> current_close_to_body = out_close_to_body_rgba;
+        // Deformation is computed from the raw cloth silhouette only. The same
+        // accumulated field is applied independently to raw and occluded cloth;
+        // visibility maps always remain in the original fitting coordinates.
+        std::vector<unsigned char> current_unoccluded_cloth = cloth_rgba;
+        std::vector<unsigned char> current_occluded_cloth = out_rgba;
         std::vector<unsigned char> current_deformation = out_deformation_rgba;
         out_deformation_steps_rgba.push_back(current_deformation);
 
@@ -3064,7 +3753,7 @@ namespace poseweaver
 
             std::vector<unsigned char> source_cloth_mask(pixel_count, 0u);
             for (size_t pixel = 0; pixel < source_cloth_mask.size(); ++pixel)
-                source_cloth_mask[pixel] = current_cloth[pixel * 4u + 3u] != 0u ? 1u : 0u;
+                source_cloth_mask[pixel] = current_unoccluded_cloth[pixel * 4u + 3u] != 0u ? 1u : 0u;
 
             std::vector<float> warp_dx;
             std::vector<float> warp_dy;
@@ -3097,90 +3786,36 @@ namespace poseweaver
                 inverse_source_x,
                 inverse_source_y);
 
-            std::vector<unsigned char> next_cloth;
-            std::vector<unsigned char> next_debug;
-            std::vector<unsigned char> next_scene_debug;
-            std::vector<unsigned char> next_scene_occlusion;
-            std::vector<unsigned char> next_aligned_predicted_depth_occlusion;
-            std::vector<unsigned char> next_close_to_body;
+            std::vector<unsigned char> next_unoccluded_cloth;
+            std::vector<unsigned char> next_occluded_cloth;
             warp_rgba_inverse_sharp(
-                current_cloth,
+                current_unoccluded_cloth,
                 width,
                 height,
                 inverse_source_x,
                 inverse_source_y,
-                next_cloth);
-            warp_rgba_inverse_categorical(
-                current_debug,
+                next_unoccluded_cloth);
+            warp_rgba_inverse_sharp(
+                current_occluded_cloth,
                 width,
                 height,
                 inverse_source_x,
                 inverse_source_y,
-                next_debug);
-            warp_rgba_inverse_categorical(
-                current_scene_debug,
-                width,
-                height,
-                inverse_source_x,
-                inverse_source_y,
-                next_scene_debug);
-            warp_rgba_inverse_categorical(
-                current_scene_occlusion,
-                width,
-                height,
-                inverse_source_x,
-                inverse_source_y,
-                next_scene_occlusion);
-            warp_rgba_inverse_categorical(
-                current_aligned_predicted_depth_occlusion,
-                width,
-                height,
-                inverse_source_x,
-                inverse_source_y,
-                next_aligned_predicted_depth_occlusion);
-            warp_rgba_inverse_categorical(
-                current_close_to_body,
-                width,
-                height,
-                inverse_source_x,
-                inverse_source_y,
-                next_close_to_body);
+                next_occluded_cloth);
 
-            current_cloth = std::move(next_cloth);
-            current_debug = std::move(next_debug);
-            current_scene_debug = std::move(next_scene_debug);
-            current_scene_occlusion = std::move(next_scene_occlusion);
-            current_aligned_predicted_depth_occlusion =
-                std::move(next_aligned_predicted_depth_occlusion);
-            current_close_to_body = std::move(next_close_to_body);
+            current_unoccluded_cloth = std::move(next_unoccluded_cloth);
+            current_occluded_cloth = std::move(next_occluded_cloth);
             rebuild_deformation_from_warped_layers(
-                current_cloth,
-                current_scene_debug,
+                current_unoccluded_cloth,
+                out_scene_debug_rgba,
                 current_deformation);
             out_deformation_steps_rgba.push_back(current_deformation);
             ++applied_warp_steps;
         }
 
-        out_warped_rgba = std::move(current_cloth);
-        out_warped_debug_rgba = std::move(current_debug);
-        std::vector<unsigned char> warped_scene_debug = std::move(current_scene_debug);
-        std::vector<unsigned char> warped_scene_occlusion = std::move(current_scene_occlusion);
-        std::vector<unsigned char> warped_aligned_predicted_depth_occlusion =
-            std::move(current_aligned_predicted_depth_occlusion);
-        out_close_to_body_rgba = std::move(current_close_to_body);
         out_deformation_rgba = current_deformation;
-
-        int warped_removed_count = 0;
-        apply_visibility(
-            out_warped_rgba,
-            out_warped_debug_rgba,
-            warped_scene_debug,
-            warped_scene_occlusion,
-            warped_aligned_predicted_depth_occlusion,
-            out_final_unfiltered_occlusion_rgba,
-            out_final_occlusion_rgba,
-            nullptr,
-            warped_removed_count);
+        out_layers.warped_cloth = std::move(current_unoccluded_cloth);
+        out_warped_rgba = std::move(current_occluded_cloth);
 
         int final_red = 0;
         int final_blue = 0;
@@ -3198,8 +3833,29 @@ namespace poseweaver
                 + ", radius=" + std::to_string(warp_radius)
                 + ", force(total/step)=" + std::to_string(warp_force)
                 + "/" + std::to_string(warp_force_per_step)
-                + ", removed(no warp/warped)=" + std::to_string(out_removed_count)
-                + "/" + std::to_string(warped_removed_count));
+                + ", removed=" + std::to_string(out_removed_count));
+
+        const std::array<const std::vector<unsigned char>*, 7> raw_mask_layers = {{
+            &out_unfiltered_debug_rgba,
+            &out_debug_rgba,
+            &out_aligned_predicted_depth_occlusion_rgba,
+            &out_scene_occlusion_rgba,
+            &out_iso_occlusion_rgba,
+            &out_unfiltered_occlusion_rgba,
+            &out_occlusion_rgba,
+        }};
+        for (const auto* layer : raw_mask_layers)
+        {
+            if (layer->size() < pixel_count * 4u)
+                return fail("cloth fitting produced an incomplete visibility layer");
+            for (size_t pixel = 0; pixel < pixel_count; ++pixel)
+            {
+                const bool raw_active = cloth_rgba[pixel * 4u + 3u] != 0u;
+                const bool layer_active = (*layer)[pixel * 4u + 3u] != 0u;
+                if (raw_active != layer_active)
+                    return fail("cloth fitting visibility layers do not share the raw cloth mask");
+            }
+        }
 
         const std::filesystem::path renders_dir = state.cloth_fitting_output_dir.empty()
             ? std::filesystem::path("renders")
@@ -3209,31 +3865,69 @@ namespace poseweaver
         if (ec)
             return fail("could not create renders directory: " + ec.message());
 
-        struct DebugImageOutput
+        constexpr std::array<const char*, 18> obsolete_outputs = {{
+            "cloth_fitting_3d_scene_debug.png",
+            "cloth_fitting_aligned_predicted_depth_visibility.png",
+            "cloth_fitting_close_to_body.png",
+            "cloth_fitting_debug_no_warp.png",
+            "cloth_fitting_debug_no_warp_unfiltered.png",
+            "cloth_fitting_debug_warped.png",
+            "cloth_fitting_deformation.png",
+            "cloth_fitting_iso_mapping_colors.png",
+            "cloth_fitting_no_warp.png",
+            "cloth_fitting_occlusion_filtered.png",
+            "cloth_fitting_occlusion_unfiltered.png",
+            "cloth_fitting_occlusion_warped.png",
+            "cloth_fitting_occlusion_warped_unfiltered.png",
+            "cloth_fitting_pixelated_occluded.png",
+            "cloth_fitting_unwarped_occlusion_smoothed.png",
+            "cloth_fitting_warped.png",
+            "cloth_fitting_final_occlusion.png",
+            "cloth_fitting_final_occlusion_unfiltered.png",
+        }};
+        for (const char* filename : obsolete_outputs)
+        {
+            ec.clear();
+            std::filesystem::remove(renders_dir / filename, ec);
+            if (ec)
+                return fail("could not remove obsolete fitting output " + std::string(filename));
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(renders_dir, ec))
+        {
+            if (ec)
+                break;
+            const std::string filename = entry.path().filename().string();
+            if (filename.rfind("cloth_fitting_deformation_step_", 0) == 0
+                && entry.path().extension() == ".png")
+            {
+                std::error_code remove_error;
+                std::filesystem::remove(entry.path(), remove_error);
+                if (remove_error)
+                    return fail("could not replace " + entry.path().string());
+            }
+        }
+        if (ec)
+            return fail("could not scan fitting output directory: " + ec.message());
+
+        struct LayerImageOutput
         {
             const char* filename = nullptr;
             const std::vector<unsigned char>* pixels = nullptr;
         };
-        const std::array<DebugImageOutput, 17> debug_outputs = {{
-            { "cloth_fitting_no_warp.png", &out_rgba },
-            { "cloth_fitting_pixelated_occluded.png", &out_pixelated_occluded_rgba },
-            { "cloth_fitting_unwarped_occlusion_smoothed.png", &out_unwarped_upscaled_rgba },
-            { "cloth_fitting_warped.png", &out_warped_rgba },
-            { "cloth_fitting_iso_mapping_colors.png", &out_debug_rgba },
-            { "cloth_fitting_debug_no_warp.png", &out_debug_rgba },
-            { "cloth_fitting_debug_warped.png", &out_warped_debug_rgba },
-            { "cloth_fitting_occlusion_unfiltered.png", &out_unfiltered_occlusion_rgba },
-            { "cloth_fitting_occlusion_filtered.png", &out_occlusion_rgba },
-            { "cloth_fitting_occlusion_warped_unfiltered.png", &out_final_unfiltered_occlusion_rgba },
-            { "cloth_fitting_occlusion_warped.png", &out_final_occlusion_rgba },
+        const std::array<LayerImageOutput, 11> layer_outputs = {{
+            { "cloth_fitting_raw_cloth.png", &cloth_rgba },
+            { "cloth_fitting_raw_iso_matching.png", &out_unfiltered_debug_rgba },
+            { "cloth_fitting_filtered_iso_matching.png", &out_debug_rgba },
+            { "cloth_fitting_predicted_depth_visibility.png", &out_aligned_predicted_depth_occlusion_rgba },
             { "cloth_fitting_true_depth_visibility.png", &out_scene_occlusion_rgba },
-            { "cloth_fitting_aligned_predicted_depth_visibility.png", &out_aligned_predicted_depth_occlusion_rgba },
             { "cloth_fitting_iso_visibility.png", &out_iso_occlusion_rgba },
-            { "cloth_fitting_3d_scene_debug.png", &out_scene_debug_rgba },
-            { "cloth_fitting_deformation.png", &out_deformation_rgba },
-            { "cloth_fitting_close_to_body.png", &out_close_to_body_rgba },
+            { "cloth_fitting_raw_final_occlusion.png", &out_unfiltered_occlusion_rgba },
+            { "cloth_fitting_filtered_final_occlusion.png", &out_occlusion_rgba },
+            { "cloth_fitting_occluded_cloth.png", &out_rgba },
+            { "cloth_fitting_warped_cloth.png", &out_layers.warped_cloth },
+            { "cloth_fitting_warped_occluded_cloth.png", &out_warped_rgba },
         }};
-        for (const DebugImageOutput& output : debug_outputs)
+        for (const LayerImageOutput& output : layer_outputs)
         {
             const std::filesystem::path path = renders_dir / output.filename;
             if (stbi_write_png(
@@ -3259,7 +3953,7 @@ namespace poseweaver
                     width * 4) == 0)
                 return fail("could not write " + path.string());
         }
-        console_add_line(state, "Cloth fitting debug images saved to " + renders_dir.string());
+        console_add_line(state, "Cloth fitting layers saved to " + renders_dir.string());
 
         return true;
     }
