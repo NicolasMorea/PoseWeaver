@@ -65,7 +65,11 @@ namespace
         }
         if (std::sscanf(line, "ClothToonShader=%d", &iv) == 1)
         {
-            state->cloth_toon_shader = (iv != 0);
+            state->cloth_ink_style = iv != 0 ? poseweaver::ClothInkStyle::Detailed : poseweaver::ClothInkStyle::Off;
+        }
+        if (std::sscanf(line, "ClothInkStyle=%d", &iv) == 1)
+        {
+            state->cloth_ink_style = static_cast<poseweaver::ClothInkStyle>(std::clamp(iv, 0, 3));
         }
         {
             float r = 1.0f, g = 1.0f, b = 1.0f;
@@ -446,7 +450,7 @@ namespace
         buf->appendf("GarmentMinClothSkinDistance=%.6f\n", state->garment_min_cloth_skin_distance);
         buf->appendf("GarmentVertexMergeEnabled=%d\n", state->garment_vertex_merge_enabled ? 1 : 0);
         buf->appendf("GarmentVertexMergeDistance=%.9f\n", state->garment_vertex_merge_distance);
-        buf->appendf("ClothToonShader=%d\n", state->cloth_toon_shader ? 1 : 0);
+        buf->appendf("ClothInkStyle=%d\n", static_cast<int>(state->cloth_ink_style));
         buf->appendf("ClothInkColor=%.6f,%.6f,%.6f\n",
             state->cloth_ink_color[0], state->cloth_ink_color[1], state->cloth_ink_color[2]);
         buf->appendf("SimulationPreview=%d\n", state->controls.preview ? 1 : 0);

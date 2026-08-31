@@ -657,8 +657,16 @@ namespace poseweaver
             if (scene_toolbar_toggle("Rig (W)", state.show_sketch2rig_rig))
                 state.show_sketch2rig_rig = !state.show_sketch2rig_rig;
             ImGui::SameLine();
-            if (scene_toolbar_toggle("Ink Cloth", state.cloth_toon_shader))
-                state.cloth_toon_shader = !state.cloth_toon_shader;
+            ImGui::SetNextItemWidth(155.0f);
+            int ink_style = static_cast<int>(state.cloth_ink_style);
+            const char* ink_styles[] = {
+                "Ink: Off",
+                "Ink: Detailed",
+                "Ink: Clean Lines",
+                "Ink: Soft 2D",
+            };
+            if (ImGui::Combo("##cloth_ink_style", &ink_style, ink_styles, IM_ARRAYSIZE(ink_styles)))
+                state.cloth_ink_style = static_cast<ClothInkStyle>(ink_style);
             ImGui::SameLine();
             if (scene_toolbar_toggle("Colliders", state.show_collision_colliders))
                 state.show_collision_colliders = !state.show_collision_colliders;

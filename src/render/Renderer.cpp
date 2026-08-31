@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include <stb_image.h>
@@ -210,6 +211,108 @@ namespace poseweaver
             return link_program(vs, fs);
         }
 
+        static bool build_ink_render_surface(
+            const Eigen::MatrixXd& input_V,
+            const Eigen::MatrixXi& F,
+            ClothInkStyle style,
+            Eigen::MatrixXd& output_V,
+            Eigen::MatrixXd& output_N)
+        {
+            if (input_V.rows() <= 0 || input_V.cols() != 3 || F.rows() <= 0 || F.cols() != 3)
+                return false;
+
+            std::vector<std::vector<int>> adjacency((size_t)input_V.rows());
+            std::unordered_map<unsigned long long, int> edge_counts;
+            edge_counts.reserve((size_t)F.rows() * 3u);
+            const auto edge_key = [](int a, int b)
+            {
+                const unsigned int lo = (unsigned int)std::min(a, b);
+                const unsigned int hi = (unsigned int)std::max(a, b);
+                return (static_cast<unsigned long long>(lo) << 32u) | hi;
+            };
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int ids[3] = { F(fi, 0), F(fi, 1), F(fi, 2) };
+                for (int ei = 0; ei < 3; ++ei)
+                {
+                    const int a = ids[ei];
+                    const int b = ids[(ei + 1) % 3];
+                    if (a < 0 || b < 0 || a >= input_V.rows() || b >= input_V.rows())
+                        return false;
+                    adjacency[(size_t)a].push_back(b);
+                    adjacency[(size_t)b].push_back(a);
+                    ++edge_counts[edge_key(a, b)];
+                }
+            }
+
+            std::vector<unsigned char> boundary((size_t)input_V.rows(), 0u);
+            for (const auto& [key, count] : edge_counts)
+            {
+                if (count != 1)
+                    continue;
+                boundary[(size_t)(key >> 32u)] = 1u;
+                boundary[(size_t)(key & 0xffffffffu)] = 1u;
+            }
+
+            Eigen::MatrixXd filtered = input_V;
+            const auto smooth_step = [&](double amount)
+            {
+                Eigen::MatrixXd next = filtered;
+                for (int vi = 0; vi < filtered.rows(); ++vi)
+                {
+                    const auto& neighbors = adjacency[(size_t)vi];
+                    if (boundary[(size_t)vi] != 0u || neighbors.empty())
+                        continue;
+                    Eigen::RowVector3d average = Eigen::RowVector3d::Zero();
+                    for (int neighbor : neighbors)
+                        average += filtered.row(neighbor);
+                    average /= (double)neighbors.size();
+                    next.row(vi) += amount * (average - filtered.row(vi));
+                }
+                filtered = std::move(next);
+            };
+
+            const bool smooth_geometry = style == ClothInkStyle::SoftGeometry;
+            if (smooth_geometry)
+            {
+                for (int iteration = 0; iteration < 3; ++iteration)
+                {
+                    smooth_step(0.32);
+                    smooth_step(-0.34);
+                }
+            }
+            else
+            {
+                for (int iteration = 0; iteration < 3; ++iteration)
+                    smooth_step(0.45);
+            }
+
+            output_V = smooth_geometry ? filtered : input_V;
+            const Eigen::MatrixXd& normal_surface = smooth_geometry ? output_V : filtered;
+            output_N = Eigen::MatrixXd::Zero(input_V.rows(), 3);
+            for (int fi = 0; fi < F.rows(); ++fi)
+            {
+                const int a = F(fi, 0);
+                const int b = F(fi, 1);
+                const int c = F(fi, 2);
+                const Eigen::RowVector3d ab = normal_surface.row(b) - normal_surface.row(a);
+                const Eigen::RowVector3d ac = normal_surface.row(c) - normal_surface.row(a);
+                const Eigen::RowVector3d normal = ab.cross(ac);
+                if (!normal.allFinite() || normal.squaredNorm() <= 1e-24)
+                    continue;
+                output_N.row(a) += normal;
+                output_N.row(b) += normal;
+                output_N.row(c) += normal;
+            }
+            for (int vi = 0; vi < output_N.rows(); ++vi)
+            {
+                const double length = output_N.row(vi).norm();
+                if (length > 1e-12 && std::isfinite(length))
+                    output_N.row(vi) /= length;
+            }
+            return output_V.allFinite() && output_N.allFinite();
+        }
+
         static Eigen::Vector3d wind_dir_from_angles_deg(double yaw_deg, double pitch_deg)
         {
             constexpr double kPi = 3.14159265358979323846264338327950288;
@@ -313,7 +416,11 @@ namespace poseweaver
             core.camera_base_translation.setZero();
             core.trackball_angle = Eigen::Quaternionf::Identity();
 
-            core.camera_view_angle = kSketch2RigVerticalFovDeg;
+            core.camera_view_angle =
+                (state.scene_view_target_fov_degrees > 1.0f
+                    && std::isfinite(state.scene_view_target_fov_degrees))
+                ? state.scene_view_target_fov_degrees
+                : kSketch2RigVerticalFovDeg;
             last_request_id = state.scene_view_snap_to_target_request_id;
         }
 
@@ -522,16 +629,93 @@ namespace poseweaver
             return rig_height_if_valid_render(joints, &h) ? h : 1.6;
         }
 
+        static bool nlf_camera_eye_render(
+            const std::string& text,
+            Eigen::Vector3f* out_eye,
+            float* out_vertical_fov_degrees)
+        {
+            if (!out_eye || !out_vertical_fov_degrees)
+                return false;
+
+            std::vector<double> joints3d;
+            std::vector<double> vertices3d;
+            std::vector<double> vertices2d;
+            double vertex_count_d = 0.0;
+            double image_height_d = 0.0;
+            double image_size_d = 0.0;
+            (void)parse_json_number_field_render(text, "image_size", &image_size_d);
+            if (!parse_json_number_field_render(text, "image_height", &image_height_d))
+                image_height_d = image_size_d;
+            if (!parse_json_number_array_field_render(text, "joints3d_flat", &joints3d)
+                || joints3d.size() < 3u
+                || !parse_json_number_array_field_render(text, "vertices3d_flat", &vertices3d)
+                || !parse_json_number_array_field_render(text, "vertices2d_flat", &vertices2d)
+                || !parse_json_number_field_render(text, "vertices3d_count", &vertex_count_d))
+                return false;
+
+            const int vertex_count = std::max(0, (int)std::lround(vertex_count_d));
+            if (vertex_count <= 0
+                || image_height_d <= 1.0
+                || vertices3d.size() < (size_t)vertex_count * 3u
+                || vertices2d.size() < (size_t)vertex_count * 2u)
+                return false;
+
+            double sum_p = 0.0;
+            double sum_q = 0.0;
+            double sum_pp = 0.0;
+            double sum_pq = 0.0;
+            int sample_count = 0;
+            for (int i = 0; i < vertex_count; ++i)
+            {
+                const size_t k3 = (size_t)i * 3u;
+                const size_t k2 = (size_t)i * 2u;
+                const double z = vertices3d[k3 + 2u];
+                if (!(z > 1e-9) || !std::isfinite(z))
+                    continue;
+                const double p = vertices3d[k3 + 1u] / z;
+                const double q = vertices2d[k2 + 1u];
+                if (!std::isfinite(p) || !std::isfinite(q))
+                    continue;
+                sum_p += p;
+                sum_q += q;
+                sum_pp += p * p;
+                sum_pq += p * q;
+                ++sample_count;
+            }
+            const double denom = sum_pp - (sum_p * sum_p) / std::max(1, sample_count);
+            if (sample_count < 3 || std::abs(denom) <= 1e-12 || !std::isfinite(denom))
+                return false;
+            const double focal_y = (sum_pq - (sum_p * sum_q) / (double)sample_count) / denom;
+            if (!(focal_y > 1e-6) || !std::isfinite(focal_y))
+                return false;
+
+            const double pi = std::acos(-1.0);
+            const double fov_degrees =
+                2.0 * std::atan(0.5 * image_height_d / focal_y) * 180.0 / pi;
+            const Eigen::Vector3d root(
+                joints3d[0] / 1000.0,
+                -joints3d[1] / 1000.0,
+                -joints3d[2] / 1000.0);
+            *out_eye = (-root).cast<float>();
+            *out_vertical_fov_degrees = (float)fov_degrees;
+            return out_eye->allFinite()
+                && std::isfinite(*out_vertical_fov_degrees)
+                && *out_vertical_fov_degrees > 1.0f;
+        }
+
         static bool sketch2rig_camera_eye_render(
             const std::filesystem::path& rig_path,
             double target_height,
-            Eigen::Vector3f* out_eye)
+            Eigen::Vector3f* out_eye,
+            float* out_vertical_fov_degrees)
         {
-            if (!out_eye)
+            if (!out_eye || !out_vertical_fov_degrees)
                 return false;
             std::string text;
             if (rig_path.empty() || !read_text_file_render(rig_path, &text))
                 return false;
+            if (nlf_camera_eye_render(text, out_eye, out_vertical_fov_degrees))
+                return true;
             Eigen::MatrixXd joints;
             int image_size = 512;
             if (!parse_sketch2rig_joints_render(text, &joints, &image_size))
@@ -555,6 +739,7 @@ namespace poseweaver
                 (float)(-scene_scale * root_offset.x()),
                 (float)(-scene_scale * root_offset.y()),
                 (float)(-scene_scale * root_offset.z()));
+            *out_vertical_fov_degrees = kSketch2RigVerticalFovDeg;
             return out_eye->allFinite();
         }
 
@@ -799,6 +984,7 @@ namespace poseweaver
         m_sketch2rig_rig_mesh_index = m_viewer.append_mesh(true);
         m_cloth_render_mesh_index = m_viewer.append_mesh(false);
         m_collision_proxy_mesh_index = m_viewer.append_mesh(true);
+        m_cloth_ink_preview_mesh_index = m_viewer.append_mesh(false);
 
         m_viewer.data(m_object_mesh_index).set_visible(false);
         m_viewer.data(m_garment_mesh_index).set_visible(false);
@@ -806,6 +992,7 @@ namespace poseweaver
         m_viewer.data(m_sketch2rig_rig_mesh_index).set_visible(false);
         m_viewer.data(m_cloth_render_mesh_index).set_visible(false);
         m_viewer.data(m_collision_proxy_mesh_index).set_visible(false);
+        m_viewer.data(m_cloth_ink_preview_mesh_index).set_visible(false);
 
         {
             auto& w = m_viewer.data(m_wind_arrow_mesh_index);
@@ -1042,6 +1229,10 @@ namespace poseweaver
             cloth_render.set_visible(false);
 
             auto& proxy = m_viewer.data(m_collision_proxy_mesh_index);
+            auto& cloth_ink_preview = m_viewer.data(m_cloth_ink_preview_mesh_index);
+            cloth_ink_preview.clear();
+            cloth_ink_preview.set_visible(false);
+
             proxy.clear();
             proxy.set_visible(false);
         }
@@ -1151,6 +1342,58 @@ namespace poseweaver
 
         update_cloth_simulation_job(state);
         apply_cloth_simulation_frame(state);
+        bool use_ink_preview = false;
+        auto& ink_preview = m_viewer.data(m_cloth_ink_preview_mesh_index);
+        const bool wants_ink_preview =
+            state.show_garment_mesh
+            && (state.cloth_ink_style == ClothInkStyle::Clean
+                || state.cloth_ink_style == ClothInkStyle::SoftGeometry);
+        if (wants_ink_preview)
+        {
+            const auto& garment = m_viewer.data(m_garment_mesh_index);
+            const bool same_vertices =
+                garment.V.rows() == m_cloth_ink_preview_source_vertices.rows()
+                && garment.V.cols() == m_cloth_ink_preview_source_vertices.cols()
+                && (garment.V.array() == m_cloth_ink_preview_source_vertices.array()).all();
+            const bool same_faces =
+                garment.F.rows() == m_cloth_ink_preview_source_faces.rows()
+                && garment.F.cols() == m_cloth_ink_preview_source_faces.cols()
+                && (garment.F.array() == m_cloth_ink_preview_source_faces.array()).all();
+            const bool needs_update =
+                state.cloth_ink_style != m_cloth_ink_preview_style
+                || !same_vertices
+                || !same_faces
+                || ink_preview.V.rows() <= 0;
+            bool preview_ready = !needs_update && ink_preview.V.rows() > 0;
+            if (needs_update)
+            {
+                Eigen::MatrixXd ink_V;
+                Eigen::MatrixXd ink_N;
+                if (build_ink_render_surface(garment.V, garment.F, state.cloth_ink_style, ink_V, ink_N))
+                {
+                    ink_preview.clear();
+                    ink_preview.set_mesh(ink_V, garment.F);
+                    ink_preview.set_normals(ink_N);
+                    ink_preview.show_faces = 1;
+                    ink_preview.show_lines = 0;
+                    ink_preview.show_overlay = 0;
+                    ink_preview.double_sided = garment.double_sided;
+                    ink_preview.shininess = garment.shininess;
+                    ink_preview.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+                    m_cloth_ink_preview_source_vertices = garment.V;
+                    m_cloth_ink_preview_source_faces = garment.F;
+                    m_cloth_ink_preview_style = state.cloth_ink_style;
+                    preview_ready = true;
+                }
+            }
+            if (preview_ready)
+            {
+                ink_preview.set_visible(true);
+                use_ink_preview = true;
+            }
+        }
+        if (!use_ink_preview)
+            ink_preview.set_visible(false);
         update_collision_proxy_gizmo(state);
 
         Eigen::Vector3d scene_center(0.0, 0.0, 0.0);
@@ -1367,7 +1610,8 @@ namespace poseweaver
             }
 
             const bool use_cloth_toon =
-                state.cloth_toon_shader && mesh_index == m_garment_mesh_index;
+                state.cloth_ink_style != ClothInkStyle::Off
+                && (mesh_index == m_garment_mesh_index || mesh_index == m_cloth_ink_preview_mesh_index);
             const MeshShaderVariant shader_variant = use_cloth_toon
                 ? MeshShaderVariant::ClothToon
                 : MeshShaderVariant::TwoLight;
@@ -1392,6 +1636,7 @@ namespace poseweaver
             glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
             glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
             glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
+            glUniform1i(glGetUniformLocation(prog, "toon_style"), static_cast<int>(state.cloth_ink_style));
             glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
             glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
             glUniform2f(
@@ -1480,7 +1725,10 @@ namespace poseweaver
         const auto draw_scene_contents = [&]()
         {
             draw_scene_mesh(m_object_mesh_index);
-            draw_scene_mesh(m_garment_mesh_index);
+            if (use_ink_preview)
+                draw_scene_mesh(m_cloth_ink_preview_mesh_index);
+            else
+                draw_scene_mesh(m_garment_mesh_index);
             draw_scene_mesh(m_smplh_mesh_index);
             draw_scene_mesh(m_collision_proxy_mesh_index);
 
@@ -1906,6 +2154,38 @@ namespace poseweaver
             render_mesh = &fine_mesh;
         }
 
+        const bool uses_render_surface =
+            state.cloth_ink_style == ClothInkStyle::Clean
+            || state.cloth_ink_style == ClothInkStyle::SoftGeometry;
+        if (uses_render_surface)
+        {
+            const Eigen::MatrixXd source_V = render_mesh->V;
+            const Eigen::MatrixXi source_F = render_mesh->F;
+            Eigen::MatrixXd ink_V;
+            Eigen::MatrixXd ink_N;
+            if (!build_ink_render_surface(source_V, source_F, state.cloth_ink_style, ink_V, ink_N))
+            {
+                m_last_cloth_render_request_id = request_id;
+                state.cloth_render_completed_id = request_id;
+                state.cloth_render_path.clear();
+                console_add_line(state, "Generated cloth render failed: could not build Ink render surface");
+                return;
+            }
+
+            auto& ink_mesh = m_viewer.data(m_cloth_render_mesh_index);
+            ink_mesh.clear();
+            ink_mesh.set_mesh(ink_V, source_F);
+            ink_mesh.set_normals(ink_N);
+            ink_mesh.show_faces = 1;
+            ink_mesh.show_lines = 0;
+            ink_mesh.show_overlay = 0;
+            ink_mesh.double_sided = garment.double_sided;
+            ink_mesh.shininess = garment.shininess;
+            ink_mesh.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+            ink_mesh.set_visible(false);
+            render_mesh = &ink_mesh;
+        }
+
         state.cloth_render_vertex_count = render_mesh->V.rows();
         state.cloth_render_face_count = render_mesh->F.rows();
 
@@ -1963,8 +2243,13 @@ namespace poseweaver
         if (!state.cloth_render_use_current_camera && !render_camera_rig_path.empty())
         {
             Eigen::Vector3f eye;
+            float vertical_fov_degrees = kSketch2RigVerticalFovDeg;
             const double target_height = smpl_native_height_from_betas_render(m_smplh_model, m_smplh_params.betas);
-            if (sketch2rig_camera_eye_render(std::filesystem::path(render_camera_rig_path), target_height, &eye))
+            if (sketch2rig_camera_eye_render(
+                    std::filesystem::path(render_camera_rig_path),
+                    target_height,
+                    &eye,
+                    &vertical_fov_degrees))
             {
                 core.orthographic = false;
                 core.camera_eye = eye;
@@ -1975,7 +2260,7 @@ namespace poseweaver
                 core.camera_translation.setZero();
                 core.camera_base_translation.setZero();
                 core.trackball_angle = Eigen::Quaternionf::Identity();
-                core.camera_view_angle = kSketch2RigVerticalFovDeg;
+                core.camera_view_angle = vertical_fov_degrees;
             }
             else if (state.scene_view_target_valid)
             {
@@ -2038,22 +2323,24 @@ namespace poseweaver
             render_mesh->dirty = igl::opengl::MeshGL::DIRTY_NONE;
         }
 
-        const int rendered_mesh_index = state.cloth_render_fine
-            ? m_cloth_render_mesh_index
-            : m_garment_mesh_index;
+        const int rendered_mesh_index = render_mesh == &garment ? m_garment_mesh_index : m_cloth_render_mesh_index;
         const size_t shader_index = (size_t)rendered_mesh_index;
+        const bool use_ink = state.cloth_ink_style != ClothInkStyle::Off;
+        const MeshShaderVariant desired_variant = use_ink ? MeshShaderVariant::ClothToon : MeshShaderVariant::TwoLight;
         if (shader_index < m_mesh_shader_variant.size()
-            && m_mesh_shader_variant[shader_index] != MeshShaderVariant::ClothToon
+            && m_mesh_shader_variant[shader_index] != desired_variant
             && render_mesh->meshgl.is_initialized)
         {
-            const GLuint prog = build_cloth_toon_program();
+            const GLuint prog = use_ink
+                ? build_cloth_toon_program()
+                : build_two_light_program();
             if (prog != 0)
             {
                 const GLuint old = render_mesh->meshgl.shader_mesh;
                 render_mesh->meshgl.shader_mesh = prog;
                 if (old != 0)
                     glDeleteProgram(old);
-                m_mesh_shader_variant[shader_index] = MeshShaderVariant::ClothToon;
+                m_mesh_shader_variant[shader_index] = desired_variant;
             }
         }
 
@@ -2070,6 +2357,7 @@ namespace poseweaver
         glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
         glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
         glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
+        glUniform1i(glGetUniformLocation(prog, "toon_style"), static_cast<int>(state.cloth_ink_style));
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
         glUniform2f(glGetUniformLocation(prog, "viewport_size"), (float)kRender, (float)kRender);
@@ -2087,20 +2375,23 @@ namespace poseweaver
         glGetIntegerv(GL_CULL_FACE_MODE, &old_cull_face);
         glGetBooleanv(GL_DEPTH_WRITEMASK, &old_depth_mask);
 
-        constexpr float kToonOutlinePixels = 6.0f;
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT);
-        glDepthMask(GL_FALSE);
-        glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
-        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), kToonOutlinePixels);
-        render_mesh->meshgl.draw_mesh(true);
+        if (use_ink)
+        {
+            constexpr float kToonOutlinePixels = 6.0f;
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_FRONT);
+            glDepthMask(GL_FALSE);
+            glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 1);
+            glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), kToonOutlinePixels);
+            render_mesh->meshgl.draw_mesh(true);
 
-        glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
-        glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
-        glDepthMask(old_depth_mask);
-        glCullFace((GLenum)old_cull_face);
-        if (!old_cull_enabled)
-            glDisable(GL_CULL_FACE);
+            glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
+            glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
+            glDepthMask(old_depth_mask);
+            glCullFace((GLenum)old_cull_face);
+            if (!old_cull_enabled)
+                glDisable(GL_CULL_FACE);
+        }
 
         render_mesh->meshgl.draw_mesh(true);
 
@@ -2112,7 +2403,8 @@ namespace poseweaver
 
         float sketch_stroke_mean = 0.0f;
         const bool matched_stroke_mean =
-            load_stroke_luminance_mean(
+            use_ink
+            && load_stroke_luminance_mean(
                 std::filesystem::path(state.cloth_render_stroke_reference_path),
                 sketch_stroke_mean)
             && match_render_stroke_luminance(out, sketch_stroke_mean);

@@ -6,8 +6,18 @@
 #include <string>
 #include <vector>
 
+#include "simulation/SimulationTypes.h"
+
 namespace poseweaver
 {
+    enum class ClothInkStyle : int
+    {
+        Off = 0,
+        Detailed = 1,
+        Clean = 2,
+        SoftGeometry = 3,
+    };
+
     class ModelInferenceService;
 
     struct ViewportRect
@@ -361,7 +371,7 @@ namespace poseweaver
         bool show_garment_mesh = true;
         bool show_collision_colliders = false;
         bool garment_color_by_smpl_uv = false;
-        bool cloth_toon_shader = false;
+        ClothInkStyle cloth_ink_style = ClothInkStyle::Off;
         std::array<float, 3> cloth_ink_color{ 1.0f, 1.0f, 1.0f };
         bool show_console = true;
     };

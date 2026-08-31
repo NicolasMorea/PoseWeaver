@@ -212,6 +212,7 @@ namespace poseweaver
         int m_sketch2rig_rig_mesh_index = 5;
         int m_cloth_render_mesh_index = 6;
         int m_collision_proxy_mesh_index = 7;
+        int m_cloth_ink_preview_mesh_index = 8;
 
         // Indexed by mesh index in m_viewer.data_list.
         std::array<MeshShaderVariant, 9> m_mesh_shader_variant{};
@@ -222,6 +223,9 @@ namespace poseweaver
         std::string m_sketch2rig_rig_source_path;
         std::string m_sketch2rig_rig_last_error;
         int m_last_fb_w = 0;
+        Eigen::MatrixXd m_cloth_ink_preview_source_vertices;
+        Eigen::MatrixXi m_cloth_ink_preview_source_faces;
+        ClothInkStyle m_cloth_ink_preview_style = ClothInkStyle::Off;
         int m_last_fb_h = 0;
         Eigen::MatrixXd m_garment_rest_vertices;
         bool m_smplh_vertices_recomputed_this_frame = false;
