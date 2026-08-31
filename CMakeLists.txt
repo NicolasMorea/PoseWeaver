@@ -47,6 +47,17 @@ endif()
 
 include(FetchContent)
 find_package(Threads REQUIRED)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+find_package(nlohmann_json 3.10 QUIET)
+if(NOT nlohmann_json_FOUND)
+	FetchContent_Declare(
+		nlohmann_json
+		GIT_REPOSITORY https://github.com/nlohmann/json.git
+		GIT_TAG        v3.11.3
+	)
+	FetchContent_MakeAvailable(nlohmann_json)
+endif()
+enable_testing()
 
 # cnpy allows to read .npy files (to read SMPL models and poses)
 FetchContent_Declare(
@@ -177,7 +188,6 @@ if(EXISTS "${cnpy_SOURCE_DIR}/cnpy.cpp")
 endif()
 
 if(POSEWEAVER_HAS_CUDA)
-	enable_testing()
 	add_executable(poseweaver_cuda_smoke
 		tests/ClothCudaSmoke.cpp
 		src/simulation/gpu/ClothCudaJacobi.h
@@ -188,12 +198,45 @@ if(POSEWEAVER_HAS_CUDA)
 	add_test(NAME poseweaver_cuda_smoke COMMAND poseweaver_cuda_smoke)
 endif()
 
+add_executable(poseweaver_cloth_bending_smoke
+	tests/ClothBendingSmoke.cpp
+	src/simulation/xpbd/ClothXpbd.cpp
+	src/simulation/xpbd/ClothXpbd.h
+	src/simulation/collision/TriangleBvh.cpp
+	src/simulation/collision/TriangleBvh.h
+)
+target_include_directories(poseweaver_cloth_bending_smoke PRIVATE src)
+target_link_libraries(poseweaver_cloth_bending_smoke PRIVATE Eigen3::Eigen)
+target_compile_features(poseweaver_cloth_bending_smoke PRIVATE cxx_std_17)
+add_test(NAME poseweaver_cloth_bending_smoke COMMAND poseweaver_cloth_bending_smoke)
+
+add_executable(poseweaver_prediction_filters_smoke
+	tests/PredictionFiltersSmoke.cpp
+	src/postproc/PredictionFilters.cpp
+	src/postproc/PredictionFilters.h
+	src/third_party/stb_image_write_impl.cpp
+)
+target_include_directories(poseweaver_prediction_filters_smoke PRIVATE src)
+target_link_libraries(poseweaver_prediction_filters_smoke PRIVATE cnpy stb_image)
+target_compile_features(poseweaver_prediction_filters_smoke PRIVATE cxx_std_17)
+add_test(NAME poseweaver_prediction_filters_smoke COMMAND poseweaver_prediction_filters_smoke)
+
+if(Python3_Interpreter_FOUND)
+	add_test(
+		NAME poseweaver_mcp_protocol
+		COMMAND ${Python3_EXECUTABLE} -m unittest -v tests/test_poseweaver_mcp.py
+		WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	)
+endif()
+
 if(POSEWEAVER_BUILD_APP)
 	add_executable(poseweaver
 		src/app/main.cpp
 		src/app/AppConfig.cpp
 		src/app/AppConfig.h
 		src/app/AppState.h
+		src/automation/AutomationServer.cpp
+		src/automation/AutomationServer.h
 		src/third_party/stb_image_impl.cpp
 		src/third_party/stb_image_write_impl.cpp
 		src/core/Assets.cpp
@@ -286,7 +329,7 @@ if(POSEWEAVER_BUILD_APP)
 		target_link_libraries(poseweaver PRIVATE poseweaver_cuda_backend)
 	endif()
 
-	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs Threads::Threads)
+	target_link_libraries(poseweaver PRIVATE igl::glfw igl::imgui cnpy stb_image tinyfiledialogs Threads::Threads nlohmann_json::nlohmann_json)
 
 	if(MSVC)
 		target_compile_options(poseweaver PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)

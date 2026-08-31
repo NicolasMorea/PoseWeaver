@@ -60,8 +60,19 @@ assets/smplh/*
 !assets/smplh/isomap_64d.npz
 scripts
 
+# Keep the agent automation entry point and its documentation in source control.
+!scripts/
+scripts/*
+!scripts/poseweaver_mcp.py
+!doc/
+doc/*
+!doc/automation-mcp.md
+
 # ImGui runtime settings
 imgui.ini
+
+# Editor and merge backup files
+*.orig
 
 .vscode
 CMakeSettings.json

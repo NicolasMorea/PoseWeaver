@@ -1,13 +1,16 @@
 #include "app/AppConfig.h"
 #include "app/AppState.h"
+#include "automation/AutomationServer.h"
 #include "core/Assets.h"
 #include "core/Paths.h"
 #include "render/Renderer.h"
 #include "services/ModelInferenceService.h"
 #include "simulation/gpu/ClothCudaJacobi.h"
 #include "ui/Ui.h"
+#include "ui/canva/CanvaPanel.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -398,8 +401,12 @@ int main(int, char**)
     std::string cuda_status;
     state.gpu_simulation_available = poseweaver::cuda_simulation_available(&cuda_status);
     poseweaver::AssetIndex assets(poseweaver::assets_dir());
+    state.selection.poses = assets.poses();
+    state.selection.garments = assets.garments();
+    state.selection.meshes = assets.meshes();
     poseweaver::Ui ui;
     poseweaver::Renderer renderer;
+    poseweaver::AutomationServer automation;
     poseweaver::ModelInferenceService sketch2rig("Sketch2Rig");
     poseweaver::ModelInferenceService sketch2betas("Sketch2Betas");
     poseweaver::ModelInferenceService sketch2uv("Sketch2UV");
@@ -442,13 +449,18 @@ int main(int, char**)
         ? "CUDA Jacobi simulation available: " + cuda_status
         : "CUDA Jacobi simulation unavailable: " + cuda_status);
     poseweaver::console_add_line(state, "PoseWeaver started");
-    sketch2rig.start(
+    std::string automation_error;
+    if (automation.start(&automation_error))
+        poseweaver::console_add_line(state, "Automation listening on " + automation.socket_path());
+    else
+        poseweaver::console_add_line(state, "Automation unavailable: " + automation_error);
+    sketch2rig.configure(
         poseweaver::assets_dir() / "Sketch2Rig",
         std::filesystem::path(POSEWEAVER_SKETCH2RIG_WORKER));
-    sketch2betas.start(
+    sketch2betas.configure(
         poseweaver::assets_dir() / "Sketch2Betas",
         std::filesystem::path(POSEWEAVER_SKETCH2BETAS_WORKER));
-    sketch2uv.start(
+    sketch2uv.configure(
         poseweaver::assets_dir() / "Sketch2Uv",
         std::filesystem::path(POSEWEAVER_SKETCH2UV_WORKER));
     sketch2iso.start(
@@ -503,6 +515,10 @@ int main(int, char**)
         nlf.drain_events(state, state.nlf);
         vitpose.drain_events(state, state.vitpose);
 
+        automation.pump(state, assets, renderer);
+        if (automation.shutdown_requested())
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+
         if (state.asset_refresh_request_id != last_asset_refresh_request_id)
         {
             assets.refresh();
@@ -524,6 +540,7 @@ int main(int, char**)
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        poseweaver::ui_canva::update_canva(state, renderer);
         ui.draw(state, assets, renderer, poseweaver::UiFrameInfo{ fb_w, fb_h });
         show_visible_cursor(window);
 
@@ -536,6 +553,7 @@ int main(int, char**)
         glfwSwapBuffers(window);
     }
 
+    automation.stop();
     renderer.shutdown();
     sketch2rig.stop();
     sketch2betas.stop();
