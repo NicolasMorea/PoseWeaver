@@ -237,6 +237,115 @@ namespace poseweaver
             return out;
         }
 
+        static bool nlf_vertices_to_poseweaver_scene_joints(
+            const std::string& text,
+            const SmplhModel& model,
+            Eigen::MatrixXd* out_joints,
+            Eigen::Vector3d* out_root,
+            double* out_fov_degrees)
+        {
+            if (!out_joints || model.J_regressor.cols() <= 0)
+                return false;
+            out_joints->resize(0, 0);
+            if (out_root)
+                *out_root = Eigen::Vector3d::Zero();
+            if (out_fov_degrees)
+                *out_fov_degrees = 0.0;
+
+            std::vector<double> vertices_flat;
+            double vertex_count_d = 0.0;
+            if (!parse_json_number_array_field(text, "vertices3d_flat", &vertices_flat, nullptr)
+                || !parse_json_number_field(text, "vertices3d_count", &vertex_count_d))
+                return false;
+
+            const int vertex_count = std::max(0, (int)std::lround(vertex_count_d));
+            if (vertex_count <= 0
+                || vertices_flat.size() < (size_t)vertex_count * 3u
+                || model.J_regressor.cols() != vertex_count)
+                return false;
+
+            Eigen::Vector3d root = Eigen::Vector3d::Zero();
+            std::vector<double> joints_flat;
+            if (parse_json_number_array_field(text, "joints3d_flat", &joints_flat, nullptr)
+                && joints_flat.size() >= 3u)
+            {
+                root = Eigen::Vector3d(
+                    joints_flat[0] / 1000.0,
+                    -joints_flat[1] / 1000.0,
+                    -joints_flat[2] / 1000.0);
+            }
+
+            MatrixX3dRM vertices(vertex_count, 3);
+            for (int i = 0; i < vertex_count; ++i)
+            {
+                const size_t k = (size_t)i * 3u;
+                Eigen::Vector3d v(
+                    vertices_flat[k + 0u] / 1000.0,
+                    -vertices_flat[k + 1u] / 1000.0,
+                    -vertices_flat[k + 2u] / 1000.0);
+                v -= root;
+                vertices.row(i) = v.transpose();
+            }
+
+            Eigen::MatrixXd joints = model.J_regressor * vertices;
+            if (joints.rows() < kSketchJointCount || joints.cols() != 3)
+                return false;
+
+            std::vector<double> vertices2d_flat;
+            double vertices2d_count_d = 0.0;
+            double image_height_d = 0.0;
+            double image_size_d = 0.0;
+            (void)parse_json_number_field(text, "image_size", &image_size_d);
+            if (!parse_json_number_field(text, "image_height", &image_height_d))
+                image_height_d = image_size_d;
+            if (out_fov_degrees
+                && image_height_d > 1.0
+                && parse_json_number_array_field(text, "vertices2d_flat", &vertices2d_flat, nullptr)
+                && parse_json_number_field(text, "vertices2d_count", &vertices2d_count_d)
+                && std::max(0, (int)std::lround(vertices2d_count_d)) == vertex_count
+                && vertices2d_flat.size() >= (size_t)vertex_count * 2u)
+            {
+                double sum_p = 0.0;
+                double sum_q = 0.0;
+                double sum_pp = 0.0;
+                double sum_pq = 0.0;
+                int n = 0;
+                for (int i = 0; i < vertex_count; ++i)
+                {
+                    const size_t k3 = (size_t)i * 3u;
+                    const size_t k2 = (size_t)i * 2u;
+                    const double z = vertices_flat[k3 + 2u] / 1000.0;
+                    if (!(z > 1e-9) || !std::isfinite(z))
+                        continue;
+                    const double p = (vertices_flat[k3 + 1u] / 1000.0) / z;
+                    const double q = vertices2d_flat[k2 + 1u];
+                    if (!std::isfinite(p) || !std::isfinite(q))
+                        continue;
+                    sum_p += p;
+                    sum_q += q;
+                    sum_pp += p * p;
+                    sum_pq += p * q;
+                    ++n;
+                }
+                const double denom = sum_pp - (sum_p * sum_p) / std::max(1, n);
+                if (n >= 3 && std::abs(denom) > 1e-12 && std::isfinite(denom))
+                {
+                    const double focal_y = (sum_pq - (sum_p * sum_q) / (double)n) / denom;
+                    if (focal_y > 1e-6 && std::isfinite(focal_y))
+                    {
+                        const double pi = std::acos(-1.0);
+                        *out_fov_degrees =
+                            2.0 * std::atan(0.5 * image_height_d / focal_y) * 180.0 / pi;
+                    }
+                }
+            }
+
+            *out_joints = joints.topRows(kSketchJointCount);
+            if (out_root)
+                *out_root = root;
+            return true;
+        }
+
         static double rig_height_or_default(const Eigen::MatrixXd& joints)
         {
             if (joints.rows() <= 0)
@@ -470,6 +579,7 @@ namespace poseweaver
                 m_smplh_deform_dirty = true;
             m_sketch2rig_rig_scene_joints.resize(0, 0);
             state.scene_view_target_valid = false;
+            state.scene_view_target_fov_degrees = 0.0f;
             state.scene_view_raw_rig_root_valid = false;
             state.scene_view_raw_rig_height_valid = false;
             clear_smpl_fit();
@@ -514,18 +624,40 @@ namespace poseweaver
                 m_smplh_deform_dirty = true;
             m_sketch2rig_rig_scene_joints.resize(0, 0);
             state.scene_view_target_valid = false;
+            state.scene_view_target_fov_degrees = 0.0f;
             state.scene_view_raw_rig_root_valid = false;
             state.scene_view_raw_rig_height_valid = false;
             clear_smpl_fit();
             return;
         }
 
-        const Eigen::MatrixXd camera_joints = sketch2rig_joints_to_camera_scene_axes(
-            m_sketch2rig_rig_source_joints,
-            m_sketch2rig_rig_image_size);
-        Eigen::MatrixXd centered_camera_joints = camera_joints;
+        std::string current_text;
+        std::string current_text_err;
+        const bool have_current_text = read_text_file(desired, &current_text, &current_text_err);
+
+        Eigen::MatrixXd camera_joints;
+        Eigen::MatrixXd centered_camera_joints;
         Eigen::Vector3d root_offset = Eigen::Vector3d::Zero();
         double scene_scale = 1.0;
+        double nlf_fov_degrees = 0.0;
+        const bool use_nlf_scene_joints =
+            have_current_text
+            && ensure_smplh_model_loaded(state, state.selection.gender)
+            && nlf_vertices_to_poseweaver_scene_joints(
+                current_text,
+                m_smplh_model,
+                &centered_camera_joints,
+                &root_offset,
+                &nlf_fov_degrees);
+
+        if (!use_nlf_scene_joints)
+        {
+            camera_joints = sketch2rig_joints_to_camera_scene_axes(
+                m_sketch2rig_rig_source_joints,
+                m_sketch2rig_rig_image_size);
+            centered_camera_joints = camera_joints;
+        }
+
         if (camera_joints.rows() > 0)
         {
             root_offset = camera_joints.row(0).transpose();
@@ -559,6 +691,18 @@ namespace poseweaver
             state.scene_view_raw_rig_height = (float)target_height;
             state.scene_view_raw_rig_height_valid = false;
         }
+        else if (use_nlf_scene_joints && centered_camera_joints.rows() > 0)
+        {
+            state.scene_view_raw_rig_root = {
+                0.0f,
+                0.0f,
+                0.0f
+            };
+            state.scene_view_raw_rig_root_valid = true;
+            state.scene_view_raw_rig_height =
+                (float)rig_height_or_default(centered_camera_joints);
+            state.scene_view_raw_rig_height_valid = false;
+        }
         else
         {
             state.scene_view_raw_rig_root_valid = false;
@@ -581,6 +725,10 @@ namespace poseweaver
         };
         state.scene_view_target_direction = { 0.0f, 0.0f, -1.0f };
         state.scene_view_target_up = { 0.0f, 1.0f, 0.0f };
+        state.scene_view_target_fov_degrees =
+            (use_nlf_scene_joints && nlf_fov_degrees > 1.0 && std::isfinite(nlf_fov_degrees))
+            ? (float)nlf_fov_degrees
+            : 0.0f;
         state.scene_view_target_valid = true;
 
         if (!state.show_sketch2rig_rig)

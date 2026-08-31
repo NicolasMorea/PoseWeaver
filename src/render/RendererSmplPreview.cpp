@@ -52,7 +52,12 @@ namespace poseweaver
             const float dnear = 0.01f;
             const float dfar = 100.0f;
             const float aspect = (height > 1.0f) ? (width / height) : 1.0f;
-            const float f_h = std::tan(kSketch2RigVerticalFovDeg / 360.0f * kPi) * dnear;
+            const float fov_deg =
+                (state.scene_view_target_fov_degrees > 1.0f
+                    && std::isfinite(state.scene_view_target_fov_degrees))
+                ? state.scene_view_target_fov_degrees
+                : kSketch2RigVerticalFovDeg;
+            const float f_h = std::tan(fov_deg / 360.0f * kPi) * dnear;
             const float f_w = f_h * aspect;
             igl::frustum(-f_w, f_w, -f_h, f_h, dnear, dfar, out_proj);
         }

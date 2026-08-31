@@ -184,6 +184,17 @@ def nlf_flat_array(prediction: dict[str, Any], key: str, person_index: int) -> t
     return [safe_float(value) for value in person_values.reshape(-1).tolist()], int(person_values.shape[0])
 
 
+def nlf_flat_xy_array(prediction: dict[str, Any], key: str, person_index: int) -> tuple[list[float], int]:
+    import numpy as np
+
+    values = tensor_to_numpy(prediction.get(key))
+    if values is None or values.ndim != 3 or person_index >= values.shape[0] or values.shape[2] < 2:
+        return [], 0
+
+    person_values = np.asarray(values[person_index, :, :2], dtype=np.float32)
+    return [safe_float(value) for value in person_values.reshape(-1).tolist()], int(person_values.shape[0])
+
+
 def nlf_confidence(prediction: dict[str, Any], person_index: int | None) -> float:
     import numpy as np
 
@@ -299,6 +310,8 @@ def write_prediction_json(
     pose_axis_angle: list[float],
     vertices3d_flat: list[float],
     vertices3d_count: int,
+    vertices2d_flat: list[float],
+    vertices2d_count: int,
     joints3d_flat: list[float],
     joints3d_count: int,
     confidence: float,
@@ -334,6 +347,8 @@ def write_prediction_json(
         "pose_axis_angle": pose_axis_angle,
         "vertices3d_flat": vertices3d_flat,
         "vertices3d_count": int(vertices3d_count),
+        "vertices2d_flat": vertices2d_flat,
+        "vertices2d_count": int(vertices2d_count),
         "joints3d_flat": joints3d_flat,
         "joints3d_count": int(joints3d_count),
         "gender": "neutral",
@@ -373,6 +388,8 @@ def infer_one(model, checkpoint_path: Path, device, args: argparse.Namespace, co
     pose_axis_angle: list[float] = []
     vertices3d_flat: list[float] = []
     vertices3d_count = 0
+    vertices2d_flat: list[float] = []
+    vertices2d_count = 0
     joints3d_flat: list[float] = []
     joints3d_count = 0
     person_index = select_person_index(prediction)
@@ -383,6 +400,7 @@ def infer_one(model, checkpoint_path: Path, device, args: argparse.Namespace, co
         betas = nlf_betas(prediction, person_index)
         pose_axis_angle = nlf_pose_axis_angle(prediction, person_index)
         vertices3d_flat, vertices3d_count = nlf_flat_array(prediction, "vertices3d", person_index)
+        vertices2d_flat, vertices2d_count = nlf_flat_xy_array(prediction, "vertices2d", person_index)
         joints3d_flat, joints3d_count = nlf_flat_array(prediction, "joints3d", person_index)
 
     joints = build_poseweaver_joints(xy, xyz, image_size)
@@ -397,6 +415,8 @@ def infer_one(model, checkpoint_path: Path, device, args: argparse.Namespace, co
         pose_axis_angle,
         vertices3d_flat,
         vertices3d_count,
+        vertices2d_flat,
+        vertices2d_count,
         joints3d_flat,
         joints3d_count,
         confidence,

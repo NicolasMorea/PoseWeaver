@@ -37,8 +37,7 @@ namespace poseweaver
         state.scene_view_smpl_fit_translation = { 0.0f, 0.0f, 0.0f };
         state.scene_view_smpl_fit_rms = 0.0f;
 
-        if (!m_smplh_loaded_pose_mirror_x
-            || vertices.cols() != 3
+        if (vertices.cols() != 3
             || m_sketch2rig_rig_scene_joints.cols() != 3
             || m_smplh_model.J_regressor.cols() != vertices.rows())
             return false;
@@ -359,10 +358,24 @@ namespace poseweaver
         if (m_smplh_deform_dirty || m_smplh_vertices.rows() == 0)
         {
             Eigen::MatrixXd display_vertices;
-            if (m_smplh_loaded_direct_vertices.rows() == m_smplh_model.vertex_count()
-                && m_smplh_loaded_direct_vertices.cols() == 3)
+            Eigen::MatrixXd fit_vertices;
+            const bool use_direct_vertices =
+                m_smplh_loaded_direct_vertices.rows() == m_smplh_model.vertex_count()
+                && m_smplh_loaded_direct_vertices.cols() == 3;
+            if (use_direct_vertices)
             {
                 display_vertices = m_smplh_loaded_direct_vertices;
+
+                // NLF's direct vertices are already in the target scene pose,
+                // but simulation reconstructs the body from axis angles. Fit
+                // that LBS reconstruction to the direct NLF joints so the
+                // simulated body and garment keep the same canvas placement.
+                MatrixX3dRM V_skinned;
+                std::string eval_err;
+                if (smplh_evaluate_lbs(m_smplh_model, m_smplh_params, V_skinned, &eval_err))
+                    fit_vertices = V_skinned;
+                else
+                    std::fprintf(stderr, "[PoseWeaver] SMPLH LBS alignment eval failed: %s\n", eval_err.c_str());
             }
             else
             {
@@ -377,11 +390,17 @@ namespace poseweaver
                     return;
                 }
                 display_vertices = V_skinned;
+                fit_vertices = display_vertices;
             }
             if (m_smplh_loaded_pose_mirror_x)
+            {
                 display_vertices.col(0) *= -1.0;
-            (void)fit_smpl_to_sketch_rig(state, display_vertices);
-            apply_smpl_scene_transform(state, display_vertices);
+                if (fit_vertices.cols() == 3)
+                    fit_vertices.col(0) *= -1.0;
+            }
+            (void)fit_smpl_to_sketch_rig(state, fit_vertices);
+            if (!use_direct_vertices)
+                apply_smpl_scene_transform(state, display_vertices);
             m_smplh_vertices = std::move(display_vertices);
             recomputed_vertices = true;
             m_smplh_deform_dirty = false;

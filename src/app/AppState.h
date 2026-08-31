@@ -221,6 +221,7 @@ namespace poseweaver
         std::array<float, 3> scene_view_target_eye{ 0.0f, 0.0f, 0.0f };
         std::array<float, 3> scene_view_target_direction{ 0.0f, 0.0f, -1.0f };
         std::array<float, 3> scene_view_target_up{ 0.0f, 1.0f, 0.0f };
+        float scene_view_target_fov_degrees = 0.0f;
         bool scene_view_sequence_rig_overlay_active = false;
         bool scene_view_sequence_rig_overlay_visible = false;
         std::string scene_view_sequence_rig_overlay_path;

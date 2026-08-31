@@ -687,15 +687,28 @@ namespace poseweaver::ui_canva
 
         static void convert_nlf_pose_to_poseweaver_axes(std::vector<double>& pose)
         {
-            // NLF SMPL output is in image camera axes: +Y down, +Z forward.
-            // PoseWeaver's generated sketch poses are consumed in +Y up,
-            // camera-facing scene axes, so change the rotation-vector basis
-            // with diag(1, -1, -1) for each local joint rotation.
-            for (size_t i = 0; i + 2u < pose.size(); i += 3u)
-            {
-                pose[i + 1u] = -pose[i + 1u];
-                pose[i + 2u] = -pose[i + 2u];
-            }
+            if (pose.size() < 3u)
+                return;
+
+            // NLF's global orientation places the already-posed SMPL body in
+            // image-camera axes (+Y down, +Z forward). PoseWeaver uses the
+            // equivalent camera-facing scene axes (+Y up, +Z backward), so
+            // pre-multiply the root by a 180-degree X rotation. The remaining
+            // values are local SMPL joint rotations and must stay in the SMPL
+            // model basis. Conjugating every joint instead makes the preview
+            // (which uses NLF's direct vertices) disagree with the LBS body
+            // rebuilt for simulation and can turn that body upside down.
+            const Eigen::Vector3d root_axis_angle(pose[0], pose[1], pose[2]);
+            const double root_angle = root_axis_angle.norm();
+            const Eigen::Matrix3d root_rotation = root_angle > 1e-12
+                ? Eigen::AngleAxisd(root_angle, root_axis_angle / root_angle).toRotationMatrix()
+                : Eigen::Matrix3d::Identity();
+            const Eigen::Matrix3d camera_to_scene =
+                Eigen::AngleAxisd(std::acos(-1.0), Eigen::Vector3d::UnitX()).toRotationMatrix();
+            const Eigen::Vector3d converted_root = matrix_to_axis_angle(camera_to_scene * root_rotation);
+            pose[0] = converted_root.x();
+            pose[1] = converted_root.y();
+            pose[2] = converted_root.z();
         }
     }
 

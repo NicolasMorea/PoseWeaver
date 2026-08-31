@@ -140,7 +140,12 @@ namespace poseweaver
             igl::look_at(eye, eye + dir, up, view);
 
             constexpr float kPi = 3.14159265358979323846f;
-            const float f_h = std::tan(kSketch2RigVerticalFovDeg / 360.0f * kPi) * dnear;
+            const float fov_degrees =
+                (state.scene_view_target_fov_degrees > 1.0f
+                    && std::isfinite(state.scene_view_target_fov_degrees))
+                ? state.scene_view_target_fov_degrees
+                : kSketch2RigVerticalFovDeg;
+            const float f_h = std::tan(fov_degrees / 360.0f * kPi) * dnear;
             igl::frustum(-f_h, f_h, -f_h, f_h, dnear, dfar, proj);
             return true;
         }
