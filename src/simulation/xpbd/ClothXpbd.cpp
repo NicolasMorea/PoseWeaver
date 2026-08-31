@@ -40,10 +40,43 @@ namespace poseweaver
 
         struct BendEdge
         {
+            int i = -1;
+            int j = -1;
             int k0 = -1;
             int k1 = -1;
             double rest_len = 0.0;
+            double rest_angle = 0.0;
+            double angle_scale = 1.0;
+            double max_correction = 0.0;
         };
+
+        static double dihedral_angle(
+            const Eigen::Vector3d& xi,
+            const Eigen::Vector3d& xj,
+            const Eigen::Vector3d& xk0,
+            const Eigen::Vector3d& xk1)
+        {
+            const Eigen::Vector3d edge = xj - xi;
+            const Eigen::Vector3d n0 = edge.cross(xk0 - xi);
+            const Eigen::Vector3d n1 = (xk1 - xi).cross(edge);
+            const double edge_len = edge.norm();
+            const double n0_len = n0.norm();
+            const double n1_len = n1.norm();
+            if (!(edge_len > 1e-12) || !(n0_len > 1e-12) || !(n1_len > 1e-12))
+                return 0.0;
+
+            const Eigen::Vector3d edge_dir = edge / edge_len;
+            const Eigen::Vector3d n0_dir = n0 / n0_len;
+            const Eigen::Vector3d n1_dir = n1 / n1_len;
+            return std::atan2(edge_dir.dot(n0_dir.cross(n1_dir)),
+                std::clamp(n0_dir.dot(n1_dir), -1.0, 1.0));
+        }
+
+        static double wrapped_angle_difference(double angle, double rest_angle)
+        {
+            constexpr double two_pi = 6.28318530717958647692;
+            return std::remainder(angle - rest_angle, two_pi);
+        }
 
         static void build_stretch_edges(
             const Eigen::MatrixXd& V_rest,
@@ -152,8 +185,31 @@ namespace poseweaver
 
                 BendEdge be;
                 be.k0 = k0;
+                be.i = (int)(kv.first >> 32);
+                be.j = (int)(kv.first & 0xffffffffu);
                 be.k1 = k1;
                 be.rest_len = (V_rest.row(k0) - V_rest.row(k1)).norm();
+                be.rest_angle = dihedral_angle(
+                    V_rest.row(be.i), V_rest.row(be.j), V_rest.row(k0), V_rest.row(k1));
+
+                // Discrete-shell bending energy is proportional to l^2 / (A0 + A1).
+                // Applying its square root to both the angle error and gradient makes
+                // compliance independent of tessellation density.  The rest altitude
+                // also provides a conservative trust region for badly folded hinges.
+                const Eigen::Vector3d xi = V_rest.row(be.i);
+                const Eigen::Vector3d xj = V_rest.row(be.j);
+                const Eigen::Vector3d xk0 = V_rest.row(k0);
+                const Eigen::Vector3d xk1 = V_rest.row(k1);
+                const Eigen::Vector3d edge = xj - xi;
+                const double edge_len = edge.norm();
+                const double twice_area0 = edge.cross(xk0 - xi).norm();
+                const double twice_area1 = (xk1 - xi).cross(edge).norm();
+                const double area_sum = 0.5 * (twice_area0 + twice_area1);
+                if (!(edge_len > 1e-12) || !(area_sum > 1e-16))
+                    continue;
+                be.angle_scale = std::sqrt(3.0 * edge_len * edge_len / area_sum);
+                const double min_altitude = std::min(twice_area0, twice_area1) / edge_len;
+                be.max_correction = 0.2 * min_altitude;
                 out_edges.push_back(be);
             }
         }
@@ -1023,7 +1079,10 @@ namespace poseweaver
         const double sub_dt = dt / (double)substeps;
 
         const double stretch_alpha = compliance_alpha(params.stretch_compliance, sub_dt);
-        const double bend_alpha = compliance_alpha(params.bend_compliance, sub_dt);
+        const double bend_compliance = params.bending_method == BendingMethod::DihedralAngle
+            ? params.dihedral_compliance
+            : params.bend_compliance;
+        const double bend_alpha = compliance_alpha(bend_compliance, sub_dt);
         const double col_alpha = compliance_alpha(params.collision_compliance, sub_dt);
         const double self_col_alpha = compliance_alpha(params.self_collision_compliance, sub_dt);
 
@@ -1234,6 +1293,74 @@ namespace poseweaver
                         for (size_t bi = 0; bi < bend_edges.size(); ++bi)
                         {
                             const BendEdge& be = bend_edges[bi];
+                            if (params.bending_method == BendingMethod::DihedralAngle)
+                            {
+                                const int indices[4] = { be.i, be.j, be.k0, be.k1 };
+                                if (indices[0] < 0 || indices[1] < 0 || indices[2] < 0 || indices[3] < 0
+                                    || indices[0] >= N || indices[1] >= N || indices[2] >= N || indices[3] >= N)
+                                    continue;
+
+                                const Eigen::Vector3d xi = Xs.row(be.i);
+                                const Eigen::Vector3d xj = Xs.row(be.j);
+                                const Eigen::Vector3d xk0 = Xs.row(be.k0);
+                                const Eigen::Vector3d xk1 = Xs.row(be.k1);
+                                const Eigen::Vector3d edge = xj - xi;
+                                const Eigen::Vector3d n0 = edge.cross(xk0 - xi);
+                                const Eigen::Vector3d n1 = (xk1 - xi).cross(edge);
+                                const double edge_len_sq = edge.squaredNorm();
+                                const double n0_len_sq = n0.squaredNorm();
+                                const double n1_len_sq = n1.squaredNorm();
+                                if (!(edge_len_sq > 1e-20) || !(n0_len_sq > 1e-20) || !(n1_len_sq > 1e-20))
+                                    continue;
+
+                                const double edge_len = std::sqrt(edge_len_sq);
+                                const Eigen::Vector3d qk0 = -(edge_len / n0_len_sq) * n0;
+                                const Eigen::Vector3d qk1 = -(edge_len / n1_len_sq) * n1;
+                                const Eigen::Vector3d qi =
+                                    ((xk0 - xj).dot(edge) / edge_len_sq) * qk0
+                                    + ((xk1 - xj).dot(edge) / edge_len_sq) * qk1;
+                                const Eigen::Vector3d qj =
+                                    ((xi - xk0).dot(edge) / edge_len_sq) * qk0
+                                    + ((xi - xk1).dot(edge) / edge_len_sq) * qk1;
+                                const Eigen::Vector3d gradients[4] = {
+                                    be.angle_scale * qi,
+                                    be.angle_scale * qj,
+                                    be.angle_scale * qk0,
+                                    be.angle_scale * qk1
+                                };
+
+                                double denominator = bend_alpha;
+                                for (int vi = 0; vi < 4; ++vi)
+                                    denominator += inv_mass[indices[vi]] * gradients[vi].squaredNorm();
+                                if (!(denominator > kEps))
+                                    continue;
+
+                                const double C = be.angle_scale * wrapped_angle_difference(
+                                    dihedral_angle(xi, xj, xk0, xk1), be.rest_angle);
+                                double& lam = lambda_bend[bi];
+                                double dlambda = (-C - bend_alpha * lam) / denominator;
+
+                                // The angle gradient tends to infinity as either triangle
+                                // collapses. Limit one projection to a fraction of the rest
+                                // altitude so a transient collision cannot explode a hinge.
+                                double largest_response = 0.0;
+                                for (int vi = 0; vi < 4; ++vi)
+                                    largest_response = std::max(largest_response,
+                                        inv_mass[indices[vi]] * gradients[vi].norm());
+                                if (largest_response > kEps && be.max_correction > 0.0)
+                                {
+                                    const double max_dlambda = be.max_correction / largest_response;
+                                    dlambda = std::clamp(dlambda, -max_dlambda, max_dlambda);
+                                }
+                                lam += dlambda;
+                                for (int vi = 0; vi < 4; ++vi)
+                                {
+                                    const double weight = inv_mass[indices[vi]];
+                                    if (weight > 0.0)
+                                        Xs.row(indices[vi]) += (weight * dlambda * gradients[vi]).transpose();
+                                }
+                                continue;
+                            }
                             const int i = be.k0;
                             const int j = be.k1;
                             if (i < 0 || j < 0 || i >= N || j >= N)

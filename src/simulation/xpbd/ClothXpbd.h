@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "simulation/SimulationTypes.h"
+
 namespace poseweaver
 {
     struct ClothXpbdParams
@@ -22,7 +24,11 @@ namespace poseweaver
         double stretch_compliance = 0.0;
         double base_stretch_mult = 1.0;
         bool bend_enabled = true;
+        BendingMethod bending_method = BendingMethod::OppositeVertexDistance;
         double bend_compliance = 1e-4;
+        // Compliance of the geometry-weighted discrete-shell hinge constraint.
+        // Values around 1e-6 keep cloth crisp while still allowing it to buckle.
+        double dihedral_compliance = 1e-6;
         bool collision_enabled = true;
         double collision_compliance = 0.0;
 

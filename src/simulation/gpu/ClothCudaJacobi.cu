@@ -25,6 +25,16 @@ namespace poseweaver
             float lambda;
         };
 
+        struct Hinge
+        {
+            uint4 vertices;
+            float rest_distance;
+            float rest_angle;
+            float angle_scale;
+            float max_correction;
+            float lambda;
+        };
+
         struct Node
         {
             float4 minimum;
@@ -103,6 +113,24 @@ namespace poseweaver
         {
             const float length = sqrtf(length2(v));
             return length > 1e-12f ? mul(v, 1.0f / length) : make_float3(0.0f, 1.0f, 0.0f);
+        }
+
+        __host__ __device__ static float dihedral_angle(
+            float3 xi, float3 xj, float3 xk0, float3 xk1)
+        {
+            const float3 edge = sub(xj, xi);
+            const float3 n0 = cross3(edge, sub(xk0, xi));
+            const float3 n1 = cross3(sub(xk1, xi), edge);
+            const float edge_length2 = length2(edge);
+            const float n0_length2 = length2(n0);
+            const float n1_length2 = length2(n1);
+            if (edge_length2 <= 1e-16f || n0_length2 <= 1e-16f || n1_length2 <= 1e-16f)
+                return 0.0f;
+            const float3 edge_direction = mul(edge, rsqrtf(edge_length2));
+            const float3 n0_direction = mul(n0, rsqrtf(n0_length2));
+            const float3 n1_direction = mul(n1, rsqrtf(n1_length2));
+            return atan2f(dot3(edge_direction, cross3(n0_direction, n1_direction)),
+                fminf(1.0f, fmaxf(-1.0f, dot3(n0_direction, n1_direction))));
         }
 
         __host__ __device__ static float wind_lerp(float a, float b, float t)
@@ -302,7 +330,7 @@ namespace poseweaver
 
         __global__ static void clear_substep(
             float4* corrections, unsigned int* weights, float4* contacts,
-            Edge* stretch, unsigned int stretch_count, Edge* bend, unsigned int bend_count,
+            Edge* stretch, unsigned int stretch_count, Hinge* bend, unsigned int bend_count,
             unsigned int vertex_count)
         {
             const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -376,6 +404,106 @@ namespace poseweaver
             {
                 atomic_add3(corrections, b, mul(direction, -wb * dlambda));
                 atomicAdd(&weights[b], 1u);
+            }
+        }
+
+        __global__ static void solve_bend_distances(
+            float4* positions, const float* inverse_mass, Hinge* hinges, unsigned int count,
+            float alpha, float4* corrections, unsigned int* weights)
+        {
+            const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+            if (i >= count)
+                return;
+            Hinge& hinge = hinges[i];
+            const unsigned int a = hinge.vertices.z, b = hinge.vertices.w;
+            const float3 delta = sub(f3(positions[a]), f3(positions[b]));
+            const float length = sqrtf(length2(delta));
+            const float wa = inverse_mass[a], wb = inverse_mass[b];
+            const float denominator = wa + wb + alpha;
+            if (length < 1e-8f || denominator <= 0.0f)
+                return;
+            const float dlambda = (-(length - hinge.rest_distance) - alpha * hinge.lambda) / denominator;
+            hinge.lambda += dlambda;
+            const float3 direction = mul(delta, 1.0f / length);
+            if (wa > 0.0f)
+            {
+                atomic_add3(corrections, a, mul(direction, wa * dlambda));
+                atomicAdd(&weights[a], 1u);
+            }
+            if (wb > 0.0f)
+            {
+                atomic_add3(corrections, b, mul(direction, -wb * dlambda));
+                atomicAdd(&weights[b], 1u);
+            }
+        }
+
+        __global__ static void solve_dihedrals(
+            float4* positions, const float* inverse_mass, Hinge* hinges, unsigned int count,
+            float alpha, float4* corrections, unsigned int* weights)
+        {
+            const unsigned int constraint = blockIdx.x * blockDim.x + threadIdx.x;
+            if (constraint >= count)
+                return;
+            Hinge& hinge = hinges[constraint];
+            const unsigned int indices[4] = {
+                hinge.vertices.x, hinge.vertices.y, hinge.vertices.z, hinge.vertices.w
+            };
+            const float3 xi = f3(positions[indices[0]]);
+            const float3 xj = f3(positions[indices[1]]);
+            const float3 xk0 = f3(positions[indices[2]]);
+            const float3 xk1 = f3(positions[indices[3]]);
+            const float3 edge = sub(xj, xi);
+            const float3 n0 = cross3(edge, sub(xk0, xi));
+            const float3 n1 = cross3(sub(xk1, xi), edge);
+            const float edge_length2 = length2(edge);
+            const float n0_length2 = length2(n0);
+            const float n1_length2 = length2(n1);
+            if (edge_length2 <= 1e-16f || n0_length2 <= 1e-16f || n1_length2 <= 1e-16f)
+                return;
+
+            const float edge_length = sqrtf(edge_length2);
+            const float3 qk0 = mul(n0, -edge_length / n0_length2);
+            const float3 qk1 = mul(n1, -edge_length / n1_length2);
+            const float3 qi = add(
+                mul(qk0, dot3(sub(xk0, xj), edge) / edge_length2),
+                mul(qk1, dot3(sub(xk1, xj), edge) / edge_length2));
+            const float3 qj = add(
+                mul(qk0, dot3(sub(xi, xk0), edge) / edge_length2),
+                mul(qk1, dot3(sub(xi, xk1), edge) / edge_length2));
+            const float3 gradients[4] = {
+                mul(qi, hinge.angle_scale),
+                mul(qj, hinge.angle_scale),
+                mul(qk0, hinge.angle_scale),
+                mul(qk1, hinge.angle_scale)
+            };
+
+            float denominator = alpha;
+            for (int vertex = 0; vertex < 4; ++vertex)
+                denominator += inverse_mass[indices[vertex]] * length2(gradients[vertex]);
+            if (denominator <= 1e-12f)
+                return;
+
+            const float angle_error = hinge.angle_scale * remainderf(
+                dihedral_angle(xi, xj, xk0, xk1) - hinge.rest_angle, 6.28318530717958647692f);
+            float dlambda = (-angle_error - alpha * hinge.lambda) / denominator;
+            float largest_response = 0.0f;
+            for (int vertex = 0; vertex < 4; ++vertex)
+                largest_response = fmaxf(largest_response,
+                    inverse_mass[indices[vertex]] * sqrtf(length2(gradients[vertex])));
+            if (largest_response > 1e-12f && hinge.max_correction > 0.0f)
+            {
+                const float max_dlambda = hinge.max_correction / largest_response;
+                dlambda = fminf(max_dlambda, fmaxf(-max_dlambda, dlambda));
+            }
+            hinge.lambda += dlambda;
+            for (int vertex = 0; vertex < 4; ++vertex)
+            {
+                const float mass = inverse_mass[indices[vertex]];
+                if (mass > 0.0f)
+                {
+                    atomic_add3(corrections, indices[vertex], mul(gradients[vertex], mass * dlambda));
+                    atomicAdd(&weights[indices[vertex]], 1u);
+                }
             }
         }
 
@@ -555,7 +683,7 @@ namespace poseweaver
 
         static void build_edges(
             const Eigen::MatrixXd& vertices, const Eigen::MatrixXi& faces,
-            double stretch_multiplier, std::vector<Edge>& stretch, std::vector<Edge>& bend)
+            double stretch_multiplier, std::vector<Edge>& stretch, std::vector<Hinge>& bend)
         {
             struct EdgeFaces { int opposite[2]{ -1, -1 }; int count = 0; };
             std::unordered_map<long long, EdgeFaces> topology;
@@ -583,8 +711,23 @@ namespace poseweaver
                 if (item.second.count == 2)
                 {
                     const int c = item.second.opposite[0], d = item.second.opposite[1];
-                    bend.push_back(Edge{ make_uint2((unsigned int)c, (unsigned int)d),
-                        (float)(vertices.row(c) - vertices.row(d)).norm(), 0 });
+                    const auto point = [&](int i) {
+                        return make_float3((float)vertices(i, 0), (float)vertices(i, 1), (float)vertices(i, 2));
+                    };
+                    const float3 pa = point(a), pb = point(b), pc = point(c), pd = point(d);
+                    const float3 edge = sub(pb, pa);
+                    const float edge_length = sqrtf(length2(edge));
+                    const float twice_area0 = sqrtf(length2(cross3(edge, sub(pc, pa))));
+                    const float twice_area1 = sqrtf(length2(cross3(sub(pd, pa), edge)));
+                    const float area_sum = 0.5f * (twice_area0 + twice_area1);
+                    if (edge_length <= 1e-12f || area_sum <= 1e-16f)
+                        continue;
+                    const float angle_scale = sqrtf(3.0f * edge_length * edge_length / area_sum);
+                    const float min_altitude = fminf(twice_area0, twice_area1) / edge_length;
+                    bend.push_back(Hinge{
+                        make_uint4((unsigned int)a, (unsigned int)b, (unsigned int)c, (unsigned int)d),
+                        (float)(vertices.row(c) - vertices.row(d)).norm(),
+                        dihedral_angle(pa, pb, pc, pd), angle_scale, 0.2f * min_altitude, 0 });
                 }
             }
         }
@@ -777,7 +920,8 @@ namespace poseweaver
                 ? params.reference_positions
                 : cloth_V0;
 
-        std::vector<Edge> stretch, bend;
+        std::vector<Edge> stretch;
+        std::vector<Hinge> bend;
         build_edges(cloth_reference, cloth_F, std::max(0.0, params.base_stretch_mult), stretch, bend);
         std::vector<float4> cloth_positions = positions4(cloth_V0);
         std::vector<float4> body_positions = positions4(body_V);
@@ -795,7 +939,8 @@ namespace poseweaver
         DeviceBuffer<float4> d_corrections, d_fixed, d_contacts;
         DeviceBuffer<float> d_inverse_mass;
         DeviceBuffer<unsigned int> d_weights;
-        DeviceBuffer<Edge> d_stretch, d_bend;
+        DeviceBuffer<Edge> d_stretch;
+        DeviceBuffer<Hinge> d_bend;
         DeviceBuffer<uint4> d_cloth_faces, d_body_faces;
         DeviceBuffer<Node> d_body_nodes, d_cloth_nodes;
         DeviceBuffer<int> d_contact_count;
@@ -847,7 +992,10 @@ namespace poseweaver
         };
 
         const float stretch_alpha = (float)(std::max(0.0, params.stretch_compliance) / (sub_dt * sub_dt));
-        const float bend_alpha = (float)(std::max(0.0, params.bend_compliance) / (sub_dt * sub_dt));
+        const double bend_compliance = params.bending_method == BendingMethod::DihedralAngle
+            ? params.dihedral_compliance
+            : params.bend_compliance;
+        const float bend_alpha = (float)(std::max(0.0, bend_compliance) / (sub_dt * sub_dt));
         const float collision_alpha = (float)(std::max(0.0, params.collision_compliance) / (sub_dt * sub_dt));
         const float self_alpha = (float)(std::max(0.0, params.self_collision_compliance) / (sub_dt * sub_dt));
         float3 wind = make_float3((float)params.wind_dir.x(), (float)params.wind_dir.y(), (float)params.wind_dir.z());
@@ -897,9 +1045,16 @@ namespace poseweaver
                             d_positions.data, d_inverse_mass.data, d_stretch.data, (unsigned int)stretch.size(),
                             stretch_alpha, d_corrections.data, d_weights.data);
                     if (params.bend_enabled && !bend.empty())
-                        solve_distances<<<blocks(bend.size()), kBlockSize>>>(
-                            d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
-                            bend_alpha, d_corrections.data, d_weights.data);
+                    {
+                        if (params.bending_method == BendingMethod::DihedralAngle)
+                            solve_dihedrals<<<blocks(bend.size()), kBlockSize>>>(
+                                d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
+                                bend_alpha, d_corrections.data, d_weights.data);
+                        else
+                            solve_bend_distances<<<blocks(bend.size()), kBlockSize>>>(
+                                d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
+                                bend_alpha, d_corrections.data, d_weights.data);
+                    }
                     if (params.collision_enabled)
                         solve_body_collisions<<<blocks(vertex_count), kBlockSize>>>(
                             d_positions.data, d_previous.data, d_inverse_mass.data, vertex_count,
