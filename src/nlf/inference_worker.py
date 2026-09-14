@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="Path to nlf_l_multi.torchscript")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or a torch device such as cuda:0")
     parser.add_argument("--body-model", choices=("smpl", "smplx"), default="smpl")
-    parser.add_argument("--detector-threshold", type=float, default=0.30)
+    parser.add_argument("--detector-threshold", type=float, default=0.01)
     parser.add_argument("--detector-nms-iou-threshold", type=float, default=0.70)
     parser.add_argument("--max-detections", type=int, default=150)
     parser.add_argument("--suppress-implausible-poses", action=argparse.BooleanOptionalAction, default=True)

@@ -359,6 +359,11 @@ namespace poseweaver::ui_canva
 
                     if (in_layer)
                     {
+                        const ImVec4 paint_color = canva_layer_is_visibility_map(layer)
+                            ? (canva.visibility_brush_visible
+                                ? ImVec4(32.0f / 255.0f, 220.0f / 255.0f, 80.0f / 255.0f, 1.0f)
+                                : ImVec4(1.0f, 48.0f / 255.0f, 48.0f / 255.0f, 1.0f))
+                            : canva.brush_color;
                         if (!canva.drawing)
                         {
                             // Snapshot for undo at the start of a stroke.
@@ -367,12 +372,12 @@ namespace poseweaver::ui_canva
                             canva.drawing = true;
                             canva.last_canvas_pos = layer_local;
                             const float r_layer = canva.brush_radius / s;
-                            canva_stamp_circle(layer, canva.width, canva.height, layer_local.x, layer_local.y, r_layer, canva.brush_color);
+                            canva_stamp_circle(layer, canva.width, canva.height, layer_local.x, layer_local.y, r_layer, paint_color);
                         }
                         else
                         {
                             const float r_layer = canva.brush_radius / s;
-                            canva_draw_segment(layer, canva.width, canva.height, canva.last_canvas_pos, layer_local, r_layer, canva.brush_color);
+                            canva_draw_segment(layer, canva.width, canva.height, canva.last_canvas_pos, layer_local, r_layer, paint_color);
                             canva.last_canvas_pos = layer_local;
                         }
                     }

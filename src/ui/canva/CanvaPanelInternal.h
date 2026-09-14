@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <future>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace poseweaver { class Renderer; }
@@ -74,11 +75,17 @@ namespace poseweaver::ui_canva
         int bounds_max_y_excl = 0;
 
         int smoothing_source_layer_id = 0;
-        float smoothing_filter_strength = 0.90f;
-        float smoothing_inner_line_width = 4.0f;
-        int smoothing_contour_radius = 10;
-        int smoothing_line_gap_radius = 3;
-        std::array<float, 3> smoothing_cloth_color{ 1.0f, 1.0f, 1.0f };
+        int stylization_method = 0;
+        float stylization_outline_width = 2.0f;
+        float stylization_wrinkle_width = 1.0f;
+        float stylization_edge_threshold = 0.075f;
+        float stylization_shadow_threshold = 0.88f;
+        float stylization_shadow_strength = 0.28f;
+        float stylization_softness = 0.35f;
+        int stylization_contour_radius = 6;
+        int stylization_line_gap_radius = 0;
+        std::array<float, 3> stylization_cloth_color{ 1.0f, 1.0f, 1.0f };
+        std::array<float, 3> stylization_line_color{ 0.0f, 0.0f, 0.0f };
     };
 
     struct CanvaUndo
@@ -138,10 +145,21 @@ namespace poseweaver::ui_canva
         std::uint64_t betas_request_id = 0;
         std::uint64_t iso_request_id = 0;
         std::uint64_t depth_request_id = 0;
+        bool inference_uses_nlf = false;
+        bool inference_waiting_custom_workers = false;
     };
 
     static constexpr int kGenerateClothStepCount = 8;
     static constexpr int kGenerateClothBaseStepCount = 6;
+    static constexpr int kClothFittingTimingStepCount = 4;
+
+    enum class ClothFittingTimingStep
+    {
+        IsoInference = 0,
+        DepthInference = 1,
+        Visibility = 2,
+        LayerCreation = 3
+    };
 
     enum class GenerateClothStepId
     {
@@ -176,6 +194,7 @@ namespace poseweaver::ui_canva
         // Brush settings are persisted via AppState; these mirror AppState when the tab is open.
         float brush_radius = 8.0f; // in canvas pixels
         ImVec4 brush_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+        bool visibility_brush_visible = true;
 
         CanvaTool tool = CanvaTool::Brush;
 
@@ -264,12 +283,26 @@ namespace poseweaver::ui_canva
         std::chrono::steady_clock::time_point generate_cloth_extract_betas_start{};
         std::chrono::steady_clock::time_point cloth_fitting_iso_start{};
         std::chrono::steady_clock::time_point cloth_fitting_depth_start{};
+        bool cloth_fitting_timing_started = false;
+        bool cloth_fitting_timing_complete = false;
+        double cloth_fitting_total_seconds = 0.0;
+        std::chrono::steady_clock::time_point cloth_fitting_pipeline_start{};
+        std::array<double, kClothFittingTimingStepCount> cloth_fitting_step_seconds{};
+        std::vector<std::pair<std::string, double>> cloth_fitting_renderer_timings;
 
         bool render_cloth_active = false;
         bool render_cloth_fine = false;
+        bool render_cloth_fit_after = false;
+        bool render_cloth_refit_after = false;
         std::uint64_t render_cloth_request_id = 0;
         std::filesystem::path render_cloth_model_input_path;
         std::string render_cloth_status = "Idle";
+
+        int cloth_refit_map_width = 0;
+        int cloth_refit_map_height = 0;
+        int cloth_refit_visibility_layer_id = 0;
+        std::vector<float> cloth_refit_deformation_source_x;
+        std::vector<float> cloth_refit_deformation_source_y;
 
         std::filesystem::path pending_scene_view_snapshot_model_input_path;
 
@@ -544,9 +577,13 @@ namespace poseweaver::ui_canva
     void canva_generate_cloth_reset_timings(CanvaState& canva, bool include_fitting_steps);
     void canva_generate_cloth_start_step(CanvaState& canva, GenerateClothStepId step);
     void canva_generate_cloth_update_simulation_phase(const AppState& state, CanvaState& canva);
+    double canva_cloth_fitting_elapsed_seconds(const CanvaState& canva);
+    void canva_finish_cloth_fitting_timings(CanvaState& canva);
+    void canva_reset_cloth_fitting_timings(CanvaState& canva);
     CanvaBounds canva_layer_content_bounds(CanvaLayer& layer, int w, int h);
     bool canva_layer_is_generated_cloth(const CanvaLayer& layer);
-    bool canva_smooth_warped_cloth_layer(
+    bool canva_layer_is_visibility_map(const CanvaLayer& layer);
+    bool canva_stylize_warped_cloth_layer(
         const CanvaLayer& source,
         CanvaLayer& destination,
         int width,
@@ -622,6 +659,15 @@ namespace poseweaver::ui_canva
         AppState& state,
         CanvaState& canva,
         bool fine,
+        bool fit_after,
+        bool refit_after,
+        std::string* out_error);
+    bool canva_has_cloth_refit_maps(const CanvaState& canva);
+    bool canva_refit_cloth_with_cached_maps(
+        AppState& state,
+        CanvaState& canva,
+        Renderer& renderer,
+        const CanvaLayer& source_layer,
         std::string* out_error);
     bool canva_queue_rig_optimization(
         AppState& state,

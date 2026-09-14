@@ -182,7 +182,9 @@ namespace poseweaver
     {
         if (m_iso_vertex_descriptor_count > 0
             && m_iso_vertex_descriptor_dimensions == kIsoDimensions
-            && !m_iso_vertex_descriptors.empty())
+            && !m_iso_vertex_descriptors.empty()
+            && m_iso_vertex_mirror_indices.size()
+                == (size_t)m_iso_vertex_descriptor_count)
             return true;
         if (m_iso_vertex_descriptors_load_attempted)
             return false;
@@ -224,6 +226,61 @@ namespace poseweaver
 
         m_iso_vertex_descriptor_count = vertex_count;
         m_iso_vertex_descriptor_dimensions = kIsoDimensions;
+
+        cnpy::NpyArray template_vertices;
+        try
+        {
+            template_vertices = cnpy::npz_load(
+                (assets_dir() / "smplh" / "neutral" / "model.npz").string(),
+                "v_template");
+        }
+        catch (const std::exception& e)
+        {
+            console_add_line(state, "ISO mirror mapping failed to load: " + std::string(e.what()));
+            return false;
+        }
+        if (template_vertices.shape.size() != 2
+            || template_vertices.shape[0] != (size_t)vertex_count
+            || template_vertices.shape[1] != 3u
+            || (template_vertices.word_size != sizeof(float)
+                && template_vertices.word_size != sizeof(double)))
+        {
+            console_add_line(state, "ISO mirror mapping requires an SMPL template matching the descriptor table");
+            return false;
+        }
+
+        std::vector<float> template_x((size_t)vertex_count);
+        std::vector<float> template_y((size_t)vertex_count);
+        std::vector<float> template_z((size_t)vertex_count);
+        for (int vertex = 0; vertex < vertex_count; ++vertex)
+        {
+            template_x[(size_t)vertex] = npy_float_value(template_vertices, (size_t)vertex * 3u);
+            template_y[(size_t)vertex] = npy_float_value(template_vertices, (size_t)vertex * 3u + 1u);
+            template_z[(size_t)vertex] = npy_float_value(template_vertices, (size_t)vertex * 3u + 2u);
+        }
+
+        m_iso_vertex_mirror_indices.assign((size_t)vertex_count, -1);
+        for (int vertex = 0; vertex < vertex_count; ++vertex)
+        {
+            const float target_x = -template_x[(size_t)vertex];
+            const float target_y = template_y[(size_t)vertex];
+            const float target_z = template_z[(size_t)vertex];
+            float best_distance_squared = std::numeric_limits<float>::infinity();
+            int best_vertex = -1;
+            for (int candidate = 0; candidate < vertex_count; ++candidate)
+            {
+                const float dx = template_x[(size_t)candidate] - target_x;
+                const float dy = template_y[(size_t)candidate] - target_y;
+                const float dz = template_z[(size_t)candidate] - target_z;
+                const float distance_squared = dx * dx + dy * dy + dz * dz;
+                if (distance_squared < best_distance_squared)
+                {
+                    best_distance_squared = distance_squared;
+                    best_vertex = candidate;
+                }
+            }
+            m_iso_vertex_mirror_indices[(size_t)vertex] = best_vertex;
+        }
 
         std::vector<int> indices((size_t)vertex_count);
         std::iota(indices.begin(), indices.end(), 0);
@@ -311,6 +368,8 @@ namespace poseweaver
         m_sketch2iso_prediction_texture_w = 0;
         m_sketch2iso_prediction_texture_h = 0;
         m_sketch2iso_prediction_channels = 0;
+        if (m_iso_projection_orientation_npz_path != desired_npz.string())
+            m_iso_prediction_mirror_vertices = false;
         m_sketch2iso_prediction_values.clear();
         m_sketch2iso_prediction_mask.clear();
         if (m_sketch2iso_prediction_texture_id != 0)
@@ -530,6 +589,14 @@ namespace poseweaver
                 best_distance_squared))
             return false;
 
+        if (m_iso_prediction_mirror_vertices
+            && best_vertex >= 0
+            && best_vertex < (int)m_iso_vertex_mirror_indices.size()
+            && m_iso_vertex_mirror_indices[(size_t)best_vertex] >= 0)
+        {
+            best_vertex = m_iso_vertex_mirror_indices[(size_t)best_vertex];
+        }
+
         out_vertex = best_vertex;
         out_distance = std::sqrt(std::max(0.0f, best_distance_squared));
         return out_distance <= std::max(0.0f, distance_threshold);
@@ -566,7 +633,10 @@ namespace poseweaver
             return;
         }
 
+        const std::string saved_manual_iso_path = state.canva_manual_iso_npz_path;
+        state.canva_manual_iso_npz_path = state.canva_iso_displacement_npz_path;
         ensure_sketch2iso_prediction_texture(state);
+        state.canva_manual_iso_npz_path = saved_manual_iso_path;
         if (m_sketch2iso_prediction_npz_path != state.canva_iso_displacement_npz_path
             || m_sketch2iso_prediction_texture_w <= 0
             || m_sketch2iso_prediction_texture_h <= 0
@@ -599,6 +669,84 @@ namespace poseweaver
         const int width = m_sketch2iso_prediction_texture_w;
         const int height = m_sketch2iso_prediction_texture_h;
         const size_t pixel_count = (size_t)width * (size_t)height;
+
+        double direct_projection_cost = 0.0;
+        double mirrored_projection_cost = 0.0;
+        size_t projection_sample_count = 0u;
+        const int projection_sample_stride =
+            std::max(1, std::min(width, height) / 64);
+        const float maximum_projection_error_squared =
+            0.25f * (float)std::min(width, height) * (float)std::min(width, height);
+        for (int y = projection_sample_stride / 2;
+             y < height;
+             y += projection_sample_stride)
+        {
+            for (int x = projection_sample_stride / 2;
+                 x < width;
+                 x += projection_sample_stride)
+            {
+                const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                if (pixel >= m_sketch2iso_prediction_mask.size()
+                    || !(m_sketch2iso_prediction_mask[pixel] > 0.5f))
+                    continue;
+                const size_t descriptor_offset = pixel * (size_t)kIsoDimensions;
+                if (descriptor_offset + (size_t)kIsoDimensions
+                    > m_sketch2iso_prediction_values.size())
+                    continue;
+
+                int direct_vertex = -1;
+                float descriptor_distance_squared = 0.0f;
+                if (!find_nearest_iso_vertex(
+                        m_sketch2iso_prediction_values.data() + descriptor_offset,
+                        direct_vertex,
+                        descriptor_distance_squared)
+                    || direct_vertex < 0
+                    || direct_vertex >= m_smplh_vertices.rows()
+                    || direct_vertex >= (int)m_iso_vertex_mirror_indices.size())
+                    continue;
+                const int mirrored_vertex = m_iso_vertex_mirror_indices[(size_t)direct_vertex];
+                if (mirrored_vertex < 0 || mirrored_vertex >= m_smplh_vertices.rows())
+                    continue;
+
+                float direct_x = 0.0f;
+                float direct_y = 0.0f;
+                float mirrored_x = 0.0f;
+                float mirrored_y = 0.0f;
+                if (!project_to_image(
+                        view,
+                        proj,
+                        m_smplh_vertices.row(direct_vertex).transpose(),
+                        width,
+                        height,
+                        direct_x,
+                        direct_y)
+                    || !project_to_image(
+                        view,
+                        proj,
+                        m_smplh_vertices.row(mirrored_vertex).transpose(),
+                        width,
+                        height,
+                        mirrored_x,
+                        mirrored_y))
+                    continue;
+
+                const float direct_dx = direct_x - ((float)x + 0.5f);
+                const float direct_dy = direct_y - ((float)y + 0.5f);
+                const float mirrored_dx = mirrored_x - ((float)x + 0.5f);
+                const float mirrored_dy = mirrored_y - ((float)y + 0.5f);
+                direct_projection_cost += std::min(
+                    maximum_projection_error_squared,
+                    direct_dx * direct_dx + direct_dy * direct_dy);
+                mirrored_projection_cost += std::min(
+                    maximum_projection_error_squared,
+                    mirrored_dx * mirrored_dx + mirrored_dy * mirrored_dy);
+                ++projection_sample_count;
+            }
+        }
+        m_iso_prediction_mirror_vertices = projection_sample_count >= 16u
+            && mirrored_projection_cost < direct_projection_cost;
+        m_iso_projection_orientation_npz_path = m_sketch2iso_prediction_npz_path;
+
         std::vector<unsigned char> output(pixel_count * 4u, 0u);
         int projected_count = 0;
         int threshold_error_count = 0;
@@ -687,8 +835,10 @@ namespace poseweaver
         console_add_line(
             state,
             "Canva ISO displacement saved: " + output_path.string()
+                + " (projection="
+                + std::string(m_iso_prediction_mirror_vertices ? "mirrored" : "direct")
                 + " (projected=" + std::to_string(projected_count)
                 + ", threshold_errors=" + std::to_string(threshold_error_count)
-                + "/" + std::to_string(foreground_count) + ")");
+                + "/" + std::to_string(foreground_count) + "))");
     }
 }

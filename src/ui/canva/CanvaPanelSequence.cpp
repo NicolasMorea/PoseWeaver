@@ -1122,8 +1122,14 @@ namespace poseweaver::ui_canva
                     *out_error = "invalid sketch frame index";
                 return false;
             }
-            if (state.sketch2rig.service == nullptr || state.sketch2rig.status != ModelInferenceStatus::Ready
-                || state.sketch2betas.service == nullptr || state.sketch2betas.status != ModelInferenceStatus::Ready
+            const bool use_nlf = std::clamp(state.canva_preferred_bone_prediction, 0, 1) == 1;
+            const bool bone_models_ready = use_nlf
+                ? state.nlf.service != nullptr && state.nlf.status == ModelInferenceStatus::Ready
+                : state.sketch2rig.service != nullptr
+                    && state.sketch2rig.status == ModelInferenceStatus::Ready
+                    && state.sketch2betas.service != nullptr
+                    && state.sketch2betas.status == ModelInferenceStatus::Ready;
+            if (!bone_models_ready
                 || state.sketch2iso.service == nullptr || state.sketch2iso.status != ModelInferenceStatus::Ready
                 || state.sketch2depth.service == nullptr || state.sketch2depth.status != ModelInferenceStatus::Ready)
             {
@@ -1147,22 +1153,38 @@ namespace poseweaver::ui_canva
 
             const std::string base = "sequence_sketch_" + std::to_string(frame.id);
             frame.model_input_path = sketch_path;
-            frame.rig_json_path = sketch_path.parent_path() / (base + "_rig.json");
-            frame.betas_json_path = sketch_path.parent_path() / (base + "_betas.json");
+            frame.inference_uses_nlf = use_nlf;
+            frame.inference_waiting_custom_workers = false;
+            frame.rig_json_path = sketch_path.parent_path()
+                / (base + (use_nlf ? "_nlf.json" : "_rig.json"));
+            frame.betas_json_path = use_nlf
+                ? frame.rig_json_path
+                : sketch_path.parent_path() / (base + "_betas.json");
             frame.iso_path = sketch_path.parent_path() / (base + "_iso.npz");
             frame.depth_path = sketch_path.parent_path() / (base + "_depth.json");
             frame.pose_json_path = assets_dir() / "poses" / (base + "_pose.json");
             frame.pose_npz_path = assets_dir() / "poses" / (base + "_pose.npz");
-            frame.rig_request_id = state.sketch2rig.next_request_id++;
-            frame.betas_request_id = state.sketch2betas.next_request_id++;
+            if (use_nlf)
+            {
+                frame.rig_request_id = state.nlf.next_request_id++;
+                frame.betas_request_id = frame.rig_request_id;
+            }
+            else
+            {
+                frame.rig_request_id = state.sketch2rig.next_request_id++;
+                frame.betas_request_id = state.sketch2betas.next_request_id++;
+            }
             frame.iso_request_id = state.sketch2iso.next_request_id++;
             frame.depth_request_id = state.sketch2depth.next_request_id++;
 
             std::string err;
-            const bool rig_ok = state.sketch2rig.service->request_inference(
-                frame.rig_request_id, sketch_path, frame.rig_json_path, &err);
-            const bool betas_ok = rig_ok && state.sketch2betas.service->request_inference(
-                frame.betas_request_id, sketch_path, frame.betas_json_path, &err);
+            const bool rig_ok = use_nlf
+                ? state.nlf.service->request_inference(
+                    frame.rig_request_id, sketch_path, frame.rig_json_path, &err)
+                : state.sketch2rig.service->request_inference(
+                    frame.rig_request_id, sketch_path, frame.rig_json_path, &err);
+            const bool betas_ok = rig_ok && (use_nlf || state.sketch2betas.service->request_inference(
+                frame.betas_request_id, sketch_path, frame.betas_json_path, &err));
             const bool iso_ok = betas_ok && state.sketch2iso.service->request_inference(
                 frame.iso_request_id, sketch_path, frame.iso_path, &err);
             const bool depth_ok = iso_ok && state.sketch2depth.service->request_inference(
@@ -1175,14 +1197,24 @@ namespace poseweaver::ui_canva
                 return false;
             }
 
-            state.sketch2rig.last_sketch_path = sketch_path.string();
-            state.sketch2rig.status = ModelInferenceStatus::Busy;
-            state.sketch2rig.active_request_id = frame.rig_request_id;
-            state.sketch2rig.message = "Processing sequence sketch with Sketch2Rig...";
-            state.sketch2betas.last_sketch_path = sketch_path.string();
-            state.sketch2betas.status = ModelInferenceStatus::Busy;
-            state.sketch2betas.active_request_id = frame.betas_request_id;
-            state.sketch2betas.message = "Processing sequence sketch with Sketch2Betas...";
+            if (use_nlf)
+            {
+                state.nlf.last_sketch_path = sketch_path.string();
+                state.nlf.status = ModelInferenceStatus::Busy;
+                state.nlf.active_request_id = frame.rig_request_id;
+                state.nlf.message = "Processing sequence sketch with NLF...";
+            }
+            else
+            {
+                state.sketch2rig.last_sketch_path = sketch_path.string();
+                state.sketch2rig.status = ModelInferenceStatus::Busy;
+                state.sketch2rig.active_request_id = frame.rig_request_id;
+                state.sketch2rig.message = "Processing sequence sketch with Sketch2Rig...";
+                state.sketch2betas.last_sketch_path = sketch_path.string();
+                state.sketch2betas.status = ModelInferenceStatus::Busy;
+                state.sketch2betas.active_request_id = frame.betas_request_id;
+                state.sketch2betas.message = "Processing sequence sketch with Sketch2Betas...";
+            }
             state.sketch2iso.last_sketch_path = sketch_path.string();
             state.sketch2iso.status = ModelInferenceStatus::Busy;
             state.sketch2iso.active_request_id = frame.iso_request_id;
@@ -1201,6 +1233,66 @@ namespace poseweaver::ui_canva
             return true;
         }
 
+        static bool sequence_start_custom_bone_fallback(
+            AppState& state,
+            CanvaState& canva,
+            CanvaSequenceTrackFrame& frame,
+            int sketch_index)
+        {
+            if (state.sketch2rig.service == nullptr || state.sketch2betas.service == nullptr)
+                return false;
+
+            state.sketch2rig.service->start();
+            state.sketch2betas.service->start();
+            frame.inference_waiting_custom_workers = true;
+            canva.sequence_status = "Loading Custom fallback";
+            console_add_line(state, "Sequence: NLF failed for frame "
+                + std::to_string(sketch_index) + "; loading Custom fallback");
+            return true;
+        }
+
+        static bool sequence_queue_custom_bone_fallback(
+            AppState& state,
+            CanvaState& canva,
+            CanvaSequenceTrackFrame& frame,
+            int sketch_index)
+        {
+            const std::string base = "sequence_sketch_" + std::to_string(frame.id);
+            frame.rig_json_path = frame.model_input_path.parent_path() / (base + "_rig.json");
+            frame.betas_json_path = frame.model_input_path.parent_path() / (base + "_betas.json");
+            frame.rig_request_id = state.sketch2rig.next_request_id++;
+            frame.betas_request_id = state.sketch2betas.next_request_id++;
+
+            std::string err;
+            const bool rig_ok = state.sketch2rig.service->request_inference(
+                frame.rig_request_id, frame.model_input_path, frame.rig_json_path, &err);
+            const bool betas_ok = rig_ok && state.sketch2betas.service->request_inference(
+                frame.betas_request_id, frame.model_input_path, frame.betas_json_path, &err);
+            if (!betas_ok)
+            {
+                console_add_line(state, "Sequence: failed to queue Custom fallback for frame "
+                    + std::to_string(sketch_index) + ": "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+                return false;
+            }
+
+            state.sketch2rig.last_sketch_path = frame.model_input_path.string();
+            state.sketch2rig.status = ModelInferenceStatus::Busy;
+            state.sketch2rig.active_request_id = frame.rig_request_id;
+            state.sketch2rig.message = "Processing sequence sketch with Sketch2Rig fallback...";
+            state.sketch2betas.last_sketch_path = frame.model_input_path.string();
+            state.sketch2betas.status = ModelInferenceStatus::Busy;
+            state.sketch2betas.active_request_id = frame.betas_request_id;
+            state.sketch2betas.message = "Processing sequence sketch with Sketch2Betas fallback...";
+
+            frame.inference_uses_nlf = false;
+            frame.inference_waiting_custom_workers = false;
+            canva.sequence_status = "Sketch inference (Custom fallback)";
+            console_add_line(state, "Sequence: queued Custom fallback for frame "
+                + std::to_string(sketch_index));
+            return true;
+        }
+
         static bool sequence_update_pending_sketch_inference(AppState& state, CanvaState& canva)
         {
             if (!canva.sequence_waiting_sketch_inference)
@@ -1213,16 +1305,52 @@ namespace poseweaver::ui_canva
                 return false;
             }
             CanvaSequenceTrackFrame& frame = canva.sequence_sketch_frames[(size_t)sketch_index];
-            const bool rig_done = state.sketch2rig.completed_request_id >= frame.rig_request_id;
-            const bool betas_done = state.sketch2betas.completed_request_id >= frame.betas_request_id;
+            if (frame.inference_waiting_custom_workers)
+            {
+                const bool workers_failed =
+                    state.sketch2rig.status == ModelInferenceStatus::Error
+                    || state.sketch2rig.status == ModelInferenceStatus::Stopped
+                    || state.sketch2betas.status == ModelInferenceStatus::Error
+                    || state.sketch2betas.status == ModelInferenceStatus::Stopped;
+                if (workers_failed)
+                {
+                    frame.inference_status = CanvaFrameInferenceStatus::Failed;
+                    canva.sequence_waiting_sketch_inference = false;
+                    canva.sequence_status = "Failed";
+                    console_add_line(state, "Sequence: Custom fallback workers failed to load for frame "
+                        + std::to_string(sketch_index));
+                    return false;
+                }
+                if (state.sketch2rig.status != ModelInferenceStatus::Ready
+                    || state.sketch2betas.status != ModelInferenceStatus::Ready)
+                    return true;
+                if (!sequence_queue_custom_bone_fallback(state, canva, frame, sketch_index))
+                {
+                    frame.inference_status = CanvaFrameInferenceStatus::Failed;
+                    canva.sequence_waiting_sketch_inference = false;
+                    canva.sequence_status = "Failed";
+                    return false;
+                }
+                return true;
+            }
+
+            const bool rig_done = frame.inference_uses_nlf
+                ? state.nlf.completed_request_id >= frame.rig_request_id
+                : state.sketch2rig.completed_request_id >= frame.rig_request_id;
+            const bool betas_done = frame.inference_uses_nlf
+                ? rig_done
+                : state.sketch2betas.completed_request_id >= frame.betas_request_id;
             const bool iso_done = state.sketch2iso.completed_request_id >= frame.iso_request_id;
             const bool depth_done = state.sketch2depth.completed_request_id >= frame.depth_request_id;
             if (!rig_done || !betas_done || !iso_done || !depth_done)
                 return true;
 
+            const bool bone_results_ready = frame.inference_uses_nlf
+                ? state.nlf.status == ModelInferenceStatus::Ready
+                : state.sketch2rig.status == ModelInferenceStatus::Ready
+                    && state.sketch2betas.status == ModelInferenceStatus::Ready;
             const bool ok =
-                state.sketch2rig.status == ModelInferenceStatus::Ready
-                && state.sketch2betas.status == ModelInferenceStatus::Ready
+                bone_results_ready
                 && state.sketch2iso.status == ModelInferenceStatus::Ready
                 && state.sketch2depth.status == ModelInferenceStatus::Ready
                 && std::filesystem::exists(frame.rig_json_path)
@@ -1231,6 +1359,12 @@ namespace poseweaver::ui_canva
                 && std::filesystem::exists(frame.depth_path);
             if (!ok)
             {
+                const bool nlf_failed = frame.inference_uses_nlf
+                    && (!bone_results_ready
+                        || !std::filesystem::exists(frame.rig_json_path));
+                if (nlf_failed
+                    && sequence_start_custom_bone_fallback(state, canva, frame, sketch_index))
+                    return true;
                 frame.inference_status = CanvaFrameInferenceStatus::Failed;
                 canva.sequence_waiting_sketch_inference = false;
                 canva.sequence_status = "Failed";
@@ -1295,14 +1429,25 @@ namespace poseweaver::ui_canva
 
             SketchPoseBuildResult result;
             std::string err;
-            if (!save_sketch_pose_from_outputs(
+            const bool saved_pose = frame.inference_uses_nlf
+                ? save_nlf_pose_from_output(
+                    frame.rig_json_path,
+                    frame.pose_json_path,
+                    frame.pose_npz_path,
+                    &result,
+                    &err)
+                : save_sketch_pose_from_outputs(
                     frame.rig_json_path,
                     frame.betas_json_path,
                     frame.pose_json_path,
                     frame.pose_npz_path,
                     &result,
-                    &err))
+                    &err);
+            if (!saved_pose)
             {
+                if (frame.inference_uses_nlf
+                    && sequence_start_custom_bone_fallback(state, canva, frame, sketch_index))
+                    return true;
                 frame.inference_status = CanvaFrameInferenceStatus::Failed;
                 canva.sequence_waiting_sketch_inference = false;
                 canva.sequence_status = "Failed";
@@ -2358,13 +2503,18 @@ namespace poseweaver::ui_canva
         const bool garment_selected =
             state.selection.garment_index >= 0
             && state.selection.garment_index < (int)state.selection.garments.size();
-        const bool sequence_models_ready =
+        const bool custom_bone_models_ready =
             state.sketch2rig.service != nullptr
             && state.sketch2rig.status == ModelInferenceStatus::Ready
             && state.sketch2betas.service != nullptr
-            && state.sketch2betas.status == ModelInferenceStatus::Ready
-            && (state.canva_preferred_bone_prediction == 0
-                || (state.nlf.service != nullptr && state.nlf.status == ModelInferenceStatus::Ready))
+            && state.sketch2betas.status == ModelInferenceStatus::Ready;
+        const bool nlf_bone_model_ready =
+            state.nlf.service != nullptr
+            && state.nlf.status == ModelInferenceStatus::Ready;
+        const bool sequence_models_ready =
+            (state.canva_preferred_bone_prediction == 0
+                ? custom_bone_models_ready
+                : nlf_bone_model_ready)
             && state.sketch2iso.service != nullptr
             && state.sketch2iso.status == ModelInferenceStatus::Ready
             && state.sketch2depth.service != nullptr
@@ -2375,6 +2525,8 @@ namespace poseweaver::ui_canva
             && !canva.render_cloth_active
             && !canva.sequence_generating
             && !canva.cloth_fitting_active
+            && !canva.generate_displacement_active
+            && !canva.generate_iso_displacement_active
             && !state.controls.simulating;
         const bool can_init =
             garment_selected

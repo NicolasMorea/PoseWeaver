@@ -269,6 +269,15 @@ namespace poseweaver::ui_canva
         const bool nlf_result_ready =
             state.nlf.status == ModelInferenceStatus::Ready
             && !state.nlf.last_output_path.empty();
+        const bool is_sequence_nlf =
+            canva.sequence_generating
+            && (is_extract_pose_nlf
+                || (canva.sequence_waiting_sketch_inference
+                    && canva.sequence_pending_sketch_index >= 0
+                    && canva.sequence_pending_sketch_index < (int)canva.sequence_sketch_frames.size()
+                    && canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].inference_uses_nlf
+                    && state.nlf.completed_request_id
+                        == canva.sequence_sketch_frames[(size_t)canva.sequence_pending_sketch_index].rig_request_id));
 
         if (is_extract_pose_nlf)
         {
@@ -303,25 +312,28 @@ namespace poseweaver::ui_canva
                 state.sketch2rig.last_output_path = state.nlf.last_output_path;
                 console_add_line(state, "Canva: NLF found a human; using direct NLF pose, bones, and betas"
                     " (confidence " + std::to_string(nlf_confidence) + ")");
-                std::string layer_error;
-                if (canva_add_sketch2rig_layer(
-                        canva,
-                        state.nlf.last_output_path,
-                        state.nlf.last_sketch_path,
-                        !canva.extract_pose_hide_rig_layer,
-                        &layer_error))
+                if (!is_sequence_nlf)
                 {
-                    if (!canva.layers.empty())
-                        canva.layers.front().name = "NLF bones";
-                    console_add_line(state, std::string(canva.extract_pose_hide_rig_layer
-                            ? "Canva: Added hidden NLF bones layer from "
-                            : "Canva: Added NLF bones layer from ")
-                        + state.nlf.last_output_path);
-                }
-                else
-                {
-                    console_add_line(state, "Canva: Failed to load NLF bones layer: "
-                        + (layer_error.empty() ? std::string("(unknown error)") : layer_error));
+                    std::string layer_error;
+                    if (canva_add_sketch2rig_layer(
+                            canva,
+                            state.nlf.last_output_path,
+                            state.nlf.last_sketch_path,
+                            !canva.extract_pose_hide_rig_layer,
+                            &layer_error))
+                    {
+                        if (!canva.layers.empty())
+                            canva.layers.front().name = "NLF bones";
+                        console_add_line(state, std::string(canva.extract_pose_hide_rig_layer
+                                ? "Canva: Added hidden NLF bones layer from "
+                                : "Canva: Added NLF bones layer from ")
+                            + state.nlf.last_output_path);
+                    }
+                    else
+                    {
+                        console_add_line(state, "Canva: Failed to load NLF bones layer: "
+                            + (layer_error.empty() ? std::string("(unknown error)") : layer_error));
+                    }
                 }
             }
             else if (canva.extract_pose_nlf_fallback_allowed)
@@ -345,7 +357,7 @@ namespace poseweaver::ui_canva
             }
         }
 
-        if (!is_extract_pose_nlf && nlf_result_ready)
+        if (!is_extract_pose_nlf && !is_sequence_nlf && nlf_result_ready)
         {
             canva.bone_prediction_debug_mode = canva_nlf_result_has_human(state.nlf.last_output_path) ? 1 : 2;
             canva.bone_prediction_nlf_confidence = canva_nlf_result_confidence(state.nlf.last_output_path);
@@ -442,6 +454,10 @@ namespace poseweaver::ui_canva
                         GenerateClothStepId::FittingInference,
                         "Sketch2Depth",
                         canva.cloth_fitting_depth_start);
+                if (canva.cloth_fitting_timing_started)
+                    canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::DepthInference] =
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - canva.cloth_fitting_depth_start).count();
                 canva.cloth_fitting_waiting_depth = false;
                 canva.cloth_fitting_depth_path = filtered_depth_path;
                 console_add_line(state, "Canva: Body depth ready for cloth fitting from "
@@ -921,6 +937,10 @@ namespace poseweaver::ui_canva
                             GenerateClothStepId::FittingInference,
                             "Sketch2ISO",
                             canva.cloth_fitting_iso_start);
+                    if (canva.cloth_fitting_timing_started)
+                        canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::IsoInference] =
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - canva.cloth_fitting_iso_start).count();
                     canva.cloth_fitting_waiting_iso = false;
                     canva.cloth_fitting_iso_path = selected_iso_path;
                     canva.cloth_fitting_status = canva.cloth_fitting_waiting_depth
@@ -1150,6 +1170,10 @@ namespace poseweaver::ui_canva
             && state.cloth_render_completed_id >= canva.render_cloth_request_id)
         {
             canva.render_cloth_active = false;
+            const bool fit_after_render = canva.render_cloth_fit_after;
+            const bool refit_after_render = canva.render_cloth_refit_after;
+            canva.render_cloth_fit_after = false;
+            canva.render_cloth_refit_after = false;
             if (!state.cloth_render_path.empty())
             {
                 std::string err;
@@ -1165,6 +1189,38 @@ namespace poseweaver::ui_canva
                         canva.render_cloth_fine
                             ? "Canva: Added Fine cloth render layer"
                             : "Canva: Added Rendered cloth layer");
+                    if (refit_after_render)
+                    {
+                        std::string refit_error;
+                        if (canva_refit_cloth_with_cached_maps(
+                                state, canva, renderer, canva.layers.front(), &refit_error))
+                        {
+                            canva.render_cloth_status = "Done";
+                            console_add_line(state, "Canva: Render + Refit reused saved visibility and deformation maps");
+                        }
+                        else
+                        {
+                            canva.render_cloth_status = "Failed";
+                            console_add_line(state, "Canva: Render + Refit failed: "
+                                + (refit_error.empty() ? std::string("(unknown error)") : refit_error));
+                        }
+                    }
+                    else if (fit_after_render)
+                    {
+                        std::string fit_error;
+                        if (canva_queue_cloth_fitting_predictions(
+                                state, canva, canva.layers.front(), &fit_error))
+                        {
+                            canva.render_cloth_status = "Fitting";
+                            console_add_line(state, "Canva: Render + Fit queued cloth fitting");
+                        }
+                        else
+                        {
+                            canva.render_cloth_status = "Failed";
+                            console_add_line(state, "Canva: Render + Fit failed to queue cloth fitting: "
+                                + (fit_error.empty() ? std::string("(unknown error)") : fit_error));
+                        }
+                    }
                 }
                 else
                 {

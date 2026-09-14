@@ -240,6 +240,16 @@ namespace poseweaver
             PW_FLOAT("garment.minimum_skin_distance", "Minimum cloth-to-skin distance.", garment_min_cloth_skin_distance, 0.0, 1.0);
             PW_FLOAT("garment.ease_amount", "Garment ease amount.", garment_ease_amount, 0.0, 10.0);
             PW_INT("garment.prefit_steps", "Garment prefit steps.", garment_prefit_steps, 1, 100000);
+            PW_BOOL("garment.use_source_texture", "Use the source material color and any base-color texture from a glTF/GLB or OBJ/MTL garment.", garment_use_source_texture);
+            out.push_back({ "garment.base_pose", "string", "Pose the garment was fitted on; used as the cloth-to-body reference and simulation start pose.", {}, {}, { "t_pose", "a_pose" },
+                [](const AppState& state, const CanvaState&) -> json {
+                    return state.garment_base_pose == GarmentBasePose::APose ? "a_pose" : "t_pose";
+                },
+                [](AppState& state, CanvaState&, const json& value) {
+                    state.garment_base_pose = value.get<std::string>() == "a_pose"
+                        ? GarmentBasePose::APose
+                        : GarmentBasePose::TPose;
+                } });
 
             PW_BOOL("view.show_smpl", "Show the SMPL body.", show_smpl);
             PW_BOOL("view.show_smpl_character", "Show the character surface.", show_smpl_character);
@@ -249,6 +259,7 @@ namespace poseweaver
             PW_BOOL("view.show_collision_colliders", "Show collision geometry.", show_collision_colliders);
             PW_BOOL("view.show_rig", "Show the predicted rig.", show_sketch2rig_rig);
             PW_BOOL("view.garment_color_by_smpl_uv", "Color garment by SMPL UV.", garment_color_by_smpl_uv);
+            PW_INT("render.method", "0 standard, 1 detailed ink, 2 clean line, 3 soft 2D, 4 grease pencil line art, 5 grease pencil line art with cel shading.", cloth_render_method, 0, 5);
             PW_FLOAT("render.target_detail_size", "Fine cloth render target edge length.", cloth_render_target_detail_size, 0.0001, 0.25);
 
             PW_FLOAT("fitting.depth_margin", "Cloth fitting depth margin.", cloth_fitting_depth_margin, 0.0, 1.0);
@@ -257,10 +268,24 @@ namespace poseweaver
             PW_FLOAT("fitting.warp_radius", "Warp radius in pixels.", cloth_fitting_warp_radius, 0.0, 100000.0);
             PW_FLOAT("fitting.warp_force", "Warp strength.", cloth_fitting_warp_force, 0.0, 1000.0);
             PW_INT("fitting.warp_steps", "Warp iteration count.", cloth_fitting_warp_steps, 1, 100000);
-            PW_FLOAT("fitting.smoothing_strength", "Cloth smoothing filter strength.", cloth_smoothing_filter_strength, 0.0, 1.0);
-            PW_FLOAT("fitting.smoothing_inner_line_width", "Protected inner line width.", cloth_smoothing_inner_line_width, 0.0, 10000.0);
-            PW_INT("fitting.smoothing_contour_radius", "Contour smoothing radius.", cloth_smoothing_contour_radius, 0, 10000);
-            PW_INT("fitting.smoothing_line_gap_radius", "Line gap closing radius.", cloth_smoothing_line_gap_radius, 0, 10000);
+            PW_INT("fitting.stylization_method", "0 anime cel, 1 soft toon, 2 pure line art, 3 none.", cloth_stylization_method, 0, 3);
+            PW_FLOAT("fitting.stylization_outline_width", "Fixed final outline width in pixels.", cloth_stylization_outline_width, 0.0, 12.0);
+            PW_FLOAT("fitting.stylization_wrinkle_width", "Fixed interior wrinkle line width in pixels.", cloth_stylization_wrinkle_width, 0.0, 8.0);
+            PW_FLOAT("fitting.stylization_edge_threshold", "Minimum local tone contrast used to draw wrinkle lines.", cloth_stylization_edge_threshold, 0.01, 0.5);
+            PW_FLOAT("fitting.stylization_shadow_threshold", "Source-light threshold for cartoon shadows.", cloth_stylization_shadow_threshold, 0.5, 1.0);
+            PW_FLOAT("fitting.stylization_shadow_strength", "Cartoon shadow darkness.", cloth_stylization_shadow_strength, 0.0, 0.8);
+            PW_FLOAT("fitting.stylization_softness", "Soft-toon shadow transition softness.", cloth_stylization_softness, 0.0, 1.0);
+            PW_INT("fitting.stylization_contour_radius", "Silhouette cleanup radius in pixels.", cloth_stylization_contour_radius, 1, 24);
+            PW_INT("fitting.stylization_line_gap_radius", "Interior line gap closing radius in pixels.", cloth_stylization_line_gap_radius, 0, 6);
+            PW_FLOAT("fitting.stylization_line_color_r", "Lineart red channel.", cloth_stylization_line_color[0], 0.0, 1.0);
+            PW_FLOAT("fitting.stylization_line_color_g", "Lineart green channel.", cloth_stylization_line_color[1], 0.0, 1.0);
+            PW_FLOAT("fitting.stylization_line_color_b", "Lineart blue channel.", cloth_stylization_line_color[2], 0.0, 1.0);
+            PW_FLOAT("fitting.grease_pencil_outline_width", "Generated-cloth Grease Pencil silhouette width in pixels.", cloth_grease_pencil_outline_width, 0.0, 12.0);
+            PW_FLOAT("fitting.grease_pencil_wrinkle_width", "Generated-cloth Grease Pencil interior feature width in pixels.", cloth_grease_pencil_wrinkle_width, 0.0, 8.0);
+            PW_FLOAT("fitting.grease_pencil_crease_angle", "Minimum smoothed face-normal angle for Grease Pencil wrinkle lines.", cloth_grease_pencil_crease_angle, 10.0, 80.0);
+            PW_FLOAT("fitting.grease_pencil_shadow_threshold", "Lighting level where Grease Pencil shadows begin.", cloth_grease_pencil_shadow_threshold, 0.35, 0.95);
+            PW_FLOAT("fitting.grease_pencil_shadow_range", "Grease Pencil shadow transition range.", cloth_grease_pencil_shadow_range, 0.05, 0.70);
+            PW_FLOAT("fitting.grease_pencil_shadow_strength", "Grease Pencil shadow darkness.", cloth_grease_pencil_shadow_strength, 0.0, 1.0);
             PW_FLOAT("fitting.iso_distance_threshold", "ISO descriptor matching threshold.", iso_distance_threshold, 0.0, 10000.0);
 
             PW_FLOAT("canvas.brush_radius", "Canvas brush radius.", canva_brush_radius, 0.5, 250.0);
@@ -448,7 +473,20 @@ namespace poseweaver
             else if (job.kind == "render_cloth")
                 out["stage"] = canva.render_cloth_status;
             else if (job.kind == "cloth_fitting")
+            {
                 out["stage"] = canva.cloth_fitting_status;
+                out["timings_seconds"] = {
+                    { "iso_inference", canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::IsoInference] },
+                    { "depth_inference", canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::DepthInference] },
+                    { "visibility", canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::Visibility] },
+                    { "layer_creation", canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::LayerCreation] },
+                    { "total", canva_cloth_fitting_elapsed_seconds(canva) }
+                };
+                json renderer_timings = json::object();
+                for (const auto& timing : canva.cloth_fitting_renderer_timings)
+                    renderer_timings[timing.first] = timing.second;
+                out["renderer_timings_seconds"] = std::move(renderer_timings);
+            }
             else if (job.kind == "extract_pose")
                 out["stage"] = canva.extract_pose_active ? "extracting" : "done";
             else if (job.kind == "rig_optimization")
@@ -619,7 +657,7 @@ namespace poseweaver
             }
             else if (name == "render_cloth")
             {
-                if (!canva_queue_render_cloth(state, canva, params.value("fine", false), &error))
+                if (!canva_queue_render_cloth(state, canva, params.value("fine", false), false, false, &error))
                     throw std::runtime_error(error.empty() ? "failed to queue cloth render" : error);
                 job = &create_job(name);
                 job->observed_active = true;
@@ -637,6 +675,48 @@ namespace poseweaver
                 job = &create_job(name);
                 job->observed_active = true;
                 job->state = "running";
+            }
+            else if (name == "stylize_cloth")
+            {
+                if (canva.active_layer < 0 || canva.active_layer >= static_cast<int>(canva.layers.size()))
+                    throw std::runtime_error("select a cloth layer first");
+                const CanvaLayer& source = canva.layers[static_cast<std::size_t>(canva.active_layer)];
+                CanvaLayer stylized = canva_make_layer(
+                    canva.width,
+                    canva.height,
+                    canva.next_layer_id++,
+                    "Stylized cloth preview");
+                stylized.kind = CanvaLayerKind::ClothFittingWarpedSmoothed;
+                stylized.offset = source.offset;
+                stylized.scale = source.scale;
+                stylized.smoothing_source_layer_id = source.id;
+                stylized.stylization_method = state.cloth_stylization_method;
+                stylized.stylization_outline_width = state.cloth_stylization_outline_width;
+                stylized.stylization_wrinkle_width = state.cloth_stylization_wrinkle_width;
+                stylized.stylization_edge_threshold = state.cloth_stylization_edge_threshold;
+                stylized.stylization_shadow_threshold = state.cloth_stylization_shadow_threshold;
+                stylized.stylization_shadow_strength = state.cloth_stylization_shadow_strength;
+                stylized.stylization_softness = state.cloth_stylization_softness;
+                stylized.stylization_contour_radius = state.cloth_stylization_contour_radius;
+                stylized.stylization_line_gap_radius = state.cloth_stylization_line_gap_radius;
+                stylized.stylization_cloth_color = state.cloth_ink_color;
+                stylized.stylization_line_color = state.cloth_stylization_line_color;
+                if (!canva_stylize_warped_cloth_layer(
+                        source,
+                        stylized,
+                        canva.width,
+                        canva.height,
+                        &error))
+                {
+                    canva_delete_layer_texture(stylized);
+                    throw std::runtime_error(error.empty() ? "failed to stylize cloth" : error);
+                }
+                const int layer_id = stylized.id;
+                canva.layers.insert(canva.layers.begin(), std::move(stylized));
+                canva.active_layer = 0;
+                job = &create_job(name);
+                job->message = "layer_id=" + std::to_string(layer_id);
+                job->state = "completed";
             }
             else if (name == "extract_pose")
             {
@@ -979,7 +1059,7 @@ namespace poseweaver
                 {
                     return success(id, { { "operations", {
                         "simulation", "generate_cloth", "full_generation", "generate_and_fit",
-                        "render_cloth", "cloth_fitting", "extract_pose", "rig_optimization",
+                        "render_cloth", "cloth_fitting", "stylize_cloth", "extract_pose", "rig_optimization",
                         "generate_displacement", "generate_iso_displacement", "scene_snapshot",
                         "garment_pushout", "garment_ease", "garment_prefit", "garment_relax",
                         "save_constraints", "clear_constraints", "clear_simulation", "undo_canvas", "reset_canvas"

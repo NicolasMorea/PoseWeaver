@@ -362,10 +362,12 @@ namespace poseweaver::ui_canva
         return {};
     }
 
-     bool canva_queue_render_cloth(
+    bool canva_queue_render_cloth(
         AppState& state,
         CanvaState& canva,
         bool fine,
+        bool fit_after,
+        bool refit_after,
         std::string* out_error)
     {
         if (state.selection.garment_index < 0
@@ -381,9 +383,17 @@ namespace poseweaver::ui_canva
                 *out_error = "wait for cloth simulation to finish";
             return false;
         }
+        if (refit_after && !canva_has_cloth_refit_maps(canva))
+        {
+            if (out_error)
+                *out_error = "fit a cloth layer once to create reusable fitting maps";
+            return false;
+        }
 
         canva.render_cloth_active = true;
         canva.render_cloth_fine = fine;
+        canva.render_cloth_fit_after = fit_after;
+        canva.render_cloth_refit_after = refit_after;
         canva.render_cloth_model_input_path = canva_cloth_render_alignment_input(state, canva);
         canva.render_cloth_status = fine ? "Refining" : "Rendering";
 
@@ -398,8 +408,9 @@ namespace poseweaver::ui_canva
         canva_prepare_cloth_output_dirs(state, canva, 0, 0);
         canva.render_cloth_request_id = ++state.cloth_render_request_id;
 
-        console_add_line(state, fine
-            ? "Canva: queued fine cloth render"
+        console_add_line(state,
+            refit_after ? "Canva: queued cloth render with cached-map refit"
+            : fine ? "Canva: queued fine cloth render"
             : "Canva: queued cloth render");
         return true;
     }
@@ -874,6 +885,7 @@ namespace poseweaver::ui_canva
         canva.cloth_fitting_source_layer_id = source_layer_id;
         canva.cloth_fitting_waiting_source_layer = wait_for_source_layer;
         canva.cloth_fitting_status = "Predicting ISO and depth";
+        canva_reset_cloth_fitting_timings(canva);
         canva.cloth_fitting_iso_start = std::chrono::steady_clock::now();
         canva.cloth_fitting_depth_start = canva.cloth_fitting_iso_start;
         if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)

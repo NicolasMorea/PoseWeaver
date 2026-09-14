@@ -206,7 +206,19 @@ namespace poseweaver::ui_canva
                 if (dx * dx + dy * dy <= rr)
                 {
                     unsigned char* px = &layer.pixels[((size_t)y * (size_t)w + (size_t)x) * 4u];
-                    canva_blend_over(px, col);
+                    if (canva_layer_is_visibility_map(layer))
+                    {
+                        if (px[3] == 0u)
+                            continue;
+                        const bool paint_visible = col.y > col.x;
+                        px[0] = paint_visible ? 32u : 255u;
+                        px[1] = paint_visible ? 220u : 48u;
+                        px[2] = paint_visible ? 80u : 48u;
+                    }
+                    else
+                    {
+                        canva_blend_over(px, col);
+                    }
                 }
             }
         }

@@ -65,7 +65,15 @@ namespace poseweaver::ui_canva
         return name.find("generated cloth") != std::string::npos;
     }
 
-    bool canva_smooth_warped_cloth_layer(
+    bool canva_layer_is_visibility_map(const CanvaLayer& layer)
+    {
+        return layer.kind == CanvaLayerKind::ClothFittingOcclusionDebug
+            || layer.kind == CanvaLayerKind::ClothFittingSceneOcclusionDebug
+            || layer.kind == CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug
+            || layer.kind == CanvaLayerKind::ClothFittingIsoOcclusionDebug;
+    }
+
+    bool canva_stylize_warped_cloth_layer(
         const CanvaLayer& source,
         CanvaLayer& destination,
         int width,
@@ -76,8 +84,16 @@ namespace poseweaver::ui_canva
         if (width <= 0 || height <= 0 || source.pixels.size() < expected_size)
         {
             if (out_error)
-                *out_error = "warped cloth smoothing source is invalid";
+                *out_error = "warped cloth stylization source is invalid";
             return false;
+        }
+
+        if (std::clamp(destination.stylization_method, 0, 3) == 3)
+        {
+            destination.pixels.assign(source.pixels.begin(), source.pixels.begin() + expected_size);
+            destination.dirty = true;
+            destination.bounds_dirty = true;
+            return true;
         }
 
         destination.pixels.assign(expected_size, 0u);
@@ -104,15 +120,15 @@ namespace poseweaver::ui_canva
             return true;
         }
 
-        const float filter_strength =
-            std::clamp(destination.smoothing_filter_strength, 0.0f, 1.0f);
+        const float softness =
+            std::clamp(destination.stylization_softness, 0.0f, 1.0f);
         const int contour_radius =
-            std::clamp(destination.smoothing_contour_radius, 1, 32);
+            std::clamp(destination.stylization_contour_radius, 1, 24);
         const int line_gap_radius =
-            std::clamp(destination.smoothing_line_gap_radius, 0, 12);
+            std::clamp(destination.stylization_line_gap_radius, 0, 6);
         const int cleanup_radius = std::max(
             1,
-            (int)std::lround((float)contour_radius * (0.10f + 0.20f * filter_strength)));
+            (int)std::lround((float)contour_radius * 0.2f));
         const int crop_margin = contour_radius + cleanup_radius + line_gap_radius + 2;
         min_x = std::max(0, min_x - crop_margin);
         min_y = std::max(0, min_y - crop_margin);
@@ -316,22 +332,35 @@ namespace poseweaver::ui_canva
             }
         }
 
-        constexpr std::array<float, 3> shader_tones{ 0.78f, 0.91f, 1.0f };
-        std::array<std::array<unsigned char, 3>, 3> palette{};
-        for (size_t tone = 0; tone < palette.size(); ++tone)
+        const int method = std::clamp(destination.stylization_method, 0, 3);
+        const float outline_width =
+            std::clamp(destination.stylization_outline_width, 0.0f, 12.0f);
+        const float wrinkle_width =
+            std::clamp(destination.stylization_wrinkle_width, 0.0f, 8.0f);
+        const float edge_threshold =
+            std::clamp(destination.stylization_edge_threshold, 0.01f, 0.5f);
+        const float shadow_threshold =
+            std::clamp(destination.stylization_shadow_threshold, 0.5f, 1.0f);
+        const float shadow_strength =
+            std::clamp(destination.stylization_shadow_strength, 0.0f, 0.8f);
+        std::array<float, 3> base_rgb{};
+        std::array<unsigned char, 3> line_rgb{};
+        for (int channel = 0; channel < 3; ++channel)
         {
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                palette[tone][(size_t)channel] = (unsigned char)std::lround(
-                    std::clamp(destination.smoothing_cloth_color[(size_t)channel], 0.0f, 1.0f)
-                    * shader_tones[tone]
-                    * 255.0f);
-            }
+            base_rgb[(size_t)channel] =
+                std::clamp(destination.stylization_cloth_color[(size_t)channel], 0.0f, 1.0f)
+                * 255.0f;
+            line_rgb[(size_t)channel] = (unsigned char)std::lround(
+                std::clamp(destination.stylization_line_color[(size_t)channel], 0.0f, 1.0f)
+                * 255.0f);
         }
+        const float base_luma = std::max(
+            1.0f,
+            base_rgb[0] * 0.2126f + base_rgb[1] * 0.7152f + base_rgb[2] * 0.0722f);
 
-        const float outline_width = std::max(0.0f, destination.smoothing_inner_line_width);
-        std::vector<float> filtered_rgb(crop_pixels * 3u, 0.0f);
-        std::vector<unsigned char> line_mask(crop_pixels, 0u);
+        std::vector<float> raw_luma(crop_pixels, 0.0f);
+        std::vector<float> source_luma_samples;
+        source_luma_samples.reserve(crop_pixels);
         for (size_t pixel_index = 0; pixel_index < crop_pixels; ++pixel_index)
         {
             if (mask[pixel_index] == 0u)
@@ -342,41 +371,407 @@ namespace poseweaver::ui_canva
                 ((size_t)(y + min_y) * (size_t)width + (size_t)(x + min_x)) * 4u;
             const size_t blur_index = pixel_index * 4u;
             const float blur_alpha = std::max(blurred[blur_index + 3u] / 255.0f, 1e-5f);
-            float shader_rgb[3] = {};
+            std::array<float, 3> sample_rgb{};
             for (int channel = 0; channel < 3; ++channel)
             {
-                const float blur_color = blurred[blur_index + (size_t)channel] / blur_alpha;
-                shader_rgb[channel] =
-                    source.pixels[source_index + 3u] == 0u
-                    ? blur_color
+                sample_rgb[(size_t)channel] = source.pixels[source_index + 3u] == 0u
+                    ? blurred[blur_index + (size_t)channel] / blur_alpha
                     : (float)source.pixels[source_index + (size_t)channel];
-                filtered_rgb[pixel_index * 3u + (size_t)channel] =
-                    shader_rgb[channel]
-                    + (blur_color - shader_rgb[channel]) * (0.15f * filter_strength);
             }
-
-            if (source.pixels[source_index + 3u] == 0u)
-                continue;
-            float black_distance = 0.0f;
-            float shader_tone_distance = std::numeric_limits<float>::max();
-            for (int channel = 0; channel < 3; ++channel)
-                black_distance += shader_rgb[channel] * shader_rgb[channel];
-            for (const auto& tone : palette)
+            const float luma =
+                sample_rgb[0] * 0.2126f + sample_rgb[1] * 0.7152f + sample_rgb[2] * 0.0722f;
+            raw_luma[pixel_index] = luma;
+            if (source.pixels[source_index + 3u] != 0u)
             {
-                float tone_distance = 0.0f;
-                for (int channel = 0; channel < 3; ++channel)
-                {
-                    const float delta =
-                        shader_rgb[channel] - (float)tone[(size_t)channel];
-                    tone_distance += delta * delta;
-                }
-                shader_tone_distance = std::min(shader_tone_distance, tone_distance);
+                source_luma_samples.push_back(luma);
             }
-            line_mask[pixel_index] =
-                black_distance <= shader_tone_distance ? 1u : 0u;
+        }
+        std::sort(source_luma_samples.begin(), source_luma_samples.end());
+        const float source_base_luma = source_luma_samples.empty()
+            ? base_luma
+            : std::max(
+                1.0f,
+                source_luma_samples[(size_t)std::floor(
+                    (float)(source_luma_samples.size() - 1u) * 0.90f)]);
+        std::vector<float> intensity(crop_pixels, 1.0f);
+        for (size_t pixel_index = 0; pixel_index < crop_pixels; ++pixel_index)
+        {
+            if (mask[pixel_index] == 0u)
+                continue;
+            intensity[pixel_index] =
+                std::clamp(raw_luma[pixel_index] / source_base_luma, 0.0f, 1.25f);
+        }
+
+        const auto box_blur_scalar = [crop_width, crop_height](
+            const std::vector<float>& input,
+            int radius)
+        {
+            if (radius <= 0)
+                return input;
+            std::vector<float> horizontal(input.size(), 0.0f);
+            std::vector<float> output(input.size(), 0.0f);
+            for (int y = 0; y < crop_height; ++y)
+            {
+                float sum = 0.0f;
+                for (int x = 0; x <= radius && x < crop_width; ++x)
+                    sum += input[(size_t)y * (size_t)crop_width + (size_t)x];
+                for (int x = 0; x < crop_width; ++x)
+                {
+                    const int begin = std::max(0, x - radius);
+                    const int end = std::min(crop_width - 1, x + radius);
+                    horizontal[(size_t)y * (size_t)crop_width + (size_t)x] =
+                        sum / (float)(end - begin + 1);
+                    if (x - radius >= 0)
+                        sum -= input[(size_t)y * (size_t)crop_width + (size_t)(x - radius)];
+                    if (x + radius + 1 < crop_width)
+                        sum += input[(size_t)y * (size_t)crop_width + (size_t)(x + radius + 1)];
+                }
+            }
+            for (int x = 0; x < crop_width; ++x)
+            {
+                float sum = 0.0f;
+                for (int y = 0; y <= radius && y < crop_height; ++y)
+                    sum += horizontal[(size_t)y * (size_t)crop_width + (size_t)x];
+                for (int y = 0; y < crop_height; ++y)
+                {
+                    const int begin = std::max(0, y - radius);
+                    const int end = std::min(crop_height - 1, y + radius);
+                    output[(size_t)y * (size_t)crop_width + (size_t)x] =
+                        sum / (float)(end - begin + 1);
+                    if (y - radius >= 0)
+                        sum -= horizontal[(size_t)(y - radius) * (size_t)crop_width + (size_t)x];
+                    if (y + radius + 1 < crop_height)
+                        sum += horizontal[(size_t)(y + radius + 1) * (size_t)crop_width + (size_t)x];
+                }
+            }
+            return output;
+        };
+        const int tone_blur_radius = method == 1
+            ? 1 + (int)std::lround(softness * 3.0f)
+            : 1;
+        const std::vector<float> filtered_intensity =
+            box_blur_scalar(intensity, tone_blur_radius);
+
+        const int contour_exclusion =
+            std::max(2, (int)std::ceil(outline_width) + contour_radius / 2);
+        const int wrinkle_blur_radius = std::clamp(contour_radius / 3, 2, 5);
+        const std::vector<float> wrinkle_intensity =
+            box_blur_scalar(
+                box_blur_scalar(intensity, wrinkle_blur_radius),
+                wrinkle_blur_radius);
+        const std::vector<float> wrinkle_background =
+            box_blur_scalar(
+                box_blur_scalar(wrinkle_intensity, wrinkle_blur_radius + 3),
+                wrinkle_blur_radius + 3);
+        std::vector<float> ridge_strength(crop_pixels, 0.0f);
+        for (size_t index = 0; index < crop_pixels; ++index)
+        {
+            if (mask[index] != 0u && distance[index] > contour_exclusion)
+                ridge_strength[index] = std::max(
+                    0.0f,
+                    wrinkle_background[index] - wrinkle_intensity[index]);
+        }
+
+        std::vector<unsigned char> weak_lines(crop_pixels, 0u);
+        std::vector<unsigned char> strong_lines(crop_pixels, 0u);
+        for (int y = 2; y + 2 < crop_height; ++y)
+        {
+            for (int x = 2; x + 2 < crop_width; ++x)
+            {
+                const size_t index = (size_t)y * (size_t)crop_width + (size_t)x;
+                if (mask[index] == 0u || distance[index] <= contour_exclusion)
+                    continue;
+
+                const size_t north = index - (size_t)crop_width;
+                const size_t south = index + (size_t)crop_width;
+                const float center = wrinkle_intensity[index];
+                const float dxx = wrinkle_intensity[index + 1u] - 2.0f * center
+                    + wrinkle_intensity[index - 1u];
+                const float dyy = wrinkle_intensity[south] - 2.0f * center
+                    + wrinkle_intensity[north];
+                const float dxy = 0.25f * (
+                    wrinkle_intensity[south + 1u] - wrinkle_intensity[south - 1u]
+                    - wrinkle_intensity[north + 1u] + wrinkle_intensity[north - 1u]);
+                const float half_trace = 0.5f * (dxx + dyy);
+                const float discriminant = std::hypot(0.5f * (dxx - dyy), dxy);
+                const float normal_curvature = half_trace + discriminant;
+                const float tangent_curvature = half_trace - discriminant;
+                if (normal_curvature <= 0.0f
+                    || normal_curvature < std::abs(tangent_curvature) * 1.25f)
+                {
+                    continue;
+                }
+
+                float normal_x = dxy;
+                float normal_y = normal_curvature - dxx;
+                if (std::abs(normal_x) + std::abs(normal_y) < 1e-6f)
+                {
+                    normal_x = 1.0f;
+                    normal_y = 0.0f;
+                }
+                int step_x = 0;
+                int step_y = 0;
+                if (std::abs(normal_x) > std::abs(normal_y) * 2.0f)
+                    step_x = 1;
+                else if (std::abs(normal_y) > std::abs(normal_x) * 2.0f)
+                    step_y = 1;
+                else
+                {
+                    step_x = 1;
+                    step_y = normal_x * normal_y >= 0.0f ? 1 : -1;
+                }
+                const size_t before = (size_t)(y - step_y) * (size_t)crop_width
+                    + (size_t)(x - step_x);
+                const size_t after = (size_t)(y + step_y) * (size_t)crop_width
+                    + (size_t)(x + step_x);
+                const bool ridge_peak = ridge_strength[index] >= ridge_strength[before]
+                    && ridge_strength[index] >= ridge_strength[after];
+
+                weak_lines[index] = ridge_peak
+                    && ridge_strength[index] >= edge_threshold * 0.26f ? 1u : 0u;
+                strong_lines[index] = ridge_peak
+                    && ridge_strength[index] >= edge_threshold * 0.48f ? 1u : 0u;
+            }
+        }
+
+        std::vector<unsigned char> line_mask(crop_pixels, 0u);
+        std::deque<size_t> line_queue;
+        for (size_t index = 0; index < crop_pixels; ++index)
+        {
+            if (strong_lines[index] == 0u)
+                continue;
+            line_mask[index] = 1u;
+            line_queue.push_back(index);
+        }
+        while (!line_queue.empty())
+        {
+            const size_t index = line_queue.front();
+            line_queue.pop_front();
+            const int x = (int)(index % (size_t)crop_width);
+            const int y = (int)(index / (size_t)crop_width);
+            for (int oy = -1; oy <= 1; ++oy)
+            {
+                for (int ox = -1; ox <= 1; ++ox)
+                {
+                    if ((ox == 0 && oy == 0) || x + ox < 0 || x + ox >= crop_width
+                        || y + oy < 0 || y + oy >= crop_height)
+                    {
+                        continue;
+                    }
+                    const size_t neighbor = (size_t)(y + oy) * (size_t)crop_width
+                        + (size_t)(x + ox);
+                    if (weak_lines[neighbor] != 0u && line_mask[neighbor] == 0u)
+                    {
+                        line_mask[neighbor] = 1u;
+                        line_queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+
+        std::vector<unsigned char> separated_lines = line_mask;
+        for (int y = 1; y + 1 < crop_height; ++y)
+        {
+            for (int x = 1; x + 1 < crop_width; ++x)
+            {
+                const size_t index = (size_t)y * (size_t)crop_width + (size_t)x;
+                if (line_mask[index] == 0u)
+                    continue;
+                int neighbor_count = 0;
+                for (int oy = -1; oy <= 1; ++oy)
+                {
+                    for (int ox = -1; ox <= 1; ++ox)
+                    {
+                        if (ox != 0 || oy != 0)
+                        {
+                            const size_t neighbor =
+                                (size_t)(y + oy) * (size_t)crop_width + (size_t)(x + ox);
+                            neighbor_count += line_mask[neighbor] != 0u ? 1 : 0;
+                        }
+                    }
+                }
+                if (neighbor_count >= 4)
+                    separated_lines[index] = 0u;
+            }
+        }
+        line_mask = std::move(separated_lines);
+
+        std::vector<unsigned char> visited(crop_pixels, 0u);
+        const int minimum_line_pixels = std::max(12, contour_radius * 2);
+        for (size_t seed = 0; seed < crop_pixels; ++seed)
+        {
+            if (line_mask[seed] == 0u || visited[seed] != 0u)
+                continue;
+            std::vector<size_t> component;
+            line_queue.push_back(seed);
+            visited[seed] = 1u;
+            while (!line_queue.empty())
+            {
+                const size_t index = line_queue.front();
+                line_queue.pop_front();
+                component.push_back(index);
+                const int x = (int)(index % (size_t)crop_width);
+                const int y = (int)(index / (size_t)crop_width);
+                for (int oy = -1; oy <= 1; ++oy)
+                {
+                    for (int ox = -1; ox <= 1; ++ox)
+                    {
+                        if ((ox == 0 && oy == 0) || x + ox < 0 || x + ox >= crop_width
+                            || y + oy < 0 || y + oy >= crop_height)
+                        {
+                            continue;
+                        }
+                        const size_t neighbor = (size_t)(y + oy) * (size_t)crop_width
+                            + (size_t)(x + ox);
+                        if (line_mask[neighbor] != 0u && visited[neighbor] == 0u)
+                        {
+                            visited[neighbor] = 1u;
+                            line_queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+            int component_min_x = crop_width;
+            int component_min_y = crop_height;
+            int component_max_x = -1;
+            int component_max_y = -1;
+            int endpoint_count = 0;
+            for (size_t index : component)
+            {
+                const int x = (int)(index % (size_t)crop_width);
+                const int y = (int)(index / (size_t)crop_width);
+                component_min_x = std::min(component_min_x, x);
+                component_min_y = std::min(component_min_y, y);
+                component_max_x = std::max(component_max_x, x);
+                component_max_y = std::max(component_max_y, y);
+                int neighbor_count = 0;
+                for (int oy = -1; oy <= 1; ++oy)
+                {
+                    for (int ox = -1; ox <= 1; ++ox)
+                    {
+                        if ((ox == 0 && oy == 0) || x + ox < 0 || x + ox >= crop_width
+                            || y + oy < 0 || y + oy >= crop_height)
+                        {
+                            continue;
+                        }
+                        const size_t neighbor = (size_t)(y + oy) * (size_t)crop_width
+                            + (size_t)(x + ox);
+                        neighbor_count += line_mask[neighbor] != 0u ? 1 : 0;
+                    }
+                }
+                endpoint_count += neighbor_count <= 1 ? 1 : 0;
+            }
+            const int component_span = std::max(
+                component_max_x - component_min_x + 1,
+                component_max_y - component_min_y + 1);
+            if ((int)component.size() < minimum_line_pixels
+                || component_span < minimum_line_pixels
+                || endpoint_count == 0
+                || endpoint_count > 4)
+            {
+                for (size_t index : component)
+                    line_mask[index] = 0u;
+            }
         }
         if (line_gap_radius > 0)
             line_mask = morph(morph(line_mask, line_gap_radius, true), line_gap_radius, false);
+        const int wrinkle_radius =
+            std::max(0, (int)std::floor(wrinkle_width * 0.5f));
+        if (wrinkle_radius > 0)
+        {
+            std::vector<int> endpoint_distance(crop_pixels, far_distance);
+            for (int y = 1; y + 1 < crop_height; ++y)
+            {
+                for (int x = 1; x + 1 < crop_width; ++x)
+                {
+                    const size_t index = (size_t)y * (size_t)crop_width + (size_t)x;
+                    if (line_mask[index] == 0u)
+                        continue;
+                    int neighbor_count = 0;
+                    for (int oy = -1; oy <= 1; ++oy)
+                    {
+                        for (int ox = -1; ox <= 1; ++ox)
+                        {
+                            if (ox != 0 || oy != 0)
+                            {
+                                const size_t neighbor =
+                                    (size_t)(y + oy) * (size_t)crop_width + (size_t)(x + ox);
+                                neighbor_count += line_mask[neighbor] != 0u ? 1 : 0;
+                            }
+                        }
+                    }
+                    if (neighbor_count <= 1)
+                    {
+                        endpoint_distance[index] = 0;
+                        line_queue.push_back(index);
+                    }
+                }
+            }
+            while (!line_queue.empty())
+            {
+                const size_t index = line_queue.front();
+                line_queue.pop_front();
+                const int x = (int)(index % (size_t)crop_width);
+                const int y = (int)(index / (size_t)crop_width);
+                for (int oy = -1; oy <= 1; ++oy)
+                {
+                    for (int ox = -1; ox <= 1; ++ox)
+                    {
+                        if ((ox == 0 && oy == 0) || x + ox < 0 || x + ox >= crop_width
+                            || y + oy < 0 || y + oy >= crop_height)
+                        {
+                            continue;
+                        }
+                        const size_t neighbor = (size_t)(y + oy) * (size_t)crop_width
+                            + (size_t)(x + ox);
+                        if (line_mask[neighbor] != 0u
+                            && endpoint_distance[neighbor] > endpoint_distance[index] + 1)
+                        {
+                            endpoint_distance[neighbor] = endpoint_distance[index] + 1;
+                            line_queue.push_back(neighbor);
+                        }
+                    }
+                }
+            }
+
+            std::vector<unsigned char> expanded_lines = line_mask;
+            for (int y = 0; y < crop_height; ++y)
+            {
+                for (int x = 0; x < crop_width; ++x)
+                {
+                    const size_t index = (size_t)y * (size_t)crop_width + (size_t)x;
+                    if (line_mask[index] == 0u)
+                        continue;
+                    const int radius = std::min(
+                        wrinkle_radius,
+                        endpoint_distance[index] == far_distance
+                            ? wrinkle_radius
+                            : endpoint_distance[index] / 2);
+                    for (int oy = -radius; oy <= radius; ++oy)
+                    {
+                        for (int ox = -radius; ox <= radius; ++ox)
+                        {
+                            if (ox * ox + oy * oy > radius * radius
+                                || x + ox < 0 || x + ox >= crop_width
+                                || y + oy < 0 || y + oy >= crop_height)
+                            {
+                                continue;
+                            }
+                            const size_t neighbor = (size_t)(y + oy) * (size_t)crop_width
+                                + (size_t)(x + ox);
+                            if (mask[neighbor] != 0u)
+                                expanded_lines[neighbor] = 1u;
+                        }
+                    }
+                }
+            }
+            line_mask = std::move(expanded_lines);
+        }
+        for (size_t index = 0; index < crop_pixels; ++index)
+        {
+            if (distance[index] <= contour_exclusion)
+                line_mask[index] = 0u;
+        }
 
         for (int y = 0; y < crop_height; ++y)
         {
@@ -392,33 +787,43 @@ namespace poseweaver::ui_canva
                     outline_width > 0.0f && (float)distance[pixel_index] <= outline_width;
                 if (outline || line_mask[pixel_index] != 0u)
                 {
-                    output[0] = 0u;
-                    output[1] = 0u;
-                    output[2] = 0u;
+                    output[0] = line_rgb[0];
+                    output[1] = line_rgb[1];
+                    output[2] = line_rgb[2];
+                }
+                else if (method == 2)
+                {
+                    output[0] = 255u;
+                    output[1] = 255u;
+                    output[2] = 255u;
                 }
                 else
                 {
-                    size_t selected_tone = 0;
-                    float selected_distance = std::numeric_limits<float>::max();
-                    for (size_t tone = 0; tone < palette.size(); ++tone)
+                    float tone = 1.0f;
+                    const float source_tone = filtered_intensity[pixel_index];
+                    if (method == 0)
                     {
-                        float color_distance = 0.0f;
-                        for (int channel = 0; channel < 3; ++channel)
-                        {
-                            const float delta =
-                                filtered_rgb[pixel_index * 3u + (size_t)channel]
-                                - (float)palette[tone][(size_t)channel];
-                            color_distance += delta * delta;
-                        }
-                        if (color_distance < selected_distance)
-                        {
-                            selected_distance = color_distance;
-                            selected_tone = tone;
-                        }
+                        if (source_tone < shadow_threshold - 0.08f)
+                            tone = 1.0f - shadow_strength;
+                        else if (source_tone < shadow_threshold + 0.06f)
+                            tone = 1.0f - shadow_strength * 0.52f;
                     }
-                    output[0] = palette[selected_tone][0];
-                    output[1] = palette[selected_tone][1];
-                    output[2] = palette[selected_tone][2];
+                    else
+                    {
+                        const float feather = 0.015f + softness * 0.12f;
+                        float transition = std::clamp(
+                            (source_tone - (shadow_threshold - feather)) / (2.0f * feather),
+                            0.0f,
+                            1.0f);
+                        transition = transition * transition * (3.0f - 2.0f * transition);
+                        transition = std::round(transition * 3.0f) / 3.0f;
+                        tone = 1.0f - shadow_strength * (1.0f - transition);
+                    }
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        output[channel] = (unsigned char)std::lround(
+                            std::clamp(base_rgb[(size_t)channel] * tone, 0.0f, 255.0f));
+                    }
                 }
                 output[3] = 255u;
             }
@@ -428,6 +833,127 @@ namespace poseweaver::ui_canva
         destination.bounds_dirty = true;
         return true;
     }
+
+    bool canva_has_cloth_refit_maps(const CanvaState& canva)
+    {
+        const size_t pixel_count = (size_t)canva.width * (size_t)canva.height;
+        const int visibility_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_visibility_layer_id);
+        return canva.cloth_refit_map_width == canva.width
+            && canva.cloth_refit_map_height == canva.height
+            && visibility_index >= 0
+            && canva_layer_is_visibility_map(canva.layers[(size_t)visibility_index])
+            && canva.layers[(size_t)visibility_index].pixels.size() >= pixel_count * 4u
+            && canva.cloth_refit_deformation_source_x.size() >= pixel_count
+            && canva.cloth_refit_deformation_source_y.size() >= pixel_count;
+    }
+
+    bool canva_refit_cloth_with_cached_maps(
+        AppState& state,
+        CanvaState& canva,
+        Renderer& renderer,
+        const CanvaLayer& source_layer,
+        std::string* out_error)
+    {
+        if (!canva_has_cloth_refit_maps(canva))
+        {
+            if (out_error)
+                *out_error = "saved fitting maps are unavailable";
+            return false;
+        }
+        if (!canva_layer_is_generated_cloth(source_layer))
+        {
+            if (out_error)
+                *out_error = "rendered source is not a cloth layer";
+            return false;
+        }
+
+        std::vector<unsigned char> warped_cloth;
+        std::vector<unsigned char> warped_occluded_cloth;
+        const int visibility_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_visibility_layer_id);
+        const CanvaLayer& visibility_layer = canva.layers[(size_t)visibility_index];
+        if (!renderer.refit_cloth_render_with_maps(
+                source_layer.pixels,
+                canva.width,
+                canva.height,
+                visibility_layer.pixels,
+                canva.cloth_refit_deformation_source_x,
+                canva.cloth_refit_deformation_source_y,
+                warped_cloth,
+                warped_occluded_cloth,
+                out_error))
+        {
+            return false;
+        }
+
+        const int source_layer_id = source_layer.id;
+        const ImVec2 source_offset = source_layer.offset;
+        const float source_scale = source_layer.scale;
+        CanvaLayer warped_layer = canva_make_layer(
+            canva.width,
+            canva.height,
+            canva.next_layer_id++,
+            "Refitted cloth");
+        const int warped_layer_id = warped_layer.id;
+        warped_layer.kind = CanvaLayerKind::ClothFittingWarped;
+        warped_layer.pixels = std::move(warped_occluded_cloth);
+        warped_layer.offset = source_offset;
+        warped_layer.scale = source_scale;
+        warped_layer.enabled = false;
+        warped_layer.dirty = true;
+        warped_layer.bounds_dirty = true;
+
+        CanvaLayer stylized_layer = canva_make_layer(
+            canva.width,
+            canva.height,
+            canva.next_layer_id++,
+            "Stylized cloth (refit)");
+        const int stylized_layer_id = stylized_layer.id;
+        stylized_layer.kind = CanvaLayerKind::ClothFittingWarpedSmoothed;
+        stylized_layer.offset = source_offset;
+        stylized_layer.scale = source_scale;
+        stylized_layer.smoothing_source_layer_id = warped_layer_id;
+        stylized_layer.stylization_method = state.cloth_stylization_method;
+        stylized_layer.stylization_outline_width = state.cloth_stylization_outline_width;
+        stylized_layer.stylization_wrinkle_width = state.cloth_stylization_wrinkle_width;
+        stylized_layer.stylization_edge_threshold = state.cloth_stylization_edge_threshold;
+        stylized_layer.stylization_shadow_threshold = state.cloth_stylization_shadow_threshold;
+        stylized_layer.stylization_shadow_strength = state.cloth_stylization_shadow_strength;
+        stylized_layer.stylization_softness = state.cloth_stylization_softness;
+        stylized_layer.stylization_contour_radius = state.cloth_stylization_contour_radius;
+        stylized_layer.stylization_line_gap_radius = state.cloth_stylization_line_gap_radius;
+        stylized_layer.stylization_cloth_color = state.cloth_ink_color;
+        stylized_layer.stylization_line_color = state.cloth_stylization_line_color;
+        if (!canva_stylize_warped_cloth_layer(
+                warped_layer,
+                stylized_layer,
+                canva.width,
+                canva.height,
+                out_error))
+        {
+            canva_delete_layer_texture(warped_layer);
+            canva_delete_layer_texture(stylized_layer);
+            return false;
+        }
+
+        canva.layers.insert(canva.layers.begin(), std::move(warped_layer));
+        canva.layers.insert(canva.layers.begin(), std::move(stylized_layer));
+        for (CanvaLayer& layer : canva.layers)
+        {
+            if (layer.id == source_layer_id)
+            {
+                layer.enabled = false;
+                break;
+            }
+        }
+        canva.active_layer = canva_find_layer_index_by_id(canva, stylized_layer_id);
+        canva_cancel_interactions(canva);
+        return true;
+    }
+
     static bool canva_add_cloth_fitting_layers(
         CanvaState& canva,
         const CanvaLayer& source_layer,
@@ -445,13 +971,15 @@ namespace poseweaver::ui_canva
                 *out_error = std::string(label) + " pixel buffer is too small";
             return false;
         };
-        if (!require_pixels(fitting.occluded_cloth, "occluded cloth")
+        if (!require_pixels(fitting.dumb_render, "dumb render")
+            || !require_pixels(fitting.occluded_cloth, "occluded cloth")
             || !require_pixels(fitting.warped_cloth, "warped cloth")
             || !require_pixels(fitting.warped_occluded_cloth, "warped occluded cloth")
             || !require_pixels(fitting.raw_iso_matching, "raw ISO matching")
             || !require_pixels(fitting.filtered_iso_matching, "filtered ISO matching")
             || !require_pixels(fitting.predicted_depth_visibility, "predicted-depth visibility")
             || !require_pixels(fitting.true_depth_visibility, "true-depth visibility")
+            || !require_pixels(fitting.corrected_true_depth_visibility, "corrected true-depth visibility")
             || !require_pixels(fitting.iso_visibility, "ISO visibility")
             || !require_pixels(fitting.raw_final_occlusion, "raw final occlusion")
             || !require_pixels(fitting.filtered_final_occlusion, "filtered final occlusion"))
@@ -485,18 +1013,24 @@ namespace poseweaver::ui_canva
             canva.width,
             canva.height,
             canva.next_layer_id++,
-            "Smooth result");
+            "Stylized cloth");
         const int smoothed_layer_id = smoothed_layer.id;
         smoothed_layer.kind = CanvaLayerKind::ClothFittingWarpedSmoothed;
         smoothed_layer.offset = source_offset;
         smoothed_layer.scale = source_scale;
         smoothed_layer.smoothing_source_layer_id = warped_occluded_layer_id;
-        smoothed_layer.smoothing_filter_strength = state.cloth_smoothing_filter_strength;
-        smoothed_layer.smoothing_inner_line_width = state.cloth_smoothing_inner_line_width;
-        smoothed_layer.smoothing_contour_radius = state.cloth_smoothing_contour_radius;
-        smoothed_layer.smoothing_line_gap_radius = state.cloth_smoothing_line_gap_radius;
-        smoothed_layer.smoothing_cloth_color = state.cloth_ink_color;
-        if (!canva_smooth_warped_cloth_layer(
+        smoothed_layer.stylization_method = state.cloth_stylization_method;
+        smoothed_layer.stylization_outline_width = state.cloth_stylization_outline_width;
+        smoothed_layer.stylization_wrinkle_width = state.cloth_stylization_wrinkle_width;
+        smoothed_layer.stylization_edge_threshold = state.cloth_stylization_edge_threshold;
+        smoothed_layer.stylization_shadow_threshold = state.cloth_stylization_shadow_threshold;
+        smoothed_layer.stylization_shadow_strength = state.cloth_stylization_shadow_strength;
+        smoothed_layer.stylization_softness = state.cloth_stylization_softness;
+        smoothed_layer.stylization_contour_radius = state.cloth_stylization_contour_radius;
+        smoothed_layer.stylization_line_gap_radius = state.cloth_stylization_line_gap_radius;
+        smoothed_layer.stylization_cloth_color = state.cloth_ink_color;
+        smoothed_layer.stylization_line_color = state.cloth_stylization_line_color;
+        if (!canva_stylize_warped_cloth_layer(
                 warped_occluded_layer,
                 smoothed_layer,
                 canva.width,
@@ -547,17 +1081,75 @@ namespace poseweaver::ui_canva
                 layer.dirty = true;
                 layer.bounds_dirty = true;
                 const auto insert_pos = canva.layers.begin() + std::min<int>(1, (int)canva.layers.size());
+                const int layer_id = layer.id;
                 canva.layers.insert(insert_pos, std::move(layer));
+                return layer_id;
             };
+
+            CanvaLayer dumb_render_layer = canva_make_layer(
+                canva.width,
+                canva.height,
+                canva.next_layer_id++,
+                "dumb render");
+            dumb_render_layer.kind = CanvaLayerKind::ClothFittingDebug;
+            dumb_render_layer.pixels = std::move(fitting.dumb_render);
+            dumb_render_layer.offset = source_offset;
+            dumb_render_layer.scale = source_scale;
+            dumb_render_layer.enabled = false;
+            dumb_render_layer.dirty = true;
+            dumb_render_layer.bounds_dirty = true;
+
+            CanvaLayer dumb_smoothed_layer = canva_make_layer(
+                canva.width,
+                canva.height,
+                canva.next_layer_id++,
+                "dumb layer smoothed");
+            dumb_smoothed_layer.kind = CanvaLayerKind::ClothFittingDebug;
+            dumb_smoothed_layer.offset = source_offset;
+            dumb_smoothed_layer.scale = source_scale;
+            dumb_smoothed_layer.enabled = false;
+            dumb_smoothed_layer.stylization_method = state.cloth_stylization_method;
+            dumb_smoothed_layer.stylization_outline_width = state.cloth_stylization_outline_width;
+            dumb_smoothed_layer.stylization_wrinkle_width = state.cloth_stylization_wrinkle_width;
+            dumb_smoothed_layer.stylization_edge_threshold = state.cloth_stylization_edge_threshold;
+            dumb_smoothed_layer.stylization_shadow_threshold = state.cloth_stylization_shadow_threshold;
+            dumb_smoothed_layer.stylization_shadow_strength = state.cloth_stylization_shadow_strength;
+            dumb_smoothed_layer.stylization_softness = state.cloth_stylization_softness;
+            dumb_smoothed_layer.stylization_contour_radius = state.cloth_stylization_contour_radius;
+            dumb_smoothed_layer.stylization_line_gap_radius = state.cloth_stylization_line_gap_radius;
+            dumb_smoothed_layer.stylization_cloth_color = state.cloth_ink_color;
+            dumb_smoothed_layer.stylization_line_color = state.cloth_stylization_line_color;
+            if (!canva_stylize_warped_cloth_layer(
+                    dumb_render_layer,
+                    dumb_smoothed_layer,
+                    canva.width,
+                    canva.height,
+                    out_error))
+            {
+                canva_delete_layer_texture(dumb_render_layer);
+                canva_delete_layer_texture(dumb_smoothed_layer);
+                return false;
+            }
+
+            const auto dumb_insert_pos =
+                canva.layers.begin() + std::min<int>(1, (int)canva.layers.size());
+            canva.layers.insert(dumb_insert_pos, std::move(dumb_render_layer));
+            const auto dumb_smoothed_insert_pos =
+                canva.layers.begin() + std::min<int>(1, (int)canva.layers.size());
+            canva.layers.insert(dumb_smoothed_insert_pos, std::move(dumb_smoothed_layer));
 
             add_hidden_layer(raw_cloth, "Raw cloth", CanvaLayerKind::ClothFitting);
             add_hidden_layer(std::move(fitting.raw_iso_matching), "Raw ISO matching", CanvaLayerKind::ClothFittingDebug);
             add_hidden_layer(std::move(fitting.filtered_iso_matching), "Filtered ISO matching", CanvaLayerKind::ClothFittingDebug);
             add_hidden_layer(std::move(fitting.predicted_depth_visibility), "Pred depth visibility", CanvaLayerKind::ClothFittingAlignedPredictedDepthOcclusionDebug);
             add_hidden_layer(std::move(fitting.true_depth_visibility), "True depth visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
+            add_hidden_layer(std::move(fitting.corrected_true_depth_visibility), "True depth corrected visibility", CanvaLayerKind::ClothFittingSceneOcclusionDebug);
             add_hidden_layer(std::move(fitting.iso_visibility), "ISO matching visibility", CanvaLayerKind::ClothFittingIsoOcclusionDebug);
             add_hidden_layer(std::move(fitting.raw_final_occlusion), "Raw final occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
-            add_hidden_layer(std::move(fitting.filtered_final_occlusion), "Filtered final occlusion", CanvaLayerKind::ClothFittingOcclusionDebug);
+            canva.cloth_refit_visibility_layer_id = add_hidden_layer(
+                std::move(fitting.filtered_final_occlusion),
+                "Filtered final occlusion",
+                CanvaLayerKind::ClothFittingOcclusionDebug);
             for (int i = 0; i < (int)fitting.deformation_steps.size(); ++i)
             {
                 std::ostringstream name;
@@ -667,10 +1259,18 @@ namespace poseweaver::ui_canva
                 fitting,
                 &fit_err))
         {
+            canva.cloth_fitting_renderer_timings = std::move(fitting.timings_seconds);
+            if (canva.cloth_fitting_timing_started)
+                canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::Visibility] =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - renderer_start).count();
             if (out_error)
                 *out_error = fit_err.empty() ? "renderer fitting failed" : fit_err;
             return false;
         }
+        canva.cloth_fitting_renderer_timings = fitting.timings_seconds;
+        if (canva.cloth_fitting_timing_started)
+            canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::Visibility] =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - renderer_start).count();
         if (timing_fitting)
             canva_generate_cloth_append_timed_detail(
                 canva,
@@ -685,6 +1285,8 @@ namespace poseweaver::ui_canva
             && !canva.sequence_waiting_render;
         const int tested_count = fitting.tested_count;
         const int removed_count = fitting.removed_count;
+        std::vector<float> refit_deformation_source_x = std::move(fitting.deformation_source_x);
+        std::vector<float> refit_deformation_source_y = std::move(fitting.deformation_source_y);
         if (!canva_add_cloth_fitting_layers(
                 canva,
                 source,
@@ -693,10 +1295,23 @@ namespace poseweaver::ui_canva
                 include_hidden_output_layers,
                 &add_err))
         {
+            if (canva.cloth_fitting_timing_started)
+                canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::LayerCreation] =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - layer_start).count();
             if (out_error)
                 *out_error = add_err.empty() ? "failed to create output layer" : add_err;
             return false;
         }
+        if (include_hidden_output_layers && canva.cloth_refit_visibility_layer_id != 0)
+        {
+            canva.cloth_refit_map_width = canva.width;
+            canva.cloth_refit_map_height = canva.height;
+            canva.cloth_refit_deformation_source_x = std::move(refit_deformation_source_x);
+            canva.cloth_refit_deformation_source_y = std::move(refit_deformation_source_y);
+        }
+        if (canva.cloth_fitting_timing_started)
+            canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::LayerCreation] =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - layer_start).count();
         if (timing_fitting)
         {
             canva_generate_cloth_append_timed_detail(
@@ -712,7 +1327,7 @@ namespace poseweaver::ui_canva
         }
 
         console_add_line(state,
-            "Canva: cloth fitting added smooth result layer (saved fitting layers, removed="
+            "Canva: cloth fitting added stylized cloth layer (saved fitting layers, removed="
                 + std::to_string(removed_count)
                 + ", tested=" + std::to_string(tested_count) + ")");
         return true;
@@ -754,6 +1369,7 @@ namespace poseweaver::ui_canva
         {
             canva.cloth_fitting_active = false;
             canva.cloth_fitting_status = "Done";
+            canva_finish_cloth_fitting_timings(canva);
             if (canva.sequence_waiting_render || canva.sequence_generating || canva.sequence_cloth_frames.empty())
                 canva_sequence_capture_current_frame(state, canva);
             if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)
@@ -769,6 +1385,7 @@ namespace poseweaver::ui_canva
         {
             canva.cloth_fitting_active = false;
             canva.cloth_fitting_status = "Failed";
+            canva_finish_cloth_fitting_timings(canva);
             if (canva.generate_cloth_timing_started && canva.generate_cloth_include_fitting_steps)
             {
                 canva.generate_cloth_active = false;
@@ -833,6 +1450,7 @@ namespace poseweaver::ui_canva
         canva.cloth_fitting_rig_json_path = rig_json_path;
         canva.cloth_fitting_source_layer_id = source_layer.id;
         canva.cloth_fitting_status = "Depth testing";
+        canva_reset_cloth_fitting_timings(canva);
 
         canva_finish_cloth_fitting_if_ready(state, canva, renderer);
         if (canva.cloth_fitting_status != "Done")

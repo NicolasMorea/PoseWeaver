@@ -80,8 +80,6 @@ namespace poseweaver
 
         double xy_numerator = 0.0;
         double xy_denominator = 0.0;
-        double z_numerator = 0.0;
-        double z_denominator = 0.0;
         for (int i = 0; i < joint_count; ++i)
         {
             const Eigen::Vector3d source = smpl_joints.row(i).transpose() - source_mean;
@@ -89,22 +87,16 @@ namespace poseweaver
             const double weight = weights[i];
             xy_numerator += weight * (source.x() * target.x() + source.y() * target.y());
             xy_denominator += weight * (source.x() * source.x() + source.y() * source.y());
-            z_numerator += weight * source.z() * target.z();
-            z_denominator += weight * source.z() * source.z();
         }
 
         if (!(xy_denominator > 1e-12) || !std::isfinite(xy_denominator))
             return false;
 
-        const double scale_xy = std::clamp(xy_numerator / xy_denominator, 0.05, 20.0);
-        const double scale_z = (z_denominator > 1e-12 && std::isfinite(z_denominator))
-            ? std::clamp(z_numerator / z_denominator, 0.05, 20.0)
-            : scale_xy;
-        if (!std::isfinite(scale_xy) || !std::isfinite(scale_z))
+        const double scale = std::clamp(xy_numerator / xy_denominator, 0.05, 20.0);
+        if (!std::isfinite(scale))
             return false;
 
-        const Eigen::Vector3d scale(scale_xy, scale_xy, scale_z);
-        const Eigen::Vector3d translation = target_mean - scale.cwiseProduct(source_mean);
+        const Eigen::Vector3d translation = target_mean - scale * source_mean;
         if (!translation.allFinite())
             return false;
 
@@ -112,7 +104,7 @@ namespace poseweaver
         for (int i = 0; i < joint_count; ++i)
         {
             const Eigen::Vector3d fitted =
-                scale.cwiseProduct(smpl_joints.row(i).transpose()) + translation;
+                scale * smpl_joints.row(i).transpose() + translation;
             const Eigen::Vector3d delta =
                 fitted - m_sketch2rig_rig_scene_joints.row(i).transpose();
             squared_error += weights[i] * delta.squaredNorm();
@@ -120,9 +112,9 @@ namespace poseweaver
         const double rms = std::sqrt(squared_error / weight_sum);
 
         state.scene_view_smpl_fit_scale = {
-            (float)scale_xy,
-            (float)scale_xy,
-            (float)scale_z
+            (float)scale,
+            (float)scale,
+            (float)scale
         };
         state.scene_view_smpl_fit_translation = {
             (float)translation.x(),

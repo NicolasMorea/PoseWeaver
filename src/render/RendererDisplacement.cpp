@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1254,9 +1255,12 @@ namespace poseweaver
             std::vector<double> nlf_vertices3d;
             std::vector<double> nlf_vertices2d;
             double nlf_vertex_count_d = 0.0;
+            double nlf_image_width_d = 0.0;
             double nlf_image_height_d = 0.0;
             double nlf_image_size_d = 0.0;
             (void)parse_json_number_field_fit(text, "image_size", &nlf_image_size_d);
+            if (!parse_json_number_field_fit(text, "image_width", &nlf_image_width_d))
+                nlf_image_width_d = nlf_image_size_d;
             if (!parse_json_number_field_fit(text, "image_height", &nlf_image_height_d))
                 nlf_image_height_d = nlf_image_size_d;
             if (parse_json_number_array_field_fit(text, "joints3d_flat", &nlf_joints3d)
@@ -1267,54 +1271,67 @@ namespace poseweaver
             {
                 const int vertex_count = std::max(0, (int)std::lround(nlf_vertex_count_d));
                 if (vertex_count > 0
+                    && nlf_image_width_d > 1.0
                     && nlf_image_height_d > 1.0
                     && nlf_vertices3d.size() >= (size_t)vertex_count * 3u
                     && nlf_vertices2d.size() >= (size_t)vertex_count * 2u)
                 {
-                    double sum_p = 0.0;
-                    double sum_q = 0.0;
-                    double sum_pp = 0.0;
-                    double sum_pq = 0.0;
-                    int sample_count = 0;
-                    for (int i = 0; i < vertex_count; ++i)
+                    const auto fit_axis = [&](int coordinate, double& focal, double& principal)
                     {
-                        const size_t k3 = (size_t)i * 3u;
-                        const size_t k2 = (size_t)i * 2u;
-                        const double z = nlf_vertices3d[k3 + 2u];
-                        if (!(z > 1e-9) || !std::isfinite(z))
-                            continue;
-                        const double p = nlf_vertices3d[k3 + 1u] / z;
-                        const double q = nlf_vertices2d[k2 + 1u];
-                        if (!std::isfinite(p) || !std::isfinite(q))
-                            continue;
-                        sum_p += p;
-                        sum_q += q;
-                        sum_pp += p * p;
-                        sum_pq += p * q;
-                        ++sample_count;
-                    }
-                    const double denom = sum_pp - (sum_p * sum_p) / std::max(1, sample_count);
-                    if (sample_count >= 3 && std::abs(denom) > 1e-12 && std::isfinite(denom))
-                    {
-                        const double focal_y =
-                            (sum_pq - (sum_p * sum_q) / (double)sample_count) / denom;
-                        if (focal_y > 1e-6 && std::isfinite(focal_y))
+                        double sum_p = 0.0;
+                        double sum_q = 0.0;
+                        double sum_pp = 0.0;
+                        double sum_pq = 0.0;
+                        int sample_count = 0;
+                        for (int i = 0; i < vertex_count; ++i)
                         {
-                            const Eigen::Vector3f eye(
-                                (float)(-nlf_joints3d[0] / 1000.0),
-                                (float)(nlf_joints3d[1] / 1000.0),
-                                (float)(nlf_joints3d[2] / 1000.0));
-                            if (eye.allFinite())
-                            {
-                                igl::look_at(
-                                    eye,
-                                    eye + Eigen::Vector3f(0.0f, 0.0f, -1.0f),
-                                    Eigen::Vector3f(0.0f, 1.0f, 0.0f),
-                                    view);
-                                const float f_h = (float)(0.5 * nlf_image_height_d / focal_y) * dnear;
-                                igl::frustum(-f_h, f_h, -f_h, f_h, dnear, dfar, proj);
-                                return true;
-                            }
+                            const size_t k3 = (size_t)i * 3u;
+                            const size_t k2 = (size_t)i * 2u;
+                            const double z = nlf_vertices3d[k3 + 2u];
+                            if (!(z > 1e-9) || !std::isfinite(z))
+                                continue;
+                            const double p = nlf_vertices3d[k3 + (size_t)coordinate] / z;
+                            const double q = nlf_vertices2d[k2 + (size_t)coordinate];
+                            if (!std::isfinite(p) || !std::isfinite(q))
+                                continue;
+                            sum_p += p;
+                            sum_q += q;
+                            sum_pp += p * p;
+                            sum_pq += p * q;
+                            ++sample_count;
+                        }
+                        const double denom = sum_pp - (sum_p * sum_p) / std::max(1, sample_count);
+                        if (sample_count < 3 || std::abs(denom) <= 1e-12 || !std::isfinite(denom))
+                            return false;
+                        focal = (sum_pq - (sum_p * sum_q) / (double)sample_count) / denom;
+                        principal = (sum_q - focal * sum_p) / (double)sample_count;
+                        return focal > 1e-6 && std::isfinite(focal) && std::isfinite(principal);
+                    };
+
+                    double focal_x = 0.0;
+                    double principal_x = 0.0;
+                    double focal_y = 0.0;
+                    double principal_y = 0.0;
+                    if (fit_axis(0, focal_x, principal_x)
+                        && fit_axis(1, focal_y, principal_y))
+                    {
+                        const Eigen::Vector3f eye(
+                            (float)(-nlf_joints3d[0] / 1000.0),
+                            (float)(nlf_joints3d[1] / 1000.0),
+                            (float)(nlf_joints3d[2] / 1000.0));
+                        if (eye.allFinite())
+                        {
+                            igl::look_at(
+                                eye,
+                                eye + Eigen::Vector3f(0.0f, 0.0f, -1.0f),
+                                Eigen::Vector3f(0.0f, 1.0f, 0.0f),
+                                view);
+                            const float left = (float)(-principal_x / focal_x) * dnear;
+                            const float right = (float)((nlf_image_width_d - principal_x) / focal_x) * dnear;
+                            const float bottom = (float)((principal_y - nlf_image_height_d) / focal_y) * dnear;
+                            const float top = (float)(principal_y / focal_y) * dnear;
+                            igl::frustum(left, right, bottom, top, dnear, dfar, proj);
+                            return true;
                         }
                     }
                 }
@@ -2343,11 +2360,14 @@ namespace poseweaver
         ClothFittingLayers& out_layers,
         std::string* out_error)
     {
+        auto& out_dumb_render_rgba = out_layers.dumb_render;
         auto& out_rgba = out_layers.occluded_cloth;
         auto& out_warped_rgba = out_layers.warped_occluded_cloth;
         auto& out_unfiltered_debug_rgba = out_layers.raw_iso_matching;
         auto& out_debug_rgba = out_layers.filtered_iso_matching;
         auto& out_scene_occlusion_rgba = out_layers.true_depth_visibility;
+        auto& out_corrected_scene_occlusion_rgba =
+            out_layers.corrected_true_depth_visibility;
         auto& out_aligned_predicted_depth_occlusion_rgba =
             out_layers.predicted_depth_visibility;
         auto& out_iso_occlusion_rgba = out_layers.iso_visibility;
@@ -2360,6 +2380,7 @@ namespace poseweaver
         std::vector<unsigned char> out_deformation_rgba;
 
         out_layers = ClothFittingLayers{};
+        out_dumb_render_rgba.clear();
         out_rgba.clear();
         out_layers.warped_cloth.clear();
         out_warped_rgba.clear();
@@ -2368,6 +2389,7 @@ namespace poseweaver
         out_unfiltered_occlusion_rgba.clear();
         out_occlusion_rgba.clear();
         out_scene_occlusion_rgba.clear();
+        out_corrected_scene_occlusion_rgba.clear();
         out_aligned_predicted_depth_occlusion_rgba.clear();
         out_iso_occlusion_rgba.clear();
         out_scene_debug_rgba.clear();
@@ -2375,6 +2397,15 @@ namespace poseweaver
         out_deformation_steps_rgba.clear();
         out_tested_count = 0;
         out_removed_count = 0;
+        const auto timing_start = std::chrono::steady_clock::now();
+        auto stage_start = timing_start;
+        const auto finish_stage = [&](const char* name)
+        {
+            out_layers.timings_seconds.emplace_back(
+                name,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count());
+            stage_start = std::chrono::steady_clock::now();
+        };
 
         auto fail = [&](const std::string& msg)
         {
@@ -2448,6 +2479,7 @@ namespace poseweaver
         if (!used_rig_camera
             && !make_target_camera_matrices(state, core_ref.camera_dnear, core_ref.camera_dfar, view, proj))
             return fail("could not build predicted camera matrices");
+        finish_stage("Input loading and setup");
 
         GLint old_framebuffer = 0;
         GLint old_viewport[4] = { 0, 0, 0, 0 };
@@ -2602,11 +2634,13 @@ namespace poseweaver
         glDeleteRenderbuffers(1, &depth);
         glDeleteTextures(1, &color);
         glDeleteFramebuffers(1, &fbo);
+        finish_stage("True-depth scene render");
 
         out_rgba = cloth_rgba;
         out_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_scene_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
+        out_corrected_scene_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_aligned_predicted_depth_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_iso_occlusion_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
         out_scene_debug_rgba.assign((size_t)width * (size_t)height * 4u, 0u);
@@ -2671,18 +2705,42 @@ namespace poseweaver
 
         RunningDepthStats predicted_stats;
         RunningDepthStats body_model_stats;
+        struct PairedDepthSample
+        {
+            float predicted = 0.0f;
+            float body_model = 0.0f;
+        };
+        std::vector<PairedDepthSample> paired_depth_samples;
+        const int alignment_sample_stride = std::max(1, std::min(width, height) / 512);
+        paired_depth_samples.reserve(
+            (size_t)((width + alignment_sample_stride - 1) / alignment_sample_stride)
+                * (size_t)((height + alignment_sample_stride - 1) / alignment_sample_stride));
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
             {
                 float predicted_distance = 0.0f;
-                if (predicted_body_distance_at(x, y, predicted_distance))
+                const bool have_predicted_depth =
+                    predicted_body_distance_at(x, y, predicted_distance);
+                if (have_predicted_depth)
                     predicted_stats.add(predicted_distance);
 
                 const size_t depth_idx =
                     (size_t)(height - 1 - y) * (size_t)width + (size_t)x;
                 if (smpl_depth_gl[depth_idx] < 0.999999f)
-                    body_model_stats.add(camera_distance_from_depth01(proj, smpl_depth_gl[depth_idx]));
+                {
+                    const float body_model_distance =
+                        camera_distance_from_depth01(proj, smpl_depth_gl[depth_idx]);
+                    body_model_stats.add(body_model_distance);
+                    if (have_predicted_depth
+                        && x % alignment_sample_stride == 0
+                        && y % alignment_sample_stride == 0
+                        && std::isfinite(body_model_distance))
+                    {
+                        paired_depth_samples.push_back(
+                            { predicted_distance, body_model_distance });
+                    }
+                }
             }
         }
 
@@ -2691,12 +2749,110 @@ namespace poseweaver
         const float body_model_mean = body_model_stats.mean();
         const float body_model_stddev = body_model_stats.standard_deviation();
         const bool have_alignment_stats = predicted_stats.count > 0 && body_model_stats.count > 0;
-        const float aligned_depth_scale = have_alignment_stats && predicted_stddev > 1e-6f
+        float aligned_depth_scale = have_alignment_stats && predicted_stddev > 1e-6f
             ? body_model_stddev / predicted_stddev
             : 1.0f;
-        const float aligned_depth_translation = have_alignment_stats
+        float aligned_depth_translation = have_alignment_stats
             ? body_model_mean - aligned_depth_scale * predicted_mean
             : 0.0f;
+        std::string depth_alignment_method = "global mean/std fallback";
+        float paired_depth_correlation = 0.0f;
+
+        if (paired_depth_samples.size() >= 64u)
+        {
+            std::vector<float> predicted_overlap;
+            std::vector<float> body_model_overlap;
+            predicted_overlap.reserve(paired_depth_samples.size());
+            body_model_overlap.reserve(paired_depth_samples.size());
+
+            double predicted_sum = 0.0;
+            double body_model_sum = 0.0;
+            for (const PairedDepthSample& sample : paired_depth_samples)
+            {
+                predicted_overlap.push_back(sample.predicted);
+                body_model_overlap.push_back(sample.body_model);
+                predicted_sum += sample.predicted;
+                body_model_sum += sample.body_model;
+            }
+
+            const double predicted_overlap_mean =
+                predicted_sum / (double)paired_depth_samples.size();
+            const double body_model_overlap_mean =
+                body_model_sum / (double)paired_depth_samples.size();
+            double covariance = 0.0;
+            double predicted_variance = 0.0;
+            double body_model_variance = 0.0;
+            for (const PairedDepthSample& sample : paired_depth_samples)
+            {
+                const double predicted_delta =
+                    (double)sample.predicted - predicted_overlap_mean;
+                const double body_model_delta =
+                    (double)sample.body_model - body_model_overlap_mean;
+                covariance += predicted_delta * body_model_delta;
+                predicted_variance += predicted_delta * predicted_delta;
+                body_model_variance += body_model_delta * body_model_delta;
+            }
+            const double correlation_denominator =
+                std::sqrt(predicted_variance * body_model_variance);
+            if (correlation_denominator > 1e-12)
+            {
+                paired_depth_correlation = (float)std::clamp(
+                    covariance / correlation_denominator,
+                    -1.0,
+                    1.0);
+            }
+
+            std::sort(predicted_overlap.begin(), predicted_overlap.end());
+            std::sort(body_model_overlap.begin(), body_model_overlap.end());
+            const auto sorted_percentile = [](const std::vector<float>& values, float q)
+            {
+                if (values.empty())
+                    return 0.0f;
+                const float position = std::clamp(q, 0.0f, 1.0f)
+                    * (float)(values.size() - 1u);
+                const size_t lower = (size_t)std::floor(position);
+                const size_t upper = std::min(lower + 1u, values.size() - 1u);
+                const float t = position - (float)lower;
+                return values[lower] * (1.0f - t) + values[upper] * t;
+            };
+
+            const float predicted_low = sorted_percentile(predicted_overlap, 0.1f);
+            const float predicted_high = sorted_percentile(predicted_overlap, 0.9f);
+            const float body_model_low = sorted_percentile(body_model_overlap, 0.1f);
+            const float body_model_high = sorted_percentile(body_model_overlap, 0.9f);
+            const float predicted_span = predicted_high - predicted_low;
+            const float body_model_span = body_model_high - body_model_low;
+            const float paired_scale = body_model_span / std::max(1e-6f, predicted_span);
+
+            if (paired_depth_correlation > 0.0f
+                && predicted_span > 1e-5f
+                && body_model_span > 1e-5f
+                && paired_scale > 0.01f
+                && paired_scale < 100.0f
+                && std::isfinite(paired_scale))
+            {
+                std::vector<float> paired_residuals;
+                paired_residuals.reserve(paired_depth_samples.size());
+                for (const PairedDepthSample& sample : paired_depth_samples)
+                {
+                    paired_residuals.push_back(
+                        sample.body_model - paired_scale * sample.predicted);
+                }
+                const size_t median_index = paired_residuals.size() / 2u;
+                std::nth_element(
+                    paired_residuals.begin(),
+                    paired_residuals.begin() + (std::ptrdiff_t)median_index,
+                    paired_residuals.end());
+                const float paired_translation = paired_residuals[median_index];
+                if (std::isfinite(paired_translation))
+                {
+                    aligned_depth_scale = paired_scale;
+                    aligned_depth_translation = paired_translation;
+                    depth_alignment_method = "overlap p10/p90 + paired median";
+                }
+            }
+        }
+        finish_stage("Predicted-depth alignment");
 
         auto set_visibility_pixel = [](std::vector<unsigned char>& rgba, size_t pixel, bool occluded)
         {
@@ -2873,14 +3029,25 @@ namespace poseweaver
                 set_visibility_pixel(out_scene_occlusion_rgba, pixel, true);
         }
 
+        out_dumb_render_rgba = cloth_rgba;
+        for (size_t pixel = 0; pixel < visibility_pixel_count; ++pixel)
+        {
+            if (rgba_is_color(out_scene_occlusion_rgba, pixel, 255u, 48u, 48u))
+                out_dumb_render_rgba[pixel * 4u + 3u] = 0u;
+        }
+
         console_add_line(
             state,
-            "Cloth fitting predicted-depth alignment: scale=" + std::to_string(aligned_depth_scale)
+            "Cloth fitting predicted-depth alignment: method=" + depth_alignment_method
+                + ", scale=" + std::to_string(aligned_depth_scale)
                 + ", translation=" + std::to_string(aligned_depth_translation)
+                + ", overlap pairs=" + std::to_string(paired_depth_samples.size())
+                + ", correlation=" + std::to_string(paired_depth_correlation)
                 + ", predicted(mean/std)=" + std::to_string(predicted_mean)
                 + "/" + std::to_string(predicted_stddev)
                 + ", body(mean/std)=" + std::to_string(body_model_mean)
                 + "/" + std::to_string(body_model_stddev));
+        finish_stage("True and predicted depth visibility");
 
         std::vector<float> cloth_depth_cpu;
         std::vector<float> cloth_second_depth_cpu;
@@ -3058,14 +3225,13 @@ namespace poseweaver
             dst[2] = b;
             dst[3] = 255u;
         };
-        // Cloth fitting debug colors:
-        // grey=no ISO, blue=ISO miss, cyan=projection miss,
-        // black=ISO pixel outside source cloth with no cloth over match,
-        // dark grey=ISO pixel outside source cloth with cloth over match,
-        // red=no cloth, orange=visible SMPL surface occludes cloth,
-        // crimson=legacy ambiguous-body-layer case (accepted but no longer emitted),
-        // green=cloth on match, yellow=cloth over other SMPL, magenta=two cloth layers,
-        // purple=two cloth layers over another SMPL layer.
+        for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel)
+        {
+            if (cloth_rgba[pixel * 4u + 3u] != 0u)
+                set_debug_pixel(pixel, 32u, 220u, 80u);
+        }
+        // ISO matching is a binary cloth decision: orange where the matched,
+        // projected body surface occludes the cloth and green everywhere else.
         const float iso_distance_threshold = std::max(0.0f, state.iso_distance_threshold);
         const size_t body_vertex_count = (size_t)smpl_vertices_for_iso.rows();
         std::vector<float> body_vertex_screen_x(
@@ -3140,6 +3306,88 @@ namespace poseweaver
             height,
             nearest_projected_body_x,
             nearest_projected_body_y);
+
+        double direct_projection_cost = 0.0;
+        double mirrored_projection_cost = 0.0;
+        size_t projection_sample_count = 0u;
+        const int projection_sample_stride =
+            std::max(1, std::min(width, height) / 64);
+        const float maximum_projection_error_squared =
+            0.25f * (float)std::min(width, height) * (float)std::min(width, height);
+        for (int y = projection_sample_stride / 2;
+             y < height;
+             y += projection_sample_stride)
+        {
+            const float prediction_y =
+                prediction_from_cloth_scale * ((float)y + 0.5f) + prediction_from_cloth_offset_y;
+            if (prediction_y < 0.0f || prediction_y >= (float)height)
+                continue;
+            const int iso_y = std::clamp(
+                (int)std::floor(prediction_y / (float)height * (float)iso_h),
+                0,
+                iso_h - 1);
+            for (int x = projection_sample_stride / 2;
+                 x < width;
+                 x += projection_sample_stride)
+            {
+                const float prediction_x =
+                    prediction_from_cloth_scale * ((float)x + 0.5f) + prediction_from_cloth_offset_x;
+                if (prediction_x < 0.0f || prediction_x >= (float)width)
+                    continue;
+                const int iso_x = std::clamp(
+                    (int)std::floor(prediction_x / (float)width * (float)iso_w),
+                    0,
+                    iso_w - 1);
+                const size_t iso_pixel = (size_t)iso_y * (size_t)iso_w + (size_t)iso_x;
+                const size_t descriptor_offset = iso_pixel * (size_t)kIsoDimensions;
+                if (iso_pixel >= iso_source.mask.size()
+                    || !(iso_source.mask[iso_pixel] > 0.5f)
+                    || descriptor_offset + (size_t)kIsoDimensions > iso_source.descriptors.size())
+                    continue;
+
+                int direct_vertex = -1;
+                float descriptor_distance_squared = 0.0f;
+                if (!find_nearest_iso_vertex(
+                        iso_source.descriptors.data() + descriptor_offset,
+                        direct_vertex,
+                        descriptor_distance_squared)
+                    || direct_vertex < 0
+                    || direct_vertex >= (int)body_vertex_count
+                    || direct_vertex >= (int)m_iso_vertex_mirror_indices.size())
+                    continue;
+                const int mirrored_vertex = m_iso_vertex_mirror_indices[(size_t)direct_vertex];
+                if (mirrored_vertex < 0 || mirrored_vertex >= (int)body_vertex_count)
+                    continue;
+
+                const float direct_x = body_vertex_screen_x[(size_t)direct_vertex];
+                const float direct_y = body_vertex_screen_y[(size_t)direct_vertex];
+                const float mirrored_x = body_vertex_screen_x[(size_t)mirrored_vertex];
+                const float mirrored_y = body_vertex_screen_y[(size_t)mirrored_vertex];
+                if (!std::isfinite(direct_x) || !std::isfinite(direct_y)
+                    || !std::isfinite(mirrored_x) || !std::isfinite(mirrored_y))
+                    continue;
+
+                const float direct_dx = direct_x - prediction_x;
+                const float direct_dy = direct_y - prediction_y;
+                const float mirrored_dx = mirrored_x - prediction_x;
+                const float mirrored_dy = mirrored_y - prediction_y;
+                direct_projection_cost += std::min(
+                    maximum_projection_error_squared,
+                    direct_dx * direct_dx + direct_dy * direct_dy);
+                mirrored_projection_cost += std::min(
+                    maximum_projection_error_squared,
+                    mirrored_dx * mirrored_dx + mirrored_dy * mirrored_dy);
+                ++projection_sample_count;
+            }
+        }
+        const bool mirror_iso_vertices = projection_sample_count >= 16u
+            && mirrored_projection_cost < direct_projection_cost;
+        m_iso_prediction_mirror_vertices = mirror_iso_vertices;
+        m_iso_projection_orientation_npz_path =
+            !state.sketch2iso.last_output_path.empty()
+            ? state.sketch2iso.last_output_path
+            : iso_source_path.string();
+
         const float spatial_match_radius =
             std::max(12.0f, 0.03f * (float)std::min(width, height));
         const float hard_spatial_match_radius = spatial_match_radius * 1.75f;
@@ -3153,8 +3401,14 @@ namespace poseweaver
         {
             if (!descriptor || vertex < 0 || vertex >= m_iso_vertex_descriptor_count)
                 return std::numeric_limits<float>::infinity();
+            const int descriptor_vertex =
+                mirror_iso_vertices
+                && vertex < (int)m_iso_vertex_mirror_indices.size()
+                && m_iso_vertex_mirror_indices[(size_t)vertex] >= 0
+                ? m_iso_vertex_mirror_indices[(size_t)vertex]
+                : vertex;
             const float* vertex_descriptor = m_iso_vertex_descriptors.data()
-                + (size_t)vertex * (size_t)kIsoDimensions;
+                + (size_t)descriptor_vertex * (size_t)kIsoDimensions;
             float distance_squared = 0.0f;
             for (int channel = 0; channel < kIsoDimensions; ++channel)
             {
@@ -3181,7 +3435,7 @@ namespace poseweaver
             for (int x = 0; x < width; ++x)
             {
                 const size_t out_pix = (size_t)y * (size_t)width + (size_t)x;
-                const bool source_cloth_pixel = out_rgba[out_pix * 4u + 3u] != 0u;
+                const bool source_cloth_pixel = cloth_rgba[out_pix * 4u + 3u] != 0u;
 
                 const float prediction_layer_x =
                     prediction_from_cloth_scale * ((float)x + 0.5f) + prediction_from_cloth_offset_x;
@@ -3209,7 +3463,6 @@ namespace poseweaver
                 {
                     if (source_cloth_pixel)
                     {
-                        set_debug_pixel(out_pix, 128u, 128u, 128u);
                         if (prediction_x_valid && prediction_y_valid)
                         {
                             const int prediction_x = (int)std::floor(prediction_layer_x);
@@ -3254,10 +3507,7 @@ namespace poseweaver
 
                 const size_t descriptor_offset = iso_pix * (size_t)kIsoDimensions;
                 if (descriptor_offset + (size_t)kIsoDimensions > iso_source.descriptors.size())
-                {
-                    set_debug_pixel(out_pix, 0u, 96u, 255u);
                     continue;
-                }
 
                 const float* descriptor =
                     iso_source.descriptors.data() + descriptor_offset;
@@ -3267,6 +3517,13 @@ namespace poseweaver
                     descriptor,
                     vertex_idx,
                     iso_distance_squared);
+                if (descriptor_match_found
+                    && mirror_iso_vertices
+                    && vertex_idx >= 0
+                    && vertex_idx < (int)m_iso_vertex_mirror_indices.size())
+                {
+                    vertex_idx = m_iso_vertex_mirror_indices[(size_t)vertex_idx];
+                }
                 bool descriptor_match_valid = descriptor_match_found
                     && vertex_idx >= 0
                     && vertex_idx < smpl_vertices_for_iso.rows()
@@ -3276,13 +3533,30 @@ namespace poseweaver
                 bool used_local_match = false;
                 bool rejected_distant_match = false;
 
+                float descriptor_screen_distance_squared =
+                    std::numeric_limits<float>::infinity();
+                if (descriptor_match_valid)
+                {
+                    const float match_dx = body_vertex_screen_x[(size_t)vertex_idx]
+                        - prediction_layer_x;
+                    const float match_dy = body_vertex_screen_y[(size_t)vertex_idx]
+                        - prediction_layer_y;
+                    descriptor_screen_distance_squared =
+                        match_dx * match_dx + match_dy * match_dy;
+                }
+                const bool descriptor_jumps_across_image = descriptor_match_valid
+                    && descriptor_screen_distance_squared
+                        > hard_spatial_match_radius * hard_spatial_match_radius;
+
                 int local_vertex_idx = -1;
                 float local_screen_distance_squared =
                     std::numeric_limits<float>::infinity();
                 if (have_projected_body_lookup)
                 {
-                    const int seed_x = nearest_projected_body_x[out_pix];
-                    const int seed_y = nearest_projected_body_y[out_pix];
+                    const size_t prediction_pixel =
+                        (size_t)prediction_y * (size_t)width + (size_t)prediction_x;
+                    const int seed_x = nearest_projected_body_x[prediction_pixel];
+                    const int seed_y = nearest_projected_body_y[prediction_pixel];
                     if (seed_x >= 0 && seed_y >= 0)
                     {
                         const size_t seed_pixel =
@@ -3293,10 +3567,10 @@ namespace poseweaver
                         {
                             const float local_dx =
                                 body_vertex_screen_x[(size_t)local_vertex_idx]
-                                - ((float)x + 0.5f);
+                                - prediction_layer_x;
                             const float local_dy =
                                 body_vertex_screen_y[(size_t)local_vertex_idx]
-                                - ((float)y + 0.5f);
+                                - prediction_layer_y;
                             local_screen_distance_squared =
                                 local_dx * local_dx + local_dy * local_dy;
                             if (local_screen_distance_squared
@@ -3310,28 +3584,19 @@ namespace poseweaver
                 {
                     const float local_descriptor_distance_squared =
                         descriptor_distance_squared_to_vertex(descriptor, local_vertex_idx);
-                    float descriptor_screen_distance_squared =
-                        std::numeric_limits<float>::infinity();
-                    if (descriptor_match_valid)
-                    {
-                        const float match_dx = body_vertex_screen_x[(size_t)vertex_idx]
-                            - ((float)x + 0.5f);
-                        const float match_dy = body_vertex_screen_y[(size_t)vertex_idx]
-                            - ((float)y + 0.5f);
-                        descriptor_screen_distance_squared =
-                            match_dx * match_dx + match_dy * match_dy;
-                    }
+                    const bool local_descriptor_match_valid =
+                        std::isfinite(local_descriptor_distance_squared)
+                        && std::sqrt(std::max(0.0f, local_descriptor_distance_squared))
+                            <= iso_distance_threshold;
 
                     const float descriptor_cost = iso_distance_squared
                         + spatial_cost_weight * descriptor_screen_distance_squared;
                     const float local_cost = local_descriptor_distance_squared
                         + spatial_cost_weight * local_screen_distance_squared;
-                    const bool descriptor_jumps_across_image = descriptor_match_valid
-                        && descriptor_screen_distance_squared
-                            > hard_spatial_match_radius * hard_spatial_match_radius;
                     if (!descriptor_match_valid
-                        || descriptor_jumps_across_image
-                        || local_cost < descriptor_cost)
+                        || (local_descriptor_match_valid
+                            && (descriptor_jumps_across_image
+                                || local_cost < descriptor_cost)))
                     {
                         vertex_idx = local_vertex_idx;
                         iso_distance_squared = local_descriptor_distance_squared;
@@ -3344,10 +3609,7 @@ namespace poseweaver
                 if (!descriptor_match_valid
                     || vertex_idx < 0
                     || vertex_idx >= smpl_vertices_for_iso.rows())
-                {
-                    set_debug_pixel(out_pix, 0u, 96u, 255u);
                     continue;
-                }
 
                 if (source_cloth_pixel)
                 {
@@ -3382,10 +3644,7 @@ namespace poseweaver
                 if (!std::isfinite(projected_body_x)
                     || !std::isfinite(projected_body_y)
                     || !std::isfinite(projected_body_depth))
-                {
-                    set_debug_pixel(out_pix, 0u, 200u, 220u);
                     continue;
-                }
 
                 // A spatial correction means the global descriptor pointed at a
                 // different place in the image. Classify that pixel at its own
@@ -3394,26 +3653,20 @@ namespace poseweaver
                 // triangle interpolation and used to create alternating yellow
                 // bands over an otherwise continuous green torso.
                 const float sample_x = used_local_match
-                    ? (float)x + 0.5f
+                    ? prediction_layer_x
                     : projected_body_x;
                 const float sample_y = used_local_match
-                    ? (float)y + 0.5f
+                    ? prediction_layer_y
                     : projected_body_y;
                 const int sx = (int)std::floor(sample_x);
                 const int sy = (int)std::floor(sample_y);
                 if (sx < 0 || sy < 0 || sx >= width || sy >= height)
-                {
-                    set_debug_pixel(out_pix, 0u, 200u, 220u);
                     continue;
-                }
 
                 if (source_cloth_pixel)
                     ++out_tested_count;
                 const size_t depth_idx = (size_t)(height - 1 - sy) * (size_t)width + (size_t)sx;
                 const float cloth_depth = cloth_depth_gl[depth_idx];
-                const float cloth_second_depth = cloth_second_depth_cpu.size() == (size_t)width * (size_t)height
-                    ? cloth_second_depth_cpu[depth_idx]
-                    : 1.0f;
                 const bool cloth_present_at_body = cloth_depth < 0.999999f;
                 const float visible_smpl_depth = smpl_depth_gl[depth_idx];
                 const bool visible_smpl_present = visible_smpl_depth < 0.999999f;
@@ -3427,11 +3680,22 @@ namespace poseweaver
                     ? visible_smpl_depth
                     : body_depth;
                 const bool other_smpl_layer_on_top = nearest_smpl_depth + depth_margin < body_depth;
-                const bool two_cloth_layers_on_top =
-                    cloth_second_depth < 0.999999f
-                    && cloth_second_depth + depth_margin < body_depth;
-                const bool body_in_front_of_cloth = cloth_present_at_body
-                    && nearest_smpl_depth + depth_margin < cloth_depth;
+                const float visibility_depth_tolerance = std::max(0.0001f, depth_margin * 4.0f);
+                const bool matched_body_surface_visible = visible_smpl_present
+                    && std::abs(projected_body_depth - visible_smpl_depth)
+                        <= visibility_depth_tolerance;
+                int dominant_body_joint = -1;
+                if (vertex_idx >= 0 && vertex_idx < m_smplh_model.weights.rows())
+                {
+                    Eigen::Index dominant_joint_index = -1;
+                    m_smplh_model.weights.row(vertex_idx).maxCoeff(&dominant_joint_index);
+                    dominant_body_joint = (int)dominant_joint_index;
+                }
+                const bool matched_upper_body_occluder = dominant_body_joint >= 12;
+                const bool body_in_front_of_cloth = matched_upper_body_occluder
+                    && matched_body_surface_visible
+                    && (!cloth_present_at_body
+                        || visible_smpl_depth + depth_margin < cloth_depth);
                 if (source_cloth_pixel && !cloth_present_at_body && !other_smpl_layer_on_top)
                 {
                     unsigned char* dst = out_deformation_rgba.data() + out_pix * 4u;
@@ -3447,31 +3711,9 @@ namespace poseweaver
                     else
                         set_debug_pixel(out_pix, 0u, 0u, 0u);
                 }
-                else if (!cloth_present_at_body)
-                {
-                    set_debug_pixel(out_pix, 255u, 32u, 32u);
-                }
                 else if (body_in_front_of_cloth)
                 {
-                    // The visible body surface decides the occlusion. Comparing the
-                    // matched vertex against the front depth first used to label a
-                    // whole limb crimson whenever ISO selected the back side of that
-                    // limb (or a nearby triangle interpolated slightly in front).
-                    // Both cases are physically the same here: body is in front of
-                    // the rendered cloth, so the stable class is orange.
                     set_debug_pixel(out_pix, 255u, 144u, 0u);
-                }
-                else if (other_smpl_layer_on_top && two_cloth_layers_on_top)
-                {
-                    set_debug_pixel(out_pix, 160u, 64u, 255u);
-                }
-                else if (other_smpl_layer_on_top)
-                {
-                    set_debug_pixel(out_pix, 255u, 224u, 0u);
-                }
-                else if (two_cloth_layers_on_top)
-                {
-                    set_debug_pixel(out_pix, 255u, 0u, 255u);
                 }
                 else
                 {
@@ -3482,17 +3724,31 @@ namespace poseweaver
 
         console_add_line(
             state,
+            "Cloth fitting ISO projection: "
+                + std::string(mirror_iso_vertices ? "mirrored" : "direct")
+                + " (samples=" + std::to_string(projection_sample_count)
+                + ", direct cost=" + std::to_string(direct_projection_cost)
+                + ", mirrored cost=" + std::to_string(mirrored_projection_cost)
+                + ")");
+        console_add_line(
+            state,
             "Cloth fitting ISO correspondence: descriptor="
                 + std::to_string(retained_descriptor_matches)
                 + ", spatially corrected="
                 + std::to_string(spatially_corrected_matches)
                 + ", distant jumps rejected="
                 + std::to_string(rejected_distant_matches));
+        finish_stage("ISO matching");
 
         for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel)
         {
             if (cloth_rgba[pixel * 4u + 3u] == 0u)
+            {
+                out_debug_rgba[pixel * 4u + 0u] = 0u;
+                out_debug_rgba[pixel * 4u + 1u] = 0u;
+                out_debug_rgba[pixel * 4u + 2u] = 0u;
                 out_debug_rgba[pixel * 4u + 3u] = 0u;
+            }
         }
         out_unfiltered_debug_rgba = out_debug_rgba;
         filter_cloth_fitting_debug_colors(
@@ -3513,6 +3769,253 @@ namespace poseweaver
                 || rgba_is_color(out_debug_rgba, pixel, 255u, 144u, 0u);
             set_visibility_pixel(out_iso_occlusion_rgba, pixel, iso_occluded);
         }
+        finish_stage("ISO matching filters");
+
+        std::vector<unsigned char> true_depth_red(visibility_pixel_count, 0u);
+        std::vector<unsigned char> iso_red(visibility_pixel_count, 0u);
+        for (size_t pixel = 0; pixel < visibility_pixel_count; ++pixel)
+        {
+            if (cloth_rgba[pixel * 4u + 3u] == 0u)
+                continue;
+            true_depth_red[pixel] = rgba_is_color(
+                out_scene_occlusion_rgba, pixel, 255u, 48u, 48u) ? 1u : 0u;
+            iso_red[pixel] = rgba_is_color(
+                out_iso_occlusion_rgba, pixel, 255u, 48u, 48u) ? 1u : 0u;
+            set_visibility_pixel(out_corrected_scene_occlusion_rgba, pixel, false);
+        }
+
+        // ISO matching locates an occluder reliably but its boundary is noisy.
+        // Translate each true-depth component toward the corresponding ISO
+        // region for the corrected diagnostic layer while keeping the clean
+        // rendered shape and area.
+        struct VisibilityComponent
+        {
+            std::vector<size_t> pixels;
+        };
+        const auto visibility_components = [&](const std::vector<unsigned char>& mask)
+        {
+            std::vector<VisibilityComponent> components;
+            std::vector<unsigned char> visited(visibility_pixel_count, 0u);
+            std::vector<size_t> stack;
+            for (size_t seed = 0; seed < visibility_pixel_count; ++seed)
+            {
+                if (mask[seed] == 0u || visited[seed] != 0u)
+                    continue;
+
+                VisibilityComponent component;
+                stack.clear();
+                stack.push_back(seed);
+                visited[seed] = 1u;
+                while (!stack.empty())
+                {
+                    const size_t pixel = stack.back();
+                    stack.pop_back();
+                    component.pixels.push_back(pixel);
+                    const int x = (int)(pixel % (size_t)width);
+                    const int y = (int)(pixel / (size_t)width);
+                    for (int oy = -1; oy <= 1; ++oy)
+                    {
+                        const int ny = y + oy;
+                        if (ny < 0 || ny >= height)
+                            continue;
+                        for (int ox = -1; ox <= 1; ++ox)
+                        {
+                            if (ox == 0 && oy == 0)
+                                continue;
+                            const int nx = x + ox;
+                            if (nx < 0 || nx >= width)
+                                continue;
+                            const size_t neighbor =
+                                (size_t)ny * (size_t)width + (size_t)nx;
+                            if (mask[neighbor] == 0u || visited[neighbor] != 0u)
+                                continue;
+                            visited[neighbor] = 1u;
+                            stack.push_back(neighbor);
+                        }
+                    }
+                }
+                components.push_back(std::move(component));
+            }
+            return components;
+        };
+
+        const int iso_support_radius = std::clamp(
+            state.cloth_fitting_true_depth_correction_support_radius,
+            0,
+            64);
+        std::vector<unsigned char> iso_support(visibility_pixel_count, 0u);
+        std::vector<int> nearest_iso_x;
+        std::vector<int> nearest_iso_y;
+        if (nearest_mask_pixels(iso_red, width, height, nearest_iso_x, nearest_iso_y))
+        {
+            const int radius_squared = iso_support_radius * iso_support_radius;
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                    const int nx = nearest_iso_x[pixel];
+                    const int ny = nearest_iso_y[pixel];
+                    if (nx < 0 || ny < 0)
+                        continue;
+                    const int dx = nx - x;
+                    const int dy = ny - y;
+                    iso_support[pixel] =
+                        dx * dx + dy * dy <= radius_squared ? 1u : 0u;
+                }
+            }
+        }
+
+        const std::vector<VisibilityComponent> source_components =
+            visibility_components(true_depth_red);
+        const int maximum_shift = std::clamp(
+            state.cloth_fitting_true_depth_correction_max_shift,
+            0,
+            std::max(width, height));
+        const float minimum_overlap = std::clamp(
+            state.cloth_fitting_true_depth_correction_min_overlap,
+            0.0f,
+            1.0f);
+        const float minimum_improvement = std::clamp(
+            state.cloth_fitting_true_depth_correction_min_improvement,
+            0.0f,
+            1.0f);
+        int shifted_component_count = 0;
+        long long total_shift_x = 0;
+        long long total_shift_y = 0;
+        for (const VisibilityComponent& source : source_components)
+        {
+            const size_t sample_stride = std::max<size_t>(
+                1u,
+                (source.pixels.size() + 511u) / 512u);
+            const auto alignment_score = [&](int shift_x, int shift_y, int* out_support_hits)
+            {
+                int exact_hits = 0;
+                int support_hits = 0;
+                int sample_count = 0;
+                for (size_t i = 0; i < source.pixels.size(); i += sample_stride)
+                {
+                    const size_t pixel = source.pixels[i];
+                    const int x = (int)(pixel % (size_t)width) + shift_x;
+                    const int y = (int)(pixel / (size_t)width) + shift_y;
+                    ++sample_count;
+                    if (x < 0 || y < 0 || x >= width || y >= height)
+                        continue;
+                    const size_t shifted = (size_t)y * (size_t)width + (size_t)x;
+                    if (cloth_rgba[shifted * 4u + 3u] == 0u)
+                        continue;
+                    exact_hits += iso_red[shifted] != 0u ? 1 : 0;
+                    support_hits += iso_support[shifted] != 0u ? 1 : 0;
+                }
+                if (out_support_hits)
+                    *out_support_hits = support_hits;
+                if (sample_count == 0)
+                    return -1.0f;
+                return (2.0f * (float)exact_hits + (float)support_hits)
+                    / (float)sample_count;
+            };
+
+            int best_shift_x = 0;
+            int best_shift_y = 0;
+            int baseline_support_hits = 0;
+            int best_support_hits = 0;
+            const float baseline_score = alignment_score(0, 0, &baseline_support_hits);
+            float best_score = baseline_score;
+            best_support_hits = baseline_support_hits;
+
+            const auto consider_shift = [&](int shift_x, int shift_y)
+            {
+                int support_hits = 0;
+                const float score = alignment_score(shift_x, shift_y, &support_hits);
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_shift_x = shift_x;
+                    best_shift_y = shift_y;
+                    best_support_hits = support_hits;
+                }
+            };
+
+            constexpr int coarse_grid_radius = 24;
+            if (maximum_shift > 0)
+            {
+                for (int grid_y = -coarse_grid_radius; grid_y <= coarse_grid_radius; ++grid_y)
+                {
+                    const int shift_y = (int)std::lround(
+                        (float)grid_y * (float)maximum_shift / (float)coarse_grid_radius);
+                    for (int grid_x = -coarse_grid_radius; grid_x <= coarse_grid_radius; ++grid_x)
+                    {
+                        const int shift_x = (int)std::lround(
+                            (float)grid_x * (float)maximum_shift / (float)coarse_grid_radius);
+                        consider_shift(shift_x, shift_y);
+                    }
+                }
+
+                const int refinement_radius = std::max(
+                    1,
+                    (maximum_shift + coarse_grid_radius - 1) / coarse_grid_radius);
+                const int coarse_best_x = best_shift_x;
+                const int coarse_best_y = best_shift_y;
+                for (int offset_y = -refinement_radius; offset_y <= refinement_radius; ++offset_y)
+                {
+                    for (int offset_x = -refinement_radius; offset_x <= refinement_radius; ++offset_x)
+                    {
+                        const int shift_x = coarse_best_x + offset_x;
+                        const int shift_y = coarse_best_y + offset_y;
+                        if (std::abs(shift_x) <= maximum_shift
+                            && std::abs(shift_y) <= maximum_shift)
+                            consider_shift(shift_x, shift_y);
+                    }
+                }
+            }
+
+            const int sampled_count = (int)((source.pixels.size() + sample_stride - 1u) / sample_stride);
+            const float best_overlap = sampled_count > 0
+                ? (float)best_support_hits / (float)sampled_count
+                : 0.0f;
+            if ((best_shift_x == 0 && best_shift_y == 0)
+                || best_score < baseline_score + minimum_improvement
+                || best_overlap < minimum_overlap)
+            {
+                best_shift_x = 0;
+                best_shift_y = 0;
+            }
+            else
+            {
+                ++shifted_component_count;
+                total_shift_x += best_shift_x;
+                total_shift_y += best_shift_y;
+            }
+
+            for (size_t pixel : source.pixels)
+            {
+                const int x = (int)(pixel % (size_t)width) + best_shift_x;
+                const int y = (int)(pixel / (size_t)width) + best_shift_y;
+                if (x < 0 || y < 0 || x >= width || y >= height)
+                    continue;
+                const size_t shifted = (size_t)y * (size_t)width + (size_t)x;
+                if (cloth_rgba[shifted * 4u + 3u] != 0u)
+                    set_visibility_pixel(out_corrected_scene_occlusion_rgba, shifted, true);
+            }
+        }
+        console_add_line(
+            state,
+            "Cloth fitting true-depth correction: shifted="
+                + std::to_string(shifted_component_count)
+                + "/" + std::to_string(source_components.size())
+                + ", average offset=("
+                + std::to_string(shifted_component_count > 0
+                    ? (double)total_shift_x / (double)shifted_component_count
+                    : 0.0)
+                + ", "
+                + std::to_string(shifted_component_count > 0
+                    ? (double)total_shift_y / (double)shifted_component_count
+                    : 0.0)
+                + "), max shift=" + std::to_string(maximum_shift)
+                + ", support radius=" + std::to_string(iso_support_radius)
+                + ", min overlap/gain=" + std::to_string(minimum_overlap)
+                + "/" + std::to_string(minimum_improvement));
+        finish_stage("True-depth correction");
 
         const size_t pixel_count = (size_t)width * (size_t)height;
         const auto scene_debug_has_body = [](const std::vector<unsigned char>& rgba, size_t pixel)
@@ -3726,6 +4229,7 @@ namespace poseweaver
             cloth_rgba,
             out_scene_debug_rgba,
             out_deformation_rgba);
+        finish_stage("Visibility fusion and filters");
 
         // Deformation is computed from the raw cloth silhouette only. The same
         // accumulated field is applied independently to raw and occluded cloth;
@@ -3733,6 +4237,8 @@ namespace poseweaver
         std::vector<unsigned char> current_unoccluded_cloth = cloth_rgba;
         std::vector<unsigned char> current_occluded_cloth = out_rgba;
         std::vector<unsigned char> current_deformation = out_deformation_rgba;
+        std::vector<float> accumulated_source_x;
+        std::vector<float> accumulated_source_y;
         out_deformation_steps_rgba.push_back(current_deformation);
 
         int total_red_seeds = 0;
@@ -3744,6 +4250,7 @@ namespace poseweaver
         const float warp_force_per_step = warp_force / (float)std::max(1, warp_steps);
         for (int step = 0; step < warp_steps; ++step)
         {
+            const auto warp_step_start = std::chrono::steady_clock::now();
             int step_red = 0;
             int step_blue = 0;
             int step_purple = 0;
@@ -3803,6 +4310,35 @@ namespace poseweaver
                 inverse_source_y,
                 next_occluded_cloth);
 
+            if (accumulated_source_x.empty())
+            {
+                accumulated_source_x = std::move(inverse_source_x);
+                accumulated_source_y = std::move(inverse_source_y);
+            }
+            else
+            {
+                warp_dx.resize(pixel_count);
+                warp_dy.resize(pixel_count);
+                for (size_t pixel = 0; pixel < pixel_count; ++pixel)
+                {
+                    const float source_x = inverse_source_x[pixel];
+                    const float source_y = inverse_source_y[pixel];
+                    if (source_x < 0.0f || source_y < 0.0f
+                        || source_x > (float)(width - 1) || source_y > (float)(height - 1))
+                    {
+                        warp_dx[pixel] = -1.0f;
+                        warp_dy[pixel] = -1.0f;
+                        continue;
+                    }
+                    warp_dx[pixel] = sample_bilinear_scalar(
+                        accumulated_source_x, width, height, source_x, source_y);
+                    warp_dy[pixel] = sample_bilinear_scalar(
+                        accumulated_source_y, width, height, source_x, source_y);
+                }
+                accumulated_source_x = std::move(warp_dx);
+                accumulated_source_y = std::move(warp_dy);
+            }
+
             current_unoccluded_cloth = std::move(next_unoccluded_cloth);
             current_occluded_cloth = std::move(next_occluded_cloth);
             rebuild_deformation_from_warped_layers(
@@ -3811,11 +4347,30 @@ namespace poseweaver
                 current_deformation);
             out_deformation_steps_rgba.push_back(current_deformation);
             ++applied_warp_steps;
+            out_layers.timings_seconds.emplace_back(
+                "Warp step " + std::to_string(step + 1),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - warp_step_start).count());
         }
 
         out_deformation_rgba = current_deformation;
         out_layers.warped_cloth = std::move(current_unoccluded_cloth);
         out_warped_rgba = std::move(current_occluded_cloth);
+        if (accumulated_source_x.empty())
+        {
+            accumulated_source_x.resize(pixel_count);
+            accumulated_source_y.resize(pixel_count);
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                    accumulated_source_x[pixel] = (float)x;
+                    accumulated_source_y[pixel] = (float)y;
+                }
+            }
+        }
+        out_layers.deformation_source_x = std::move(accumulated_source_x);
+        out_layers.deformation_source_y = std::move(accumulated_source_y);
 
         int final_red = 0;
         int final_blue = 0;
@@ -3834,12 +4389,14 @@ namespace poseweaver
                 + ", force(total/step)=" + std::to_string(warp_force)
                 + "/" + std::to_string(warp_force_per_step)
                 + ", removed=" + std::to_string(out_removed_count));
+        finish_stage("Warping");
 
-        const std::array<const std::vector<unsigned char>*, 7> raw_mask_layers = {{
+        const std::array<const std::vector<unsigned char>*, 8> raw_mask_layers = {{
             &out_unfiltered_debug_rgba,
             &out_debug_rgba,
             &out_aligned_predicted_depth_occlusion_rgba,
             &out_scene_occlusion_rgba,
+            &out_corrected_scene_occlusion_rgba,
             &out_iso_occlusion_rgba,
             &out_unfiltered_occlusion_rgba,
             &out_occlusion_rgba,
@@ -3914,12 +4471,14 @@ namespace poseweaver
             const char* filename = nullptr;
             const std::vector<unsigned char>* pixels = nullptr;
         };
-        const std::array<LayerImageOutput, 11> layer_outputs = {{
+        const std::array<LayerImageOutput, 13> layer_outputs = {{
             { "cloth_fitting_raw_cloth.png", &cloth_rgba },
+            { "cloth_fitting_dumb_render.png", &out_dumb_render_rgba },
             { "cloth_fitting_raw_iso_matching.png", &out_unfiltered_debug_rgba },
             { "cloth_fitting_filtered_iso_matching.png", &out_debug_rgba },
             { "cloth_fitting_predicted_depth_visibility.png", &out_aligned_predicted_depth_occlusion_rgba },
             { "cloth_fitting_true_depth_visibility.png", &out_scene_occlusion_rgba },
+            { "cloth_fitting_true_depth_corrected_visibility.png", &out_corrected_scene_occlusion_rgba },
             { "cloth_fitting_iso_visibility.png", &out_iso_occlusion_rgba },
             { "cloth_fitting_raw_final_occlusion.png", &out_unfiltered_occlusion_rgba },
             { "cloth_fitting_filtered_final_occlusion.png", &out_occlusion_rgba },
@@ -3954,7 +4513,60 @@ namespace poseweaver
                 return fail("could not write " + path.string());
         }
         console_add_line(state, "Cloth fitting layers saved to " + renders_dir.string());
+        finish_stage("Output validation and saving");
 
+        return true;
+    }
+
+    bool Renderer::refit_cloth_render_with_maps(
+        const std::vector<unsigned char>& cloth_rgba,
+        int width,
+        int height,
+        const std::vector<unsigned char>& visibility_rgba,
+        const std::vector<float>& deformation_source_x,
+        const std::vector<float>& deformation_source_y,
+        std::vector<unsigned char>& out_warped_cloth,
+        std::vector<unsigned char>& out_warped_occluded_cloth,
+        std::string* out_error) const
+    {
+        const size_t pixel_count = (size_t)width * (size_t)height;
+        if (width <= 0 || height <= 0
+            || cloth_rgba.size() < pixel_count * 4u
+            || visibility_rgba.size() < pixel_count * 4u
+            || deformation_source_x.size() < pixel_count
+            || deformation_source_y.size() < pixel_count)
+        {
+            if (out_error)
+                *out_error = "saved fitting maps do not match the cloth render size";
+            return false;
+        }
+
+        std::vector<unsigned char> occluded_cloth = cloth_rgba;
+        for (size_t pixel = 0; pixel < pixel_count; ++pixel)
+        {
+            const size_t offset = pixel * 4u;
+            const bool hidden = visibility_rgba[offset + 3u] != 0u
+                && visibility_rgba[offset + 0u] >= 200u
+                && visibility_rgba[offset + 1u] <= 100u
+                && visibility_rgba[offset + 2u] <= 100u;
+            if (hidden)
+                occluded_cloth[offset + 3u] = 0u;
+        }
+
+        warp_rgba_inverse_sharp(
+            cloth_rgba,
+            width,
+            height,
+            deformation_source_x,
+            deformation_source_y,
+            out_warped_cloth);
+        warp_rgba_inverse_sharp(
+            occluded_cloth,
+            width,
+            height,
+            deformation_source_x,
+            deformation_source_y,
+            out_warped_occluded_cloth);
         return true;
     }
 }

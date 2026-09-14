@@ -68,9 +68,26 @@ namespace poseweaver::ui_canva
         ImGui::TextUnformatted("Brush");
         ImGui::Separator();
 
+        const bool active_visibility_map =
+            canva.active_layer >= 0
+            && canva.active_layer < (int)canva.layers.size()
+            && canva_layer_is_visibility_map(canva.layers[(size_t)canva.active_layer]);
         ImGui::BeginDisabled(canva.tool != CanvaTool::Brush);
         ImGui::SliderFloat("Size", &canva.brush_radius, 0.5f, 250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
-        ImGui::ColorEdit4("Color", (float*)&canva.brush_color, ImGuiColorEditFlags_AlphaBar);
+        if (active_visibility_map)
+        {
+            ImGui::TextUnformatted("Visibility paint");
+            if (ImGui::RadioButton("Visible (green)", canva.visibility_brush_visible))
+                canva.visibility_brush_visible = true;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Hidden (red)", !canva.visibility_brush_visible))
+                canva.visibility_brush_visible = false;
+            ImGui::TextDisabled("Red/green only; alpha is locked.");
+        }
+        else
+        {
+            ImGui::ColorEdit4("Color", (float*)&canva.brush_color, ImGuiColorEditFlags_AlphaBar);
+        }
         ImGui::EndDisabled();
 
         // Persist brush settings via AppState -> imgui.ini handler.
@@ -905,16 +922,6 @@ namespace poseweaver::ui_canva
             (state.canva_preferred_bone_prediction == 0
                 ? custom_bone_models_ready
                 : nlf_bone_model_ready);
-        ImGui::BeginDisabled(!can_extract_pose);
-        if (ImGui::Button("Extract Pose"))
-        {
-            std::string err;
-            if (!canva_queue_extract_pose(state, canva, false, false, &err))
-                console_add_line(state, std::string("Canva: Extract Pose failed to queue: ")
-                    + (err.empty() ? "(unknown error)" : err));
-        }
-        ImGui::EndDisabled();
-
         const bool garment_selected =
             state.selection.garment_index >= 0
             && state.selection.garment_index < (int)state.selection.garments.size();
@@ -923,31 +930,53 @@ namespace poseweaver::ui_canva
             && !canva.render_cloth_active
             && !canva.generate_cloth_active
             && !state.controls.simulating;
+        const char* cloth_render_methods[] = {
+            "Standard shader",
+            "Detailed ink shader",
+            "Clean line shader",
+            "Soft 2D shader",
+            "Grease pencil",
+            "Grease pencil + shading",
+        };
+        ImGui::SetNextItemWidth(190.0f);
+        ImGui::Combo(
+            "Cloth render method",
+            &state.cloth_render_method,
+            cloth_render_methods,
+            IM_ARRAYSIZE(cloth_render_methods));
+        state.cloth_render_method = std::clamp(state.cloth_render_method, 0, 5);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Used for generated canvas cloth only; independent of the Scene View shader.");
         ImGui::BeginDisabled(!can_render_cloth);
-        if (ImGui::Button("Render Cloth"))
+        if (ImGui::Button("Render"))
         {
             std::string err;
-            if (!canva_queue_render_cloth(state, canva, false, &err))
+            if (!canva_queue_render_cloth(state, canva, false, false, false, &err))
             {
                 canva.render_cloth_active = false;
                 canva.render_cloth_status = "Failed";
-                console_add_line(state, "Canva: Render Cloth failed to queue: "
-                    + (err.empty() ? std::string("(unknown error)") : err));
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Fine Render"))
-        {
-            std::string err;
-            if (!canva_queue_render_cloth(state, canva, true, &err))
-            {
-                canva.render_cloth_active = false;
-                canva.render_cloth_status = "Failed";
-                console_add_line(state, "Canva: Fine Render failed to queue: "
+                console_add_line(state, "Canva: Render failed to queue: "
                     + (err.empty() ? std::string("(unknown error)") : err));
             }
         }
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        const bool can_render_and_refit = can_render_cloth && canva_has_cloth_refit_maps(canva);
+        ImGui::BeginDisabled(!can_render_and_refit);
+        if (ImGui::Button("Render + Refit"))
+        {
+            std::string err;
+            if (!canva_queue_render_cloth(state, canva, false, false, true, &err))
+            {
+                canva.render_cloth_active = false;
+                canva.render_cloth_status = "Failed";
+                console_add_line(state, "Canva: Render + Refit failed to queue: "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+            }
+        }
+        ImGui::EndDisabled();
+        if (!can_render_and_refit && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Run Fit once to create the visibility and deformation maps reused by Refit.");
         ImGui::SameLine();
         ImGui::Text("Status: %s",
             !garment_selected && !canva.render_cloth_active
@@ -971,78 +1000,63 @@ namespace poseweaver::ui_canva
             && state.sketch2iso.status == ModelInferenceStatus::Ready
             && state.sketch2depth.service != nullptr
             && state.sketch2depth.status == ModelInferenceStatus::Ready;
-        const bool can_generate_cloth =
+        const bool pose_selected =
+            state.selection.pose_index >= 0
+            && state.selection.pose_index < (int)state.selection.poses.size()
+            && state.pending_pose_selection.empty();
+        const bool can_simulate =
             garment_selected &&
+            pose_selected &&
+            !canva.extract_pose_active &&
             !canva.generate_cloth_active &&
             !canva.render_cloth_active &&
             !state.controls.simulating;
-        ImGui::BeginDisabled(!can_generate_cloth);
-        if (ImGui::Button("Generate Cloth"))
-        {
-            std::string err;
-            if (!canva_queue_generate_cloth_current_pose(state, canva, &err))
-            {
-                canva_generate_cloth_reset_timings(canva, false);
-                canva_generate_cloth_finish_step(canva, GenerateClothStepId::Inference, true);
-                canva_generate_cloth_finish_step(canva, GenerateClothStepId::Pose);
-                canva_generate_cloth_finish_pipeline(canva);
-                canva.generate_cloth_active = false;
-                canva.generate_cloth_status = "Failed";
-                canva.generate_cloth_failed_step = 1;
-                console_add_line(state, std::string("Canva: Generate Cloth failed to queue: ")
-                    + (err.empty() ? "(unknown error)" : err));
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-
-        const bool can_full_generation =
-            can_extract_pose &&
-            garment_selected &&
-            !canva.generate_cloth_active &&
-            !canva.render_cloth_active &&
-            !state.controls.simulating;
-        ImGui::BeginDisabled(!can_full_generation);
-        if (ImGui::Button("Full Generation"))
-        {
-            std::string err;
-            if (canva_queue_extract_pose(state, canva, true, true, &err))
-            {
-                canva.generate_cloth_active = true;
-                canva.generate_cloth_waiting_pose = false;
-                canva.generate_cloth_waiting_simulation = false;
-                canva.generate_cloth_waiting_render = false;
-                canva.generate_cloth_status = "Inference";
-                canva.generate_cloth_failed_step = -1;
-                canva.generate_cloth_fit_after_render = false;
-                canva.generate_cloth_include_fitting_steps = false;
-                console_add_line(state, "Canva: Full Generation queued pose extraction");
-            }
-            else
-            {
-                canva_generate_cloth_reset_timings(canva, false);
-                canva_generate_cloth_start_step(canva, GenerateClothStepId::Inference);
-                canva_generate_cloth_finish_step(canva, GenerateClothStepId::Inference);
-                canva_generate_cloth_finish_pipeline(canva);
-                canva.generate_cloth_active = false;
-                canva.generate_cloth_status = "Failed";
-                canva.generate_cloth_failed_step = 0;
-                canva.generate_cloth_fit_after_render = false;
-                console_add_line(state, std::string("Canva: Full Generation failed to queue: ")
-                    + (err.empty() ? "(unknown error)" : err));
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-
-        const bool can_generate_and_fit =
-            can_full_generation
+        const bool can_render_and_fit =
+            can_render_cloth
             && cloth_fitting_models_ready
             && !canva.cloth_fitting_active
             && !canva.generate_displacement_active
             && !canva.generate_iso_displacement_active;
-        ImGui::BeginDisabled(!can_generate_and_fit);
-        if (ImGui::Button("Generate + Fit"))
+
+        ImGui::BeginDisabled(!can_extract_pose);
+        if (ImGui::Button("Extract Pose"))
+        {
+            std::string err;
+            if (!canva_queue_extract_pose(state, canva, false, false, &err))
+                console_add_line(state, std::string("Canva: Extract Pose failed to queue: ")
+                    + (err.empty() ? "(unknown error)" : err));
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!can_simulate);
+        if (ImGui::Button("Simulate"))
+        {
+            state.show_smpl = true;
+            state.show_smpl_character = true;
+            state.show_garment_mesh = true;
+            state.controls.current_frame = 0;
+            state.controls.playing = false;
+            state.controls.simulating = true;
+            state.cloth_simulate_play_on_finish = false;
+            state.cloth_simulate_request_id++;
+            console_add_line(state, "Canva: queued XPBD simulation from the current pose");
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!can_render_and_fit);
+        if (ImGui::Button("Render + Fit"))
+        {
+            std::string err;
+            if (!canva_queue_render_cloth(state, canva, false, true, false, &err))
+                console_add_line(state, "Canva: Render + Fit failed to queue: "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+
+        const bool can_pose_simu_fit = can_extract_pose && can_render_and_fit;
+        ImGui::BeginDisabled(!can_pose_simu_fit);
+        if (ImGui::Button("Pose+Simu+Fit"))
         {
             std::string err;
             if (canva_queue_extract_pose(state, canva, true, true, &err))
@@ -1055,7 +1069,7 @@ namespace poseweaver::ui_canva
                 canva.generate_cloth_failed_step = -1;
                 canva.generate_cloth_fit_after_render = true;
                 canva.generate_cloth_include_fitting_steps = true;
-                console_add_line(state, "Canva: Generate + Fit queued pose extraction");
+                console_add_line(state, "Canva: Pose+Simu+Fit queued pose extraction");
             }
             else
             {
@@ -1067,7 +1081,7 @@ namespace poseweaver::ui_canva
                 canva.generate_cloth_status = "Failed";
                 canva.generate_cloth_failed_step = 0;
                 canva.generate_cloth_fit_after_render = false;
-                console_add_line(state, std::string("Canva: Generate + Fit failed to queue: ")
+                console_add_line(state, std::string("Canva: Pose+Simu+Fit failed to queue: ")
                     + (err.empty() ? "(unknown error)" : err));
             }
         }
@@ -1107,41 +1121,32 @@ namespace poseweaver::ui_canva
         if (canva.generate_cloth_waiting_render)
             ImGui::TextUnformatted("Generate Cloth: rendering cloth layer...");
 
-        const bool cloth_layer_selected =
-            canva.active_layer >= 0
-            && canva.active_layer < (int)canva.layers.size()
-            && canva_layer_is_generated_cloth(canva.layers[(size_t)canva.active_layer]);
-        const bool can_fit_cloth =
-            cloth_layer_selected
-            && cloth_fitting_models_ready
-            && !canva.cloth_fitting_active
-            && !canva.generate_cloth_active
-            && !canva.generate_displacement_active
-            && !canva.generate_iso_displacement_active;
-        ImGui::BeginDisabled(!can_fit_cloth);
-        if (ImGui::Button("cloth Fitting"))
-        {
-            std::string err;
-            if (!canva_queue_cloth_fitting_predictions(
-                    state, canva, canva.layers[(size_t)canva.active_layer], &err))
-            {
-                canva.cloth_fitting_active = false;
-                canva.cloth_fitting_status = "Failed";
-                console_add_line(state, std::string("Canva: cloth Fitting failed to queue predictions: ")
-                    + (err.empty() ? "(unknown error)" : err));
-            }
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::Text("Status: %s",
-            !cloth_layer_selected ? "Select Generated cloth layer"
-            : canva.cloth_fitting_active ? canva.cloth_fitting_status.c_str()
-            : !cloth_fitting_models_ready ? "Need ISO + Depth"
-            : "Ready");
         }
 
         if (parameters_only)
         {
+        if (canva.cloth_fitting_timing_started)
+        {
+            ImGui::TextUnformatted("Fitting timing");
+            ImGui::Text("Total: %.2fs", canva_cloth_fitting_elapsed_seconds(canva));
+            const char* timing_labels[] = {
+                "Sketch2ISO inference",
+                "Sketch2Depth inference",
+                "Depth and visibility",
+                "Canvas layer creation"
+            };
+            for (int i = 0; i < kClothFittingTimingStepCount; ++i)
+            {
+                const double seconds = canva.cloth_fitting_step_seconds[(size_t)i];
+                ImGui::Text("%s: %s%.2fs",
+                    timing_labels[i],
+                    seconds > 0.0 ? "" : (canva.cloth_fitting_active ? "running / " : "not run / "),
+                    seconds);
+            }
+            for (const auto& timing : canva.cloth_fitting_renderer_timings)
+                ImGui::Text("%s: %.2fs", timing.first.c_str(), timing.second);
+            ImGui::Separator();
+        }
         ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderFloat("Depth margin (m)", &state.cloth_fitting_depth_margin, 0.0f, 0.02f, "%.5f");
         state.cloth_fitting_depth_margin = std::clamp(state.cloth_fitting_depth_margin, 0.0f, 0.05f);
@@ -1202,6 +1207,61 @@ namespace poseweaver::ui_canva
             ImGui::SetTooltip("Maximum distance to a valid nearby color; 0 fills from the nearest color at any distance.");
 
         ImGui::Separator();
+        ImGui::TextUnformatted("True-depth correction");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt(
+            "Maximum correction shift",
+            &state.cloth_fitting_true_depth_correction_max_shift,
+            0,
+            512,
+            "%d px");
+        state.cloth_fitting_true_depth_correction_max_shift = std::clamp(
+            state.cloth_fitting_true_depth_correction_max_shift,
+            0,
+            1024);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Maximum screen-space translation searched for each true-depth red component.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderInt(
+            "ISO support radius",
+            &state.cloth_fitting_true_depth_correction_support_radius,
+            0,
+            64,
+            "%d px");
+        state.cloth_fitting_true_depth_correction_support_radius = std::clamp(
+            state.cloth_fitting_true_depth_correction_support_radius,
+            0,
+            64);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Distance around ISO red pixels considered useful alignment support.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Minimum ISO overlap",
+            &state.cloth_fitting_true_depth_correction_min_overlap,
+            0.0f,
+            0.5f,
+            "%.3f");
+        state.cloth_fitting_true_depth_correction_min_overlap = std::clamp(
+            state.cloth_fitting_true_depth_correction_min_overlap,
+            0.0f,
+            1.0f);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum fraction of a shifted true-depth component supported by ISO matching.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Minimum alignment gain",
+            &state.cloth_fitting_true_depth_correction_min_improvement,
+            0.0f,
+            0.25f,
+            "%.3f");
+        state.cloth_fitting_true_depth_correction_min_improvement = std::clamp(
+            state.cloth_fitting_true_depth_correction_min_improvement,
+            0.0f,
+            1.0f);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Minimum ISO alignment-score improvement required to move a component.");
+
+        ImGui::Separator();
         ImGui::TextUnformatted("Final occlusion cleanup");
         ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderInt(
@@ -1243,33 +1303,100 @@ namespace poseweaver::ui_canva
             std::clamp(state.cloth_fitting_occlusion_min_patch_area, 1, 4096);
 
         ImGui::Separator();
-        ImGui::TextUnformatted("Final cloth filter");
-        ImGui::SliderFloat(
-            "Filter strength",
-            &state.cloth_smoothing_filter_strength,
-            0.0f,
-            1.0f,
-            "%.2f");
+        ImGui::TextUnformatted("Final cloth stylization");
+        const char* stylization_methods[] = { "Anime cel", "Soft toon", "Pure line art", "None" };
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::Combo(
+            "Method",
+            &state.cloth_stylization_method,
+            stylization_methods,
+            IM_ARRAYSIZE(stylization_methods));
+        ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderFloat(
             "Outline width",
-            &state.cloth_smoothing_inner_line_width,
+            &state.cloth_stylization_outline_width,
             0.0f,
-            20.0f,
+            12.0f,
             "%.1f px");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Wrinkle line width",
+            &state.cloth_stylization_wrinkle_width,
+            0.0f,
+            8.0f,
+            "%.1f px");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat(
+            "Wrinkle sensitivity",
+            &state.cloth_stylization_edge_threshold,
+            0.01f,
+            0.25f,
+            "%.3f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lower values draw more fold and shading boundaries as ink lines.");
+        ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderInt(
-            "Contour smoothing radius",
-            &state.cloth_smoothing_contour_radius,
+            "Contour cleanup",
+            &state.cloth_stylization_contour_radius,
             1,
-            32,
+            24,
             "%d px");
+        ImGui::SetNextItemWidth(170.0f);
         ImGui::SliderInt(
             "Line gap closing",
-            &state.cloth_smoothing_line_gap_radius,
+            &state.cloth_stylization_line_gap_radius,
             0,
-            12,
+            6,
             "%d px");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::ColorEdit3(
+            "Lineart color",
+            state.cloth_stylization_line_color.data(),
+            ImGuiColorEditFlags_NoInputs);
+        if (state.cloth_stylization_method != 2)
+        {
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::SliderFloat(
+                "Shadow threshold",
+                &state.cloth_stylization_shadow_threshold,
+                0.5f,
+                1.0f,
+                "%.2f");
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::SliderFloat(
+                "Shadow strength",
+                &state.cloth_stylization_shadow_strength,
+                0.0f,
+                0.8f,
+                "%.2f");
+        }
+        if (state.cloth_stylization_method == 1)
+        {
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::SliderFloat(
+                "Shading softness",
+                &state.cloth_stylization_softness,
+                0.0f,
+                1.0f,
+                "%.2f");
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Generated cloth Grease Pencil");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP outline width", &state.cloth_grease_pencil_outline_width, 0.0f, 12.0f, "%.1f px");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP wrinkle width", &state.cloth_grease_pencil_wrinkle_width, 0.0f, 8.0f, "%.1f px");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP crease angle", &state.cloth_grease_pencil_crease_angle, 10.0f, 80.0f, "%.0f deg");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Connects nearby broken stroke fragments into continuous lines.");
+            ImGui::SetTooltip("Minimum face-normal angle used by Line Art to identify a wrinkle.");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP shadow start", &state.cloth_grease_pencil_shadow_threshold, 0.35f, 0.95f, "%.2f");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP shadow falloff", &state.cloth_grease_pencil_shadow_range, 0.05f, 0.70f, "%.2f");
+        ImGui::SetNextItemWidth(170.0f);
+        ImGui::SliderFloat("GP shadow strength", &state.cloth_grease_pencil_shadow_strength, 0.0f, 1.0f, "%.2f");
         }
 
         if (!parameters_only)
@@ -1319,6 +1446,22 @@ namespace poseweaver::ui_canva
 
         ImGui::Separator();
 
+        const auto layer_icon = [](const CanvaLayer& layer)
+        {
+            if (canva_layer_is_visibility_map(layer))
+                return std::pair<const char*, ImVec4>("V", ImVec4(0.30f, 0.85f, 0.38f, 1.0f));
+            if (layer.kind == CanvaLayerKind::Generic)
+                return std::pair<const char*, ImVec4>("S", ImVec4(0.35f, 0.68f, 1.0f, 1.0f));
+            if (layer.kind == CanvaLayerKind::GeneratedCloth
+                || layer.kind == CanvaLayerKind::ClothFitting
+                || layer.kind == CanvaLayerKind::ClothFittingWarped
+                || layer.kind == CanvaLayerKind::ClothFittingWarpedSmoothed)
+            {
+                return std::pair<const char*, ImVec4>("C", ImVec4(0.93f, 0.67f, 0.28f, 1.0f));
+            }
+            return std::pair<const char*, ImVec4>("D", ImVec4(0.72f, 0.52f, 0.92f, 1.0f));
+        };
+
         // Layer list (top->bottom).
         for (int i = 0; i < (int)canva.layers.size(); ++i)
         {
@@ -1327,6 +1470,18 @@ namespace poseweaver::ui_canva
             ImGui::PushID(i);
             if (ImGui::Checkbox("##vis", &layer.enabled))
                 show_canva_layers();
+            ImGui::SameLine();
+
+            const auto [icon, icon_color] = layer_icon(layer);
+            ImGui::TextColored(icon_color, "[%s]", icon);
+            if (ImGui::IsItemHovered())
+            {
+                const char* nature = icon[0] == 'S' ? "Sketch"
+                    : icon[0] == 'V' ? "Visibility map"
+                    : icon[0] == 'C' ? "Cloth render"
+                    : "Debug";
+                ImGui::SetTooltip("%s layer", nature);
+            }
             ImGui::SameLine();
 
             const bool selected = (canva.active_layer == i);
@@ -1374,42 +1529,93 @@ namespace poseweaver::ui_canva
             if (layer.kind == CanvaLayerKind::ClothFittingWarpedSmoothed)
             {
                 ImGui::Separator();
-                ImGui::TextUnformatted("Warped cloth smoothing");
+                ImGui::TextUnformatted("Warped cloth stylization");
                 bool smoothing_changed = false;
+                const char* layer_methods[] = { "Anime cel", "Soft toon", "Pure line art", "None" };
+                smoothing_changed |= ImGui::Combo(
+                    "Method##stylized_layer",
+                    &layer.stylization_method,
+                    layer_methods,
+                    IM_ARRAYSIZE(layer_methods));
                 ImGui::SliderFloat(
-                    "Filter strength##smoothed_layer",
-                    &layer.smoothing_filter_strength,
+                    "Outline width##stylized_layer",
+                    &layer.stylization_outline_width,
                     0.0f,
-                    1.0f,
-                    "%.2f");
-                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
-                ImGui::SliderFloat(
-                    "Outline width##smoothed_layer",
-                    &layer.smoothing_inner_line_width,
-                    0.0f,
-                    20.0f,
+                    12.0f,
                     "%.1f px");
                 smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SliderFloat(
+                    "Wrinkle line width##stylized_layer",
+                    &layer.stylization_wrinkle_width,
+                    0.0f,
+                    8.0f,
+                    "%.1f px");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SliderFloat(
+                    "Wrinkle sensitivity##stylized_layer",
+                    &layer.stylization_edge_threshold,
+                    0.01f,
+                    0.25f,
+                    "%.3f");
+                smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
                 ImGui::SliderInt(
-                    "Contour smoothing radius##smoothed_layer",
-                    &layer.smoothing_contour_radius,
+                    "Contour cleanup##stylized_layer",
+                    &layer.stylization_contour_radius,
                     1,
-                    32,
+                    24,
                     "%d px");
                 smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
                 ImGui::SliderInt(
-                    "Line gap closing##smoothed_layer",
-                    &layer.smoothing_line_gap_radius,
+                    "Line gap closing##stylized_layer",
+                    &layer.stylization_line_gap_radius,
                     0,
-                    12,
+                    6,
                     "%d px");
                 smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::SetNextItemWidth(170.0f);
+                smoothing_changed |= ImGui::ColorEdit3(
+                    "Lineart color##stylized_layer",
+                    layer.stylization_line_color.data(),
+                    ImGuiColorEditFlags_NoInputs);
+                if (layer.stylization_method != 2)
+                {
+                    ImGui::SliderFloat(
+                        "Shadow threshold##stylized_layer",
+                        &layer.stylization_shadow_threshold,
+                        0.5f,
+                        1.0f,
+                        "%.2f");
+                    smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                    ImGui::SliderFloat(
+                        "Shadow strength##stylized_layer",
+                        &layer.stylization_shadow_strength,
+                        0.0f,
+                        0.8f,
+                        "%.2f");
+                    smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                }
+                if (layer.stylization_method == 1)
+                {
+                    ImGui::SliderFloat(
+                        "Shading softness##stylized_layer",
+                        &layer.stylization_softness,
+                        0.0f,
+                        1.0f,
+                        "%.2f");
+                    smoothing_changed |= ImGui::IsItemDeactivatedAfterEdit();
+                }
                 if (smoothing_changed)
                 {
-                    state.cloth_smoothing_filter_strength = layer.smoothing_filter_strength;
-                    state.cloth_smoothing_inner_line_width = layer.smoothing_inner_line_width;
-                    state.cloth_smoothing_contour_radius = layer.smoothing_contour_radius;
-                    state.cloth_smoothing_line_gap_radius = layer.smoothing_line_gap_radius;
+                    state.cloth_stylization_method = layer.stylization_method;
+                    state.cloth_stylization_outline_width = layer.stylization_outline_width;
+                    state.cloth_stylization_wrinkle_width = layer.stylization_wrinkle_width;
+                    state.cloth_stylization_edge_threshold = layer.stylization_edge_threshold;
+                    state.cloth_stylization_shadow_threshold = layer.stylization_shadow_threshold;
+                    state.cloth_stylization_shadow_strength = layer.stylization_shadow_strength;
+                    state.cloth_stylization_softness = layer.stylization_softness;
+                    state.cloth_stylization_contour_radius = layer.stylization_contour_radius;
+                    state.cloth_stylization_line_gap_radius = layer.stylization_line_gap_radius;
+                    state.cloth_stylization_line_color = layer.stylization_line_color;
                 }
                 if (smoothing_changed)
                 {
@@ -1418,7 +1624,7 @@ namespace poseweaver::ui_canva
                     if (source_index >= 0)
                     {
                         std::string smoothing_error;
-                        if (!canva_smooth_warped_cloth_layer(
+                        if (!canva_stylize_warped_cloth_layer(
                                 canva.layers[(size_t)source_index],
                                 layer,
                                 canva.width,

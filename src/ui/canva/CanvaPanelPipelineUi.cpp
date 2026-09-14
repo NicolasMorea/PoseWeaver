@@ -73,6 +73,34 @@ namespace poseweaver::ui_canva
         return oss.str();
     }
 
+    double canva_cloth_fitting_elapsed_seconds(const CanvaState& canva)
+    {
+        if (!canva.cloth_fitting_timing_started)
+            return 0.0;
+        if (canva.cloth_fitting_timing_complete)
+            return canva.cloth_fitting_total_seconds;
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - canva.cloth_fitting_pipeline_start).count();
+    }
+
+    void canva_reset_cloth_fitting_timings(CanvaState& canva)
+    {
+        canva.cloth_fitting_timing_started = true;
+        canva.cloth_fitting_timing_complete = false;
+        canva.cloth_fitting_total_seconds = 0.0;
+        canva.cloth_fitting_pipeline_start = std::chrono::steady_clock::now();
+        canva.cloth_fitting_step_seconds = {};
+        canva.cloth_fitting_renderer_timings.clear();
+    }
+
+    void canva_finish_cloth_fitting_timings(CanvaState& canva)
+    {
+        if (!canva.cloth_fitting_timing_started || canva.cloth_fitting_timing_complete)
+            return;
+        canva.cloth_fitting_total_seconds = canva_cloth_fitting_elapsed_seconds(canva);
+        canva.cloth_fitting_timing_complete = true;
+    }
+
      void canva_generate_cloth_reset_timings(CanvaState& canva, bool include_fitting_steps)
     {
         canva.generate_cloth_include_fitting_steps = include_fitting_steps;
