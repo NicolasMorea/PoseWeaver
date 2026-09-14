@@ -19,13 +19,25 @@ namespace poseweaver
         if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec))
             return out;
 
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec))
         {
             if (ec)
                 break;
+            if (!entry.is_regular_file(ec))
+                continue;
+
             const auto& p = entry.path();
-            const std::string name = p.filename().string();
-            if (name.find(":Zone.Identifier") != std::string::npos) continue;
+            const std::string name = std::filesystem::relative(p, dir, ec).generic_string();
+            if (ec)
+                continue;
+            if (name.find(":Zone.Identifier") != std::string::npos)
+                continue;
+
+            std::string ext = p.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+            if (ext != ".obj" && ext != ".glb" && ext != ".gltf")
+                continue;
+
             out.push_back(name);
         }
 
@@ -87,7 +99,7 @@ namespace poseweaver
             std::string ext = p.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 
-            if (ext == ".obj" || ext == ".off" || ext == ".ply" || ext == ".stl" || ext == ".mesh" || ext == ".msh" || ext == ".wrl")
+            if (ext == ".obj")
                 out.push_back(name);
         }
 

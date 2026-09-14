@@ -1,6 +1,8 @@
 #include "render/Renderer.h"
 #include "render/RendererInternal.h"
+#include "core/GlbGarment.h"
 #include "core/Geometry.h"
+#include "core/ObjMaterialTexture.h"
 #include "core/Paths.h"
 #include "simulation/ClothMeshProcessor.h"
 
@@ -8,6 +10,7 @@
 #include <igl/remove_duplicate_vertices.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -15,6 +18,74 @@
 
 namespace poseweaver
 {
+    namespace
+    {
+        bool is_gltf_path(const std::filesystem::path& path)
+        {
+            std::string extension = path.extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return extension == ".glb" || extension == ".gltf";
+        }
+
+        void set_rgba_texture(
+            igl::opengl::ViewerData& data,
+            const std::vector<unsigned char>& rgba,
+            int width,
+            int height)
+        {
+            using Channel = Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic>;
+            Channel red(width, height);
+            Channel green(width, height);
+            Channel blue(width, height);
+            Channel alpha(width, height);
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    const std::size_t index = (static_cast<std::size_t>(y)
+                        * static_cast<std::size_t>(width)
+                        + static_cast<std::size_t>(x)) * 4u;
+                    red(x, y) = rgba[index];
+                    green(x, y) = rgba[index + 1u];
+                    blue(x, y) = rgba[index + 2u];
+                    alpha(x, y) = rgba[index + 3u];
+                }
+            }
+            data.set_texture(red, green, blue, alpha);
+        }
+    }
+
+    bool Renderer::load_garment_base_pose_axis_angle(
+        GarmentBasePose base_pose,
+        int joint_count,
+        Eigen::VectorXd& pose_axis_angle,
+        std::string* error) const
+    {
+        pose_axis_angle = Eigen::VectorXd::Zero(std::max(0, 3 * joint_count));
+        if (base_pose == GarmentBasePose::TPose)
+            return true;
+
+        Eigen::VectorXd loaded;
+        std::string load_error;
+        if (!smplh_load_pose_npz(
+                assets_dir() / "poses" / "garment_a_pose.npz",
+                loaded,
+                nullptr,
+                &load_error,
+                nullptr)
+            || loaded.size() != pose_axis_angle.size())
+        {
+            if (error)
+                *error = load_error.empty()
+                    ? "The garment A-pose has an unexpected joint count."
+                    : load_error;
+            return false;
+        }
+        pose_axis_angle = std::move(loaded);
+        return true;
+    }
+
     void Renderer::ensure_garment_mesh_loaded(AppState& state)
     {
         std::string desired;
@@ -31,9 +102,13 @@ namespace poseweaver
             data.clear();
             data.set_visible(false);
             m_garment_mesh_name.clear();
+            m_garment_has_source_texture = false;
+            m_garment_has_image_texture = false;
+            m_garment_source_colors.resize(0, 0);
             m_garment_last_show_mesh = false;
             m_garment_vertex_merge_settings_valid = false;
             m_garment_rest_vertices.resize(0, 0);
+            m_garment_base_smpl_vertices.resize(0, 0);
             m_garment_to_smpl.clear();
             m_garment_mapping_mesh_name.clear();
             m_garment_last_mapping_attempt_mesh_name.clear();
@@ -58,22 +133,57 @@ namespace poseweaver
         }
 
         const bool settings_changed = m_garment_vertex_merge_settings_valid
-            && (weld_enabled != m_garment_vertex_merge_enabled_last || std::abs(weld_epsilon - m_garment_vertex_merge_distance_last) > 1e-15);
+            && (weld_enabled != m_garment_vertex_merge_enabled_last
+                || std::abs(weld_epsilon - m_garment_vertex_merge_distance_last) > 1e-15
+                || state.garment_base_pose != m_garment_base_pose_last);
         const bool mesh_changed = (desired != m_garment_mesh_name) || settings_changed;
         if (mesh_changed)
         {
             const std::filesystem::path mesh_path = assets_dir() / "garments" / desired;
+            const bool loading_gltf = is_gltf_path(mesh_path);
 
             Eigen::MatrixXd V;
             Eigen::MatrixXi F;
-            const bool ok = igl::read_triangle_mesh(mesh_path.string(), V, F);
+            Eigen::MatrixXd UV;
+            Eigen::MatrixXi F_uv;
+            GltfGarment gltf;
+            ObjMaterialTexture obj_texture;
+            std::string load_error;
+            const bool ok = loading_gltf
+                ? load_gltf_garment(mesh_path, gltf, &load_error)
+                : igl::read_triangle_mesh(mesh_path.string(), V, F);
+            const bool loaded_gltf_material = loading_gltf && ok && gltf.has_material;
+            const bool loaded_gltf_texture = loading_gltf && ok && gltf.has_image_texture();
+            const bool loaded_obj_material = !loading_gltf
+                && ok
+                && load_obj_material_texture(mesh_path, obj_texture)
+                && obj_texture.has_material;
+            const bool loaded_obj_texture = loaded_obj_material && obj_texture.has_image_texture();
+            if (loading_gltf && ok)
+            {
+                V = std::move(gltf.vertices);
+                F = std::move(gltf.faces);
+                UV = std::move(gltf.uv);
+                F_uv = std::move(gltf.uv_faces);
+            }
+            else if (loaded_obj_texture)
+            {
+                UV = std::move(obj_texture.uv);
+                F_uv = std::move(obj_texture.uv_faces);
+            }
             if (!ok)
             {
                 data.clear();
                 data.set_visible(false);
                 m_garment_mesh_name.clear();
+                m_garment_has_source_texture = false;
+                m_garment_has_image_texture = false;
+                m_garment_source_colors.resize(0, 0);
+                m_garment_base_smpl_vertices.resize(0, 0);
                 m_garment_to_smpl.clear();
                 m_garment_mapping_mesh_name.clear();
+                console_add_line(state, "ERROR: Could not load garment " + desired
+                    + (load_error.empty() ? std::string() : ": " + load_error));
                 return;
             }
 
@@ -101,9 +211,31 @@ namespace poseweaver
 
             data.clear();
             data.set_mesh(V, F);
+            if (loaded_gltf_texture || loaded_obj_texture)
+            {
+                data.set_uv(UV, F_uv);
+                if (loaded_gltf_texture)
+                {
+                    set_rgba_texture(
+                        data,
+                        gltf.texture_rgba,
+                        gltf.texture_width,
+                        gltf.texture_height);
+                }
+                else
+                {
+                    set_rgba_texture(
+                        data,
+                        obj_texture.rgba,
+                        obj_texture.width,
+                        obj_texture.height);
+                }
+            }
             data.show_faces = 1;
             data.show_lines = 0;
             data.show_overlay = 0;
+            data.show_texture = 0;
+            data.double_sided = loading_gltf && gltf.double_sided;
             data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
             data.set_visible(true);
 
@@ -111,21 +243,39 @@ namespace poseweaver
             m_garment_last_show_mesh = true;
 
             m_garment_rest_vertices = V;
+            m_garment_base_smpl_vertices.resize(0, 0);
 
             m_viewer.core().align_camera_center(V, F);
 
             m_garment_mesh_name = desired;
+            m_garment_has_source_texture = loaded_gltf_material || loaded_obj_material;
+            m_garment_has_image_texture = loaded_gltf_texture || loaded_obj_texture;
+            if (loaded_gltf_material && gltf.face_colors.rows() == F.rows())
+                m_garment_source_colors = std::move(gltf.face_colors);
+            else if (loaded_obj_material && obj_texture.face_colors.rows() == F.rows())
+                m_garment_source_colors = std::move(obj_texture.face_colors);
+            else
+                m_garment_source_colors = Eigen::MatrixXd::Ones(1, 3);
             m_garment_version++;
             m_garment_vertex_merge_settings_valid = true;
             m_garment_vertex_merge_enabled_last = weld_enabled;
             m_garment_vertex_merge_distance_last = weld_epsilon;
+            m_garment_base_pose_last = state.garment_base_pose;
             console_add_line(state,
                 std::string("Loaded garment: ") + desired +
                 " (#V=" + std::to_string((int)V.rows()) +
-                ", #F=" + std::to_string((int)F.rows()) + ")");
+                ", #F=" + std::to_string((int)F.rows()) +
+                ", base_pose=" + (state.garment_base_pose == GarmentBasePose::APose ? "A" : "T") +
+                ", material=" + (m_garment_has_source_texture ? "yes" : "no") +
+                ", image_texture=" + (m_garment_has_image_texture ? "yes" : "no") + ")");
+            if (!gltf.texture_warning.empty())
+                console_add_line(state, "glTF texture warning: " + gltf.texture_warning);
+            if (!obj_texture.warning.empty())
+                console_add_line(state, "OBJ texture warning: " + obj_texture.warning);
 
             m_garment_to_smpl.clear();
             m_garment_mapping_mesh_name.clear();
+            m_garment_base_smpl_vertices.resize(0, 0);
             m_garment_last_mapping_attempt_mesh_name.clear();
             m_garment_last_mapping_attempt_failed = false;
             m_garment_last_mapping_attempt_error.clear();
@@ -153,12 +303,19 @@ namespace poseweaver
 
         if (state.garment_color_by_smpl_uv)
         {
+            data.show_texture = 0;
             if (m_garment_uv_vertex_colors_valid && m_garment_uv_vertex_colors.rows() == data.V.rows())
                 data.set_colors(m_garment_uv_vertex_colors);
         }
-        else if (m_last_garment_color_by_smpl_uv)
+        else
         {
-            data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+            const bool use_source_texture = m_garment_has_source_texture
+                && state.garment_use_source_texture;
+            data.show_texture = use_source_texture && m_garment_has_image_texture ? 1 : 0;
+            if (use_source_texture)
+                data.set_colors(m_garment_source_colors);
+            else
+                data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
         }
         m_last_garment_color_by_smpl_uv = state.garment_color_by_smpl_uv;
     }
@@ -186,6 +343,7 @@ namespace poseweaver
         if (m_garment_to_smpl.valid() &&
             m_garment_mapping_mesh_name == m_garment_mesh_name &&
             m_garment_mapping_gender == gender &&
+            m_garment_mapping_base_pose == state.garment_base_pose &&
             m_garment_to_smpl.face_index.size() == garment.V.rows())
         {
             return;
@@ -193,7 +351,8 @@ namespace poseweaver
 
         if (m_garment_last_mapping_attempt_failed &&
             m_garment_last_mapping_attempt_mesh_name == m_garment_mesh_name &&
-            m_garment_last_mapping_attempt_gender == gender)
+            m_garment_last_mapping_attempt_gender == gender &&
+            m_garment_last_mapping_attempt_base_pose == state.garment_base_pose)
         {
             return;
         }
@@ -201,15 +360,28 @@ namespace poseweaver
         console_add_line(state,
             std::string("Computing cloth→SMPL mapping for ") + m_garment_mesh_name +
             " (gender=" + ((gender == SmplType::Male) ? std::string("male") : std::string("female")) +
+            ", base_pose=" + (state.garment_base_pose == GarmentBasePose::APose ? "A" : "T") +
             ", #V=" + std::to_string((int)m_garment_rest_vertices.rows()) + ")");
 
         ClothToSmplMapping mapping;
         std::string err;
 
-        const bool ok = compute_cloth_to_smpl_mapping(
+        Eigen::VectorXd base_pose_axis_angle;
+        MatrixX3dRM base_vertices_rm;
+        SmplhParams base_params;
+        const bool base_pose_loaded = load_garment_base_pose_axis_angle(
+            state.garment_base_pose,
+            m_smplh_model.joint_count(),
+            base_pose_axis_angle,
+            &err);
+        base_params.pose_axis_angle = base_pose_axis_angle;
+        const bool base_pose_evaluated = base_pose_loaded
+            && smplh_evaluate_lbs(m_smplh_model, base_params, base_vertices_rm, &err);
+        const Eigen::MatrixXd base_vertices = base_vertices_rm;
+        const bool ok = base_pose_evaluated && compute_cloth_to_smpl_mapping(
             m_garment_rest_vertices,
             garment.F,
-            m_smplh_model.v_template,
+            base_vertices,
             m_smplh_model.F,
             &mapping,
             &err);
@@ -220,6 +392,7 @@ namespace poseweaver
             console_add_line(state, std::string("ERROR: Cloth→SMPL mapping failed: ") + err);
             m_garment_last_mapping_attempt_mesh_name = m_garment_mesh_name;
             m_garment_last_mapping_attempt_gender = gender;
+            m_garment_last_mapping_attempt_base_pose = state.garment_base_pose;
             m_garment_last_mapping_attempt_failed = true;
             m_garment_last_mapping_attempt_error = err;
             m_garment_to_smpl.clear();
@@ -235,8 +408,11 @@ namespace poseweaver
         m_garment_to_smpl = std::move(mapping);
         m_garment_mapping_mesh_name = m_garment_mesh_name;
         m_garment_mapping_gender = gender;
+        m_garment_mapping_base_pose = state.garment_base_pose;
+        m_garment_base_smpl_vertices = base_vertices;
         m_garment_last_mapping_attempt_mesh_name = m_garment_mesh_name;
         m_garment_last_mapping_attempt_gender = gender;
+        m_garment_last_mapping_attempt_base_pose = state.garment_base_pose;
         m_garment_last_mapping_attempt_failed = false;
         m_garment_last_mapping_attempt_error.clear();
         m_garment_version++;
@@ -419,6 +595,8 @@ namespace poseweaver
             return;
         if (m_smplh_vertices.rows() != m_smplh_model.vertex_count())
             return;
+        if (m_garment_base_smpl_vertices.rows() != m_smplh_model.vertex_count())
+            return;
         if (m_garment_to_smpl.face_index.size() != m_garment_rest_vertices.rows())
             return;
 
@@ -431,7 +609,7 @@ namespace poseweaver
 
         Eigen::MatrixXd V_new(m_garment_rest_vertices.rows(), 3);
         const auto& F_body = m_smplh_model.F;
-        const auto& V_rest = m_smplh_model.v_template;
+        const Eigen::MatrixXd& V_rest = m_garment_base_smpl_vertices;
         const auto& V_def = m_smplh_vertices;
 
         for (int vi = 0; vi < V_new.rows(); ++vi)
