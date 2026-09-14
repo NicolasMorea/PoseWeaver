@@ -12,6 +12,8 @@
 #include <atomic>
 #include <mutex>
 #include <array>
+#include <string>
+#include <utility>
 #include <vector>
 
 struct GLFWwindow;
@@ -20,6 +22,7 @@ namespace poseweaver
 {
     struct ClothFittingLayers
     {
+        std::vector<unsigned char> dumb_render;
         std::vector<unsigned char> occluded_cloth;
         std::vector<unsigned char> warped_cloth;
         std::vector<unsigned char> warped_occluded_cloth;
@@ -27,10 +30,14 @@ namespace poseweaver
         std::vector<unsigned char> filtered_iso_matching;
         std::vector<unsigned char> predicted_depth_visibility;
         std::vector<unsigned char> true_depth_visibility;
+        std::vector<unsigned char> corrected_true_depth_visibility;
         std::vector<unsigned char> iso_visibility;
         std::vector<unsigned char> raw_final_occlusion;
         std::vector<unsigned char> filtered_final_occlusion;
         std::vector<std::vector<unsigned char>> deformation_steps;
+        std::vector<float> deformation_source_x;
+        std::vector<float> deformation_source_y;
+        std::vector<std::pair<std::string, double>> timings_seconds;
         int tested_count = 0;
         int removed_count = 0;
     };
@@ -116,8 +123,19 @@ namespace poseweaver
             float prediction_from_cloth_offset_y,
             ClothFittingLayers& out_layers,
             std::string* out_error);
+        bool refit_cloth_render_with_maps(
+            const std::vector<unsigned char>& cloth_rgba,
+            int width,
+            int height,
+            const std::vector<unsigned char>& visibility_rgba,
+            const std::vector<float>& deformation_source_x,
+            const std::vector<float>& deformation_source_y,
+            std::vector<unsigned char>& out_warped_cloth,
+            std::vector<unsigned char>& out_warped_occluded_cloth,
+            std::string* out_error) const;
 
         bool garment_to_smpl_mapping_valid() const { return m_garment_to_smpl.valid(); }
+        bool garment_has_source_texture() const { return m_garment_has_source_texture; }
         int garment_constraint_count() const;
         const std::vector<UvSegment>& garment_uv_wireframe_segments() const { return m_garment_uv_segments; }
         const std::vector<UvTriangle>& garment_uv_triangles() const { return m_garment_uv_triangles; }
@@ -154,6 +172,11 @@ namespace poseweaver
         void apply_smpl_scene_transform(const AppState& state, Eigen::MatrixXd& vertices) const;
 
         bool ensure_smplh_model_loaded(AppState& state, SmplType gender);
+        bool load_garment_base_pose_axis_angle(
+            GarmentBasePose base_pose,
+            int joint_count,
+            Eigen::VectorXd& pose_axis_angle,
+            std::string* error) const;
         void ensure_garment_to_smpl_mapping(AppState& state);
         void ensure_garment_uv_projection();
         void handle_garment_posing(AppState& state, bool force);
@@ -227,6 +250,7 @@ namespace poseweaver
         ClothInkStyle m_cloth_ink_preview_style = ClothInkStyle::Off;
         int m_last_fb_h = 0;
         Eigen::MatrixXd m_garment_rest_vertices;
+        Eigen::MatrixXd m_garment_base_smpl_vertices;
         bool m_smplh_vertices_recomputed_this_frame = false;
 
         bool m_smplh_loaded = false;
@@ -244,10 +268,14 @@ namespace poseweaver
         bool m_smplh_deform_dirty = true;
         bool m_smplh_last_show_character = true;
         bool m_garment_last_show_mesh = false;
+        bool m_garment_has_source_texture = false;
+        bool m_garment_has_image_texture = false;
+        Eigen::MatrixXd m_garment_source_colors;
 
         bool m_garment_vertex_merge_settings_valid = false;
         bool m_garment_vertex_merge_enabled_last = true;
         double m_garment_vertex_merge_distance_last = 0.0025;
+        GarmentBasePose m_garment_base_pose_last = GarmentBasePose::TPose;
 
         std::uint64_t m_last_garment_pushout_request_id = 0;
 
@@ -286,6 +314,9 @@ namespace poseweaver
         std::vector<float> m_sketch2iso_prediction_values;
         std::vector<float> m_sketch2iso_prediction_mask;
         std::vector<float> m_iso_vertex_descriptors;
+        std::vector<int> m_iso_vertex_mirror_indices;
+        bool m_iso_prediction_mirror_vertices = false;
+        std::string m_iso_projection_orientation_npz_path;
         int m_iso_vertex_descriptor_count = 0;
         int m_iso_vertex_descriptor_dimensions = 0;
         bool m_iso_vertex_descriptors_load_attempted = false;
@@ -406,10 +437,12 @@ namespace poseweaver
         ClothToSmplMapping m_garment_to_smpl;
         std::string m_garment_mapping_mesh_name;
         SmplType m_garment_mapping_gender = SmplType::Male;
+        GarmentBasePose m_garment_mapping_base_pose = GarmentBasePose::TPose;
 
         // Avoids retrying a failing cloth→SMPL mapping every frame.
         std::string m_garment_last_mapping_attempt_mesh_name;
         SmplType m_garment_last_mapping_attempt_gender = SmplType::Male;
+        GarmentBasePose m_garment_last_mapping_attempt_base_pose = GarmentBasePose::TPose;
         bool m_garment_last_mapping_attempt_failed = false;
         std::string m_garment_last_mapping_attempt_error;
 

@@ -63,6 +63,16 @@ namespace
             if (std::isfinite(v))
                 state->garment_vertex_merge_distance = std::clamp(v, 0.0f, 0.05f);
         }
+        if (std::sscanf(line, "GarmentUseSourceTexture=%d", &iv) == 1)
+        {
+            state->garment_use_source_texture = (iv != 0);
+        }
+        if (std::sscanf(line, "GarmentBasePose=%d", &iv) == 1)
+        {
+            state->garment_base_pose = iv == 1
+                ? poseweaver::GarmentBasePose::APose
+                : poseweaver::GarmentBasePose::TPose;
+        }
         if (std::sscanf(line, "ClothToonShader=%d", &iv) == 1)
         {
             state->cloth_ink_style = iv != 0 ? poseweaver::ClothInkStyle::Detailed : poseweaver::ClothInkStyle::Off;
@@ -228,6 +238,7 @@ namespace
         if (std::sscanf(line, "ClothFittingWarpSteps=%d", &iv) == 1)
         {
             state->cloth_fitting_warp_steps = std::clamp(iv, 1, 32);
+        }
         if (std::sscanf(line, "ClothFittingDebugSmoothingRadius=%d", &iv) == 1)
             state->cloth_fitting_debug_smoothing_radius = std::clamp(iv, 0, 8);
         if (std::sscanf(line, "ClothFittingDebugSmoothingPasses=%d", &iv) == 1)
@@ -236,7 +247,14 @@ namespace
             state->cloth_fitting_debug_min_patch_area = std::clamp(iv, 1, 4096);
         if (std::sscanf(line, "ClothFittingDebugErrorFillRadius=%d", &iv) == 1)
             state->cloth_fitting_debug_error_fill_radius = std::clamp(iv, 0, 4096);
-        }
+        if (std::sscanf(line, "ClothFittingTrueDepthCorrectionMaxShift=%d", &iv) == 1)
+            state->cloth_fitting_true_depth_correction_max_shift = std::clamp(iv, 0, 1024);
+        if (std::sscanf(line, "ClothFittingTrueDepthCorrectionSupportRadius=%d", &iv) == 1)
+            state->cloth_fitting_true_depth_correction_support_radius = std::clamp(iv, 0, 64);
+        if (std::sscanf(line, "ClothFittingTrueDepthCorrectionMinOverlap=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_fitting_true_depth_correction_min_overlap = std::clamp(v, 0.0f, 1.0f);
+        if (std::sscanf(line, "ClothFittingTrueDepthCorrectionMinImprovement=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_fitting_true_depth_correction_min_improvement = std::clamp(v, 0.0f, 1.0f);
         if (std::sscanf(line, "ClothFittingOcclusionCleanupRadius=%d", &iv) == 1)
         {
             state->cloth_fitting_occlusion_cleanup_radius = std::clamp(iv, 1, 32);
@@ -254,14 +272,46 @@ namespace
         {
             state->cloth_fitting_occlusion_min_patch_area = std::clamp(iv, 1, 4096);
         }
-        if (std::sscanf(line, "ClothSmoothingFilterStrength=%f", &v) == 1 && std::isfinite(v))
-            state->cloth_smoothing_filter_strength = std::clamp(v, 0.0f, 1.0f);
-        if (std::sscanf(line, "ClothSmoothingInnerLineWidth=%f", &v) == 1 && std::isfinite(v))
-            state->cloth_smoothing_inner_line_width = std::clamp(v, 0.0f, 20.0f);
-        if (std::sscanf(line, "ClothSmoothingContourRadius=%d", &iv) == 1)
-            state->cloth_smoothing_contour_radius = std::clamp(iv, 1, 32);
-        if (std::sscanf(line, "ClothSmoothingLineGapRadius=%d", &iv) == 1)
-            state->cloth_smoothing_line_gap_radius = std::clamp(iv, 0, 12);
+        if (std::sscanf(line, "ClothStylizationMethod=%d", &iv) == 1)
+            state->cloth_stylization_method = std::clamp(iv, 0, 3);
+        if (std::sscanf(line, "ClothStylizationOutlineWidth=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_outline_width = std::clamp(v, 0.0f, 12.0f);
+        if (std::sscanf(line, "ClothStylizationWrinkleWidth=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_wrinkle_width = std::clamp(v, 0.0f, 8.0f);
+        if (std::sscanf(line, "ClothStylizationEdgeThreshold=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_edge_threshold = std::clamp(v, 0.01f, 0.5f);
+        if (std::sscanf(line, "ClothStylizationShadowThreshold=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_shadow_threshold = std::clamp(v, 0.5f, 1.0f);
+        if (std::sscanf(line, "ClothStylizationShadowStrength=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_shadow_strength = std::clamp(v, 0.0f, 0.8f);
+        if (std::sscanf(line, "ClothStylizationSoftness=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_stylization_softness = std::clamp(v, 0.0f, 1.0f);
+        if (std::sscanf(line, "ClothStylizationContourRadius=%d", &iv) == 1)
+            state->cloth_stylization_contour_radius = std::clamp(iv, 1, 24);
+        if (std::sscanf(line, "ClothStylizationLineGapRadius=%d", &iv) == 1)
+            state->cloth_stylization_line_gap_radius = std::clamp(iv, 0, 6);
+        {
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            if (std::sscanf(line, "ClothStylizationLineColor=%f,%f,%f", &r, &g, &b) == 3
+                && std::isfinite(r) && std::isfinite(g) && std::isfinite(b))
+            {
+                state->cloth_stylization_line_color[0] = std::clamp(r, 0.0f, 1.0f);
+                state->cloth_stylization_line_color[1] = std::clamp(g, 0.0f, 1.0f);
+                state->cloth_stylization_line_color[2] = std::clamp(b, 0.0f, 1.0f);
+            }
+        }
+        if (std::sscanf(line, "ClothGreasePencilOutlineWidth=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_outline_width = std::clamp(v, 0.0f, 12.0f);
+        if (std::sscanf(line, "ClothGreasePencilWrinkleWidth=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_wrinkle_width = std::clamp(v, 0.0f, 8.0f);
+        if (std::sscanf(line, "ClothGreasePencilCreaseAngle=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_crease_angle = std::clamp(v, 10.0f, 80.0f);
+        if (std::sscanf(line, "ClothGreasePencilShadowThreshold=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_shadow_threshold = std::clamp(v, 0.35f, 0.95f);
+        if (std::sscanf(line, "ClothGreasePencilShadowRange=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_shadow_range = std::clamp(v, 0.05f, 0.70f);
+        if (std::sscanf(line, "ClothGreasePencilShadowStrength=%f", &v) == 1 && std::isfinite(v))
+            state->cloth_grease_pencil_shadow_strength = std::clamp(v, 0.0f, 1.0f);
         if (std::sscanf(line, "Sketch2IsoContinuityFilterEnabled=%d", &iv) == 1)
             state->sketch2iso_continuity_filter_enabled = iv != 0;
         if (std::sscanf(line, "Sketch2IsoContinuityFilterStrength=%f", &v) == 1 && std::isfinite(v))
@@ -280,6 +330,8 @@ namespace
             if (std::isfinite(v))
                 state->cloth_render_target_detail_size = std::clamp(v, 0.0001f, 0.25f);
         }
+        if (std::sscanf(line, "ClothRenderMethod=%d", &iv) == 1)
+            state->cloth_render_method = std::clamp(iv, 0, 5);
         {
             float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
             if (std::sscanf(line, "CanvaBrushColor=%f,%f,%f,%f", &r, &g, &b, &a) == 4)
@@ -502,6 +554,8 @@ namespace
         buf->appendf("GarmentMinClothSkinDistance=%.6f\n", state->garment_min_cloth_skin_distance);
         buf->appendf("GarmentVertexMergeEnabled=%d\n", state->garment_vertex_merge_enabled ? 1 : 0);
         buf->appendf("GarmentVertexMergeDistance=%.9f\n", state->garment_vertex_merge_distance);
+        buf->appendf("GarmentUseSourceTexture=%d\n", state->garment_use_source_texture ? 1 : 0);
+        buf->appendf("GarmentBasePose=%d\n", static_cast<int>(state->garment_base_pose));
         buf->appendf("ClothInkStyle=%d\n", static_cast<int>(state->cloth_ink_style));
         buf->appendf("ClothInkColor=%.6f,%.6f,%.6f\n",
             state->cloth_ink_color[0], state->cloth_ink_color[1], state->cloth_ink_color[2]);
@@ -531,20 +585,40 @@ namespace
         buf->appendf("ClothFittingDebugSmoothingPasses=%d\n", state->cloth_fitting_debug_smoothing_passes);
         buf->appendf("ClothFittingDebugMinPatchArea=%d\n", state->cloth_fitting_debug_min_patch_area);
         buf->appendf("ClothFittingDebugErrorFillRadius=%d\n", state->cloth_fitting_debug_error_fill_radius);
+        buf->appendf("ClothFittingTrueDepthCorrectionMaxShift=%d\n", state->cloth_fitting_true_depth_correction_max_shift);
+        buf->appendf("ClothFittingTrueDepthCorrectionSupportRadius=%d\n", state->cloth_fitting_true_depth_correction_support_radius);
+        buf->appendf("ClothFittingTrueDepthCorrectionMinOverlap=%.6f\n", state->cloth_fitting_true_depth_correction_min_overlap);
+        buf->appendf("ClothFittingTrueDepthCorrectionMinImprovement=%.6f\n", state->cloth_fitting_true_depth_correction_min_improvement);
         buf->appendf("ClothFittingOcclusionCleanupRadius=%d\n", state->cloth_fitting_occlusion_cleanup_radius);
         buf->appendf("ClothFittingOcclusionCleanupPasses=%d\n", state->cloth_fitting_occlusion_cleanup_passes);
         buf->appendf("ClothFittingOcclusionChaosThreshold=%.6f\n", state->cloth_fitting_occlusion_chaos_threshold);
         buf->appendf("ClothFittingOcclusionMinPatchArea=%d\n", state->cloth_fitting_occlusion_min_patch_area);
-        buf->appendf("ClothSmoothingFilterStrength=%.6f\n", state->cloth_smoothing_filter_strength);
-        buf->appendf("ClothSmoothingInnerLineWidth=%.6f\n", state->cloth_smoothing_inner_line_width);
-        buf->appendf("ClothSmoothingContourRadius=%d\n", state->cloth_smoothing_contour_radius);
-        buf->appendf("ClothSmoothingLineGapRadius=%d\n", state->cloth_smoothing_line_gap_radius);
+        buf->appendf("ClothStylizationMethod=%d\n", state->cloth_stylization_method);
+        buf->appendf("ClothStylizationOutlineWidth=%.6f\n", state->cloth_stylization_outline_width);
+        buf->appendf("ClothStylizationWrinkleWidth=%.6f\n", state->cloth_stylization_wrinkle_width);
+        buf->appendf("ClothStylizationEdgeThreshold=%.6f\n", state->cloth_stylization_edge_threshold);
+        buf->appendf("ClothStylizationShadowThreshold=%.6f\n", state->cloth_stylization_shadow_threshold);
+        buf->appendf("ClothStylizationShadowStrength=%.6f\n", state->cloth_stylization_shadow_strength);
+        buf->appendf("ClothStylizationSoftness=%.6f\n", state->cloth_stylization_softness);
+        buf->appendf("ClothStylizationContourRadius=%d\n", state->cloth_stylization_contour_radius);
+        buf->appendf("ClothStylizationLineGapRadius=%d\n", state->cloth_stylization_line_gap_radius);
+        buf->appendf("ClothStylizationLineColor=%.6f,%.6f,%.6f\n",
+            state->cloth_stylization_line_color[0],
+            state->cloth_stylization_line_color[1],
+            state->cloth_stylization_line_color[2]);
+        buf->appendf("ClothGreasePencilOutlineWidth=%.6f\n", state->cloth_grease_pencil_outline_width);
+        buf->appendf("ClothGreasePencilWrinkleWidth=%.6f\n", state->cloth_grease_pencil_wrinkle_width);
+        buf->appendf("ClothGreasePencilCreaseAngle=%.6f\n", state->cloth_grease_pencil_crease_angle);
+        buf->appendf("ClothGreasePencilShadowThreshold=%.6f\n", state->cloth_grease_pencil_shadow_threshold);
+        buf->appendf("ClothGreasePencilShadowRange=%.6f\n", state->cloth_grease_pencil_shadow_range);
+        buf->appendf("ClothGreasePencilShadowStrength=%.6f\n", state->cloth_grease_pencil_shadow_strength);
         buf->appendf("Sketch2IsoContinuityFilterEnabled=%d\n", state->sketch2iso_continuity_filter_enabled ? 1 : 0);
         buf->appendf("Sketch2IsoContinuityFilterStrength=%.6f\n", state->sketch2iso_continuity_filter_strength);
         buf->appendf("Sketch2IsoContinuityEdgeThreshold=%.6f\n", state->sketch2iso_continuity_edge_threshold);
         buf->appendf("Sketch2IsoContinuityIterations=%d\n", state->sketch2iso_continuity_iterations);
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
+        buf->appendf("ClothRenderMethod=%d\n", std::clamp(state->cloth_render_method, 0, 5));
 
         buf->appendf("SimulationDevice=%d\n",
             state->xpbd_params.device == poseweaver::SimulationDevice::Gpu ? 1 : 0);

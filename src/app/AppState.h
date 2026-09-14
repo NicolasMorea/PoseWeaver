@@ -36,6 +36,12 @@ namespace poseweaver
         Neutral = 2,
     };
 
+    enum class GarmentBasePose
+    {
+        TPose = 0,
+        APose = 1,
+    };
+
     enum class CollisionGeometryType
     {
         RawSmpl = 0,
@@ -162,7 +168,7 @@ namespace poseweaver
 
     struct UiLayoutState
     {
-        float left_panel_width = 360.0f;
+        float left_panel_width = 400.0f;
         float console_height = 240.0f;
     };
 
@@ -295,6 +301,7 @@ namespace poseweaver
         std::string cloth_render_camera_rig_path;
         bool cloth_render_fine = false;
         bool cloth_render_use_current_camera = false;
+        int cloth_render_method = 0;
         float cloth_render_target_detail_size = 0.01f;
         int cloth_render_source_vertex_count = 0;
         int cloth_render_vertex_count = 0;
@@ -342,14 +349,30 @@ namespace poseweaver
         int cloth_fitting_debug_smoothing_passes = 3;
         int cloth_fitting_debug_min_patch_area = 64;
         int cloth_fitting_debug_error_fill_radius = 0;
+        int cloth_fitting_true_depth_correction_max_shift = 256;
+        int cloth_fitting_true_depth_correction_support_radius = 12;
+        float cloth_fitting_true_depth_correction_min_overlap = 0.02f;
+        float cloth_fitting_true_depth_correction_min_improvement = 0.005f;
         int cloth_fitting_occlusion_cleanup_radius = 6;
         int cloth_fitting_occlusion_cleanup_passes = 2;
         float cloth_fitting_occlusion_chaos_threshold = 0.20f;
         int cloth_fitting_occlusion_min_patch_area = 24;
-        float cloth_smoothing_filter_strength = 0.90f;
-        float cloth_smoothing_inner_line_width = 4.0f;
-        int cloth_smoothing_contour_radius = 10;
-        int cloth_smoothing_line_gap_radius = 3;
+        int cloth_stylization_method = 0;
+        float cloth_stylization_outline_width = 2.0f;
+        float cloth_stylization_wrinkle_width = 1.0f;
+        float cloth_stylization_edge_threshold = 0.075f;
+        float cloth_stylization_shadow_threshold = 0.88f;
+        float cloth_stylization_shadow_strength = 0.28f;
+        float cloth_stylization_softness = 0.35f;
+        int cloth_stylization_contour_radius = 6;
+        int cloth_stylization_line_gap_radius = 0;
+        std::array<float, 3> cloth_stylization_line_color{ 0.0f, 0.0f, 0.0f };
+        float cloth_grease_pencil_outline_width = 3.0f;
+        float cloth_grease_pencil_wrinkle_width = 1.25f;
+        float cloth_grease_pencil_crease_angle = 32.0f;
+        float cloth_grease_pencil_shadow_threshold = 0.72f;
+        float cloth_grease_pencil_shadow_range = 0.34f;
+        float cloth_grease_pencil_shadow_strength = 0.72f;
         std::string cloth_fitting_output_dir;
         bool sketch2iso_continuity_filter_enabled = true;
         float sketch2iso_continuity_filter_strength = 0.50f;
@@ -389,6 +412,8 @@ namespace poseweaver
         bool show_garment_mesh = true;
         bool show_collision_colliders = false;
         bool garment_color_by_smpl_uv = false;
+        bool garment_use_source_texture = true;
+        GarmentBasePose garment_base_pose = GarmentBasePose::TPose;
         ClothInkStyle cloth_ink_style = ClothInkStyle::Off;
         std::array<float, 3> cloth_ink_color{ 1.0f, 1.0f, 1.0f };
         bool show_console = true;

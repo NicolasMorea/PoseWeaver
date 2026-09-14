@@ -85,6 +85,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libigl)
 
+FetchContent_Declare(
+	cgltf
+	GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+	GIT_TAG        v1.15
+)
+FetchContent_GetProperties(cgltf)
+if(NOT cgltf_POPULATED)
+	FetchContent_Populate(cgltf)
+endif()
+
 if(POSEWEAVER_CUDA_LEGACY_COMPILER)
 	set(POSEWEAVER_CUDA_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/ClothCudaJacobi.cu.o")
 	add_custom_command(
@@ -190,10 +200,12 @@ endif()
 if(POSEWEAVER_HAS_CUDA)
 	add_executable(poseweaver_cuda_smoke
 		tests/ClothCudaSmoke.cpp
+		src/smpl/Smplh.cpp
+		src/smpl/Smplh.h
 		src/simulation/gpu/ClothCudaJacobi.h
 	)
 	target_include_directories(poseweaver_cuda_smoke PRIVATE src)
-	target_link_libraries(poseweaver_cuda_smoke PRIVATE Eigen3::Eigen poseweaver_cuda_backend)
+	target_link_libraries(poseweaver_cuda_smoke PRIVATE Eigen3::Eigen cnpy poseweaver_cuda_backend)
 	target_compile_features(poseweaver_cuda_smoke PRIVATE cxx_std_17)
 	add_test(NAME poseweaver_cuda_smoke COMMAND poseweaver_cuda_smoke)
 endif()
@@ -221,6 +233,32 @@ target_link_libraries(poseweaver_prediction_filters_smoke PRIVATE cnpy stb_image
 target_compile_features(poseweaver_prediction_filters_smoke PRIVATE cxx_std_17)
 add_test(NAME poseweaver_prediction_filters_smoke COMMAND poseweaver_prediction_filters_smoke)
 
+add_executable(poseweaver_garment_asset_smoke
+	tests/GarmentAssetSmoke.cpp
+	src/core/Assets.cpp
+	src/core/Assets.h
+	src/core/GlbGarment.cpp
+	src/core/GlbGarment.h
+	src/core/ObjMaterialTexture.cpp
+	src/core/ObjMaterialTexture.h
+	src/third_party/stb_image_impl.cpp
+)
+target_include_directories(poseweaver_garment_asset_smoke PRIVATE src)
+target_include_directories(poseweaver_garment_asset_smoke SYSTEM PRIVATE ${cgltf_SOURCE_DIR})
+target_link_libraries(poseweaver_garment_asset_smoke PRIVATE igl::core stb_image)
+target_compile_features(poseweaver_garment_asset_smoke PRIVATE cxx_std_17)
+add_test(NAME poseweaver_garment_asset_smoke COMMAND poseweaver_garment_asset_smoke)
+
+add_executable(poseweaver_grease_pencil_line_art_smoke
+	tests/GreasePencilLineArtSmoke.cpp
+	src/render/RendererLineArt.cpp
+	src/render/RendererLineArt.h
+)
+target_include_directories(poseweaver_grease_pencil_line_art_smoke PRIVATE src)
+target_link_libraries(poseweaver_grease_pencil_line_art_smoke PRIVATE Eigen3::Eigen)
+target_compile_features(poseweaver_grease_pencil_line_art_smoke PRIVATE cxx_std_17)
+add_test(NAME poseweaver_grease_pencil_line_art_smoke COMMAND poseweaver_grease_pencil_line_art_smoke)
+
 if(Python3_Interpreter_FOUND)
 	add_test(
 		NAME poseweaver_mcp_protocol
@@ -241,6 +279,10 @@ if(POSEWEAVER_BUILD_APP)
 		src/third_party/stb_image_write_impl.cpp
 		src/core/Assets.cpp
 		src/core/Assets.h
+		src/core/GlbGarment.cpp
+		src/core/GlbGarment.h
+		src/core/ObjMaterialTexture.cpp
+		src/core/ObjMaterialTexture.h
 		src/core/Geometry.h
 		src/core/Paths.h
 		src/simulation/ClothMeshProcessor.cpp
@@ -268,6 +310,8 @@ if(POSEWEAVER_BUILD_APP)
 		src/smpl/Smplh.cpp
 		src/smpl/Smplh.h
 		src/render/Renderer.cpp
+		src/render/RendererLineArt.cpp
+		src/render/RendererLineArt.h
 		src/render/RendererCommands.cpp
 		src/render/RendererClothSimulationCommands.cpp
 		src/render/RendererClothConstraints.cpp
@@ -309,6 +353,7 @@ if(POSEWEAVER_BUILD_APP)
 	)
 
 	target_include_directories(poseweaver PRIVATE src)
+	target_include_directories(poseweaver SYSTEM PRIVATE ${cgltf_SOURCE_DIR})
 
 	target_compile_definitions(poseweaver PRIVATE
 		GLFW_INCLUDE_NONE

@@ -1,4 +1,5 @@
 #include "render/Renderer.h"
+#include "render/RendererLineArt.h"
 #include "core/Paths.h"
 #include "simulation/ClothMeshProcessor.h"
 #include "simulation/SmplCollisionProxy.h"
@@ -831,6 +832,17 @@ namespace poseweaver
                 + 0.0722f * (float)b) / 255.0f;
         }
 
+        static ClothInkStyle cloth_render_ink_style(int method)
+        {
+            switch (std::clamp(method, 0, 5))
+            {
+            case 1: return ClothInkStyle::Detailed;
+            case 2: return ClothInkStyle::Clean;
+            case 3: return ClothInkStyle::SoftGeometry;
+            default: return ClothInkStyle::Off;
+            }
+        }
+
         static bool load_stroke_luminance_mean(
             const std::filesystem::path& path,
             float& out_mean)
@@ -1379,7 +1391,28 @@ namespace poseweaver
                     ink_preview.show_overlay = 0;
                     ink_preview.double_sided = garment.double_sided;
                     ink_preview.shininess = garment.shininess;
-                    ink_preview.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+                    if (garment.V_uv.rows() > 0
+                        && garment.F_uv.rows() == garment.F.rows()
+                        && garment.texture_R.size() > 0)
+                    {
+                        ink_preview.set_uv(garment.V_uv, garment.F_uv);
+                        ink_preview.set_texture(
+                            garment.texture_R,
+                            garment.texture_G,
+                            garment.texture_B,
+                            garment.texture_A);
+                        ink_preview.show_texture = garment.show_texture;
+                    }
+                    else
+                    {
+                        ink_preview.show_texture = 0;
+                    }
+                    if (state.garment_use_source_texture
+                        && m_garment_has_source_texture
+                        && !state.garment_color_by_smpl_uv)
+                        ink_preview.set_colors(m_garment_source_colors);
+                    else
+                        ink_preview.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
                     m_cloth_ink_preview_source_vertices = garment.V;
                     m_cloth_ink_preview_source_faces = garment.F;
                     m_cloth_ink_preview_style = state.cloth_ink_style;
@@ -1388,6 +1421,14 @@ namespace poseweaver
             }
             if (preview_ready)
             {
+                if (ink_preview.show_texture != garment.show_texture)
+                    ink_preview.show_texture = garment.show_texture;
+                if (state.garment_use_source_texture
+                    && m_garment_has_source_texture
+                    && !state.garment_color_by_smpl_uv)
+                    ink_preview.set_colors(m_garment_source_colors);
+                else
+                    ink_preview.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
                 ink_preview.set_visible(true);
                 use_ink_preview = true;
             }
@@ -1636,6 +1677,11 @@ namespace poseweaver
             glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
             glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
             glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
+            const bool use_source_material = state.garment_use_source_texture
+                && m_garment_has_source_texture
+                && !state.garment_color_by_smpl_uv
+                && (mesh_index == m_garment_mesh_index || mesh_index == m_cloth_ink_preview_mesh_index);
+            glUniform1f(glGetUniformLocation(prog, "material_color_factor"), use_source_material ? 1.0f : 0.0f);
             glUniform1i(glGetUniformLocation(prog, "toon_style"), static_cast<int>(state.cloth_ink_style));
             glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
             glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
@@ -2097,6 +2143,9 @@ namespace poseweaver
         state.cloth_render_source_vertex_count = 0;
         state.cloth_render_vertex_count = 0;
         state.cloth_render_face_count = 0;
+        const int render_method = std::clamp(state.cloth_render_method, 0, 5);
+        const ClothInkStyle render_ink_style = cloth_render_ink_style(render_method);
+        const bool grease_pencil = render_method >= 4;
         if (m_garment_mesh_name.empty() || !state.show_garment_mesh)
         {
             m_last_cloth_render_request_id = request_id;
@@ -2155,15 +2204,25 @@ namespace poseweaver
         }
 
         const bool uses_render_surface =
-            state.cloth_ink_style == ClothInkStyle::Clean
-            || state.cloth_ink_style == ClothInkStyle::SoftGeometry;
+            render_ink_style == ClothInkStyle::Clean
+            || render_ink_style == ClothInkStyle::SoftGeometry
+            || grease_pencil;
         if (uses_render_surface)
         {
+            const bool preserve_garment_material = render_mesh == &garment
+                && state.garment_use_source_texture
+                && m_garment_has_source_texture
+                && !state.garment_color_by_smpl_uv;
+            const bool preserve_garment_texture = preserve_garment_material
+                && garment.show_texture
+                && garment.V_uv.rows() > 0
+                && garment.F_uv.rows() == garment.F.rows();
             const Eigen::MatrixXd source_V = render_mesh->V;
             const Eigen::MatrixXi source_F = render_mesh->F;
             Eigen::MatrixXd ink_V;
             Eigen::MatrixXd ink_N;
-            if (!build_ink_render_surface(source_V, source_F, state.cloth_ink_style, ink_V, ink_N))
+            const ClothInkStyle surface_style = grease_pencil ? ClothInkStyle::Clean : render_ink_style;
+            if (!build_ink_render_surface(source_V, source_F, surface_style, ink_V, ink_N))
             {
                 m_last_cloth_render_request_id = request_id;
                 state.cloth_render_completed_id = request_id;
@@ -2181,7 +2240,24 @@ namespace poseweaver
             ink_mesh.show_overlay = 0;
             ink_mesh.double_sided = garment.double_sided;
             ink_mesh.shininess = garment.shininess;
-            ink_mesh.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
+            if (preserve_garment_texture)
+            {
+                ink_mesh.set_uv(garment.V_uv, garment.F_uv);
+                ink_mesh.set_texture(
+                    garment.texture_R,
+                    garment.texture_G,
+                    garment.texture_B,
+                    garment.texture_A);
+                ink_mesh.show_texture = garment.show_texture;
+            }
+            else
+            {
+                ink_mesh.show_texture = 0;
+            }
+            if (preserve_garment_material)
+                ink_mesh.set_colors(m_garment_source_colors);
+            else
+                ink_mesh.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
             ink_mesh.set_visible(false);
             render_mesh = &ink_mesh;
         }
@@ -2325,7 +2401,7 @@ namespace poseweaver
 
         const int rendered_mesh_index = render_mesh == &garment ? m_garment_mesh_index : m_cloth_render_mesh_index;
         const size_t shader_index = (size_t)rendered_mesh_index;
-        const bool use_ink = state.cloth_ink_style != ClothInkStyle::Off;
+        const bool use_ink = render_ink_style != ClothInkStyle::Off;
         const MeshShaderVariant desired_variant = use_ink ? MeshShaderVariant::ClothToon : MeshShaderVariant::TwoLight;
         if (shader_index < m_mesh_shader_variant.size()
             && m_mesh_shader_variant[shader_index] != desired_variant
@@ -2357,7 +2433,11 @@ namespace poseweaver
         glUniform1f(glGetUniformLocation(prog, "lighting_factor"), core.lighting_factor);
         glUniform4f(glGetUniformLocation(prog, "fixed_color"), 0.0f, 0.0f, 0.0f, 0.0f);
         glUniform3fv(glGetUniformLocation(prog, "cloth_color"), 1, state.cloth_ink_color.data());
-        glUniform1i(glGetUniformLocation(prog, "toon_style"), static_cast<int>(state.cloth_ink_style));
+        glUniform1f(
+            glGetUniformLocation(prog, "material_color_factor"),
+            state.garment_use_source_texture && m_garment_has_source_texture
+                && !state.garment_color_by_smpl_uv ? 1.0f : 0.0f);
+        glUniform1i(glGetUniformLocation(prog, "toon_style"), static_cast<int>(render_ink_style));
         glUniform1i(glGetUniformLocation(prog, "toon_outline_pass"), 0);
         glUniform1f(glGetUniformLocation(prog, "toon_outline_width"), 0.0f);
         glUniform2f(glGetUniformLocation(prog, "viewport_size"), (float)kRender, (float)kRender);
@@ -2396,10 +2476,38 @@ namespace poseweaver
         render_mesh->meshgl.draw_mesh(true);
 
         std::vector<unsigned char> pixels((size_t)kRender * (size_t)kRender * 4u, 0u);
+        std::vector<float> depth_pixels;
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glReadPixels(0, 0, kRender, kRender, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        if (grease_pencil)
+        {
+            depth_pixels.resize((size_t)kRender * (size_t)kRender, 1.0f);
+            glReadPixels(0, 0, kRender, kRender, GL_DEPTH_COMPONENT, GL_FLOAT, depth_pixels.data());
+        }
         std::vector<unsigned char> out = resize_gl_rgba_to_top_left(pixels, kRender, kRender, kOut);
+        if (grease_pencil)
+        {
+            GreasePencilRenderSettings settings;
+            settings.outline_width = state.cloth_grease_pencil_outline_width;
+            settings.wrinkle_width = state.cloth_grease_pencil_wrinkle_width;
+            settings.crease_angle_degrees = state.cloth_grease_pencil_crease_angle;
+            settings.shadow_threshold = state.cloth_grease_pencil_shadow_threshold;
+            settings.shadow_range = state.cloth_grease_pencil_shadow_range;
+            settings.shadow_strength = state.cloth_grease_pencil_shadow_strength;
+            settings.line_color = state.cloth_stylization_line_color;
+            apply_grease_pencil_line_art(
+                out,
+                kOut,
+                kOut,
+                render_method == 5,
+                settings,
+                render_mesh->V,
+                render_mesh->F,
+                core.view,
+                core.proj,
+                depth_pixels);
+        }
 
         float sketch_stroke_mean = 0.0f;
         const bool matched_stroke_mean =

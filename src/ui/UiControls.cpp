@@ -155,8 +155,34 @@ namespace poseweaver
                     ImGui::Checkbox("Show object mesh", &state.show_object_mesh);
                     ImGui::Checkbox("Show garment mesh", &state.show_garment_mesh);
 
+                    int base_pose = state.garment_base_pose == GarmentBasePose::APose ? 1 : 0;
+                    const char* base_pose_names[] = { "T-pose", "A-pose" };
+                    if (ImGui::Combo("Garment base pose", &base_pose, base_pose_names, 2))
+                    {
+                        state.garment_base_pose = base_pose == 1
+                            ? GarmentBasePose::APose
+                            : GarmentBasePose::TPose;
+                    }
+
+                    const bool can_load_texture = renderer.garment_has_source_texture();
+                    bool load_texture = can_load_texture && state.garment_use_source_texture;
+                    ImGui::BeginDisabled(!can_load_texture);
+                    if (ImGui::Checkbox("Load texture", &load_texture) && can_load_texture)
+                    {
+                        state.garment_use_source_texture = load_texture;
+                        if (load_texture)
+                            state.garment_color_by_smpl_uv = false;
+                    }
+                    ImGui::EndDisabled();
+
                     if (renderer.garment_to_smpl_mapping_valid())
-                        ImGui::Checkbox("Color cloth by SMPL UV", &state.garment_color_by_smpl_uv);
+                    {
+                        if (ImGui::Checkbox("Color cloth by SMPL UV", &state.garment_color_by_smpl_uv)
+                            && state.garment_color_by_smpl_uv)
+                        {
+                            state.garment_use_source_texture = false;
+                        }
+                    }
 
                     ImGui::Separator();
 
