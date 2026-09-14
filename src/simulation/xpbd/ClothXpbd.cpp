@@ -1133,6 +1133,7 @@ namespace poseweaver
 
         std::vector<double> lambda_stretch(stretch_edges.size(), 0.0);
         std::vector<double> lambda_bend(bend_edges.size(), 0.0);
+        std::vector<double> lambda_bend_orientation(bend_edges.size(), 0.0);
         std::vector<double> lambda_col((size_t)N, 0.0);
         std::vector<double> lambda_self;
         std::vector<int> col_candidates;
@@ -1225,6 +1226,7 @@ namespace poseweaver
 
                 std::fill(lambda_stretch.begin(), lambda_stretch.end(), 0.0);
                 std::fill(lambda_bend.begin(), lambda_bend.end(), 0.0);
+                std::fill(lambda_bend_orientation.begin(), lambda_bend_orientation.end(), 0.0);
                 std::fill(lambda_col.begin(), lambda_col.end(), 0.0);
                 contacts.clear();
                 capsule_contacts.clear();
@@ -1290,75 +1292,85 @@ namespace poseweaver
                     if (params.bend_enabled && bend_alpha >= 0.0 && !bend_edges.empty())
                     {
                         const auto t0 = Clock::now();
+                        const auto solve_dihedral = [&](const BendEdge& be, double& lambda, bool flipped_only)
+                        {
+                            const int indices[4] = { be.i, be.j, be.k0, be.k1 };
+                            if (indices[0] < 0 || indices[1] < 0 || indices[2] < 0 || indices[3] < 0
+                                || indices[0] >= N || indices[1] >= N || indices[2] >= N || indices[3] >= N)
+                                return;
+
+                            const Eigen::Vector3d xi = Xs.row(be.i);
+                            const Eigen::Vector3d xj = Xs.row(be.j);
+                            const Eigen::Vector3d xk0 = Xs.row(be.k0);
+                            const Eigen::Vector3d xk1 = Xs.row(be.k1);
+                            const Eigen::Vector3d edge = xj - xi;
+                            const Eigen::Vector3d n0 = edge.cross(xk0 - xi);
+                            const Eigen::Vector3d n1 = (xk1 - xi).cross(edge);
+                            const double edge_len_sq = edge.squaredNorm();
+                            const double n0_len_sq = n0.squaredNorm();
+                            const double n1_len_sq = n1.squaredNorm();
+                            if (!(edge_len_sq > 1e-20) || !(n0_len_sq > 1e-20) || !(n1_len_sq > 1e-20))
+                                return;
+
+                            const double current_angle = dihedral_angle(xi, xj, xk0, xk1);
+                            if (flipped_only)
+                            {
+                                const double rest_side = std::sin(be.rest_angle);
+                                if (std::abs(rest_side) <= 1e-6
+                                    || std::sin(current_angle) * rest_side > 0.0)
+                                    return;
+                            }
+
+                            const double edge_len = std::sqrt(edge_len_sq);
+                            const Eigen::Vector3d qk0 = -(edge_len / n0_len_sq) * n0;
+                            const Eigen::Vector3d qk1 = -(edge_len / n1_len_sq) * n1;
+                            const Eigen::Vector3d qi =
+                                ((xk0 - xj).dot(edge) / edge_len_sq) * qk0
+                                + ((xk1 - xj).dot(edge) / edge_len_sq) * qk1;
+                            const Eigen::Vector3d qj =
+                                ((xi - xk0).dot(edge) / edge_len_sq) * qk0
+                                + ((xi - xk1).dot(edge) / edge_len_sq) * qk1;
+                            const Eigen::Vector3d gradients[4] = {
+                                be.angle_scale * qi,
+                                be.angle_scale * qj,
+                                be.angle_scale * qk0,
+                                be.angle_scale * qk1
+                            };
+
+                            double denominator = bend_alpha;
+                            for (int vi = 0; vi < 4; ++vi)
+                                denominator += inv_mass[indices[vi]] * gradients[vi].squaredNorm();
+                            if (!(denominator > kEps))
+                                return;
+
+                            const double C = be.angle_scale * wrapped_angle_difference(
+                                current_angle, be.rest_angle);
+                            double dlambda = (-C - bend_alpha * lambda) / denominator;
+
+                            double largest_response = 0.0;
+                            for (int vi = 0; vi < 4; ++vi)
+                                largest_response = std::max(largest_response,
+                                    inv_mass[indices[vi]] * gradients[vi].norm());
+                            if (largest_response > kEps && be.max_correction > 0.0)
+                            {
+                                const double max_dlambda = be.max_correction / largest_response;
+                                dlambda = std::clamp(dlambda, -max_dlambda, max_dlambda);
+                            }
+                            lambda += dlambda;
+                            for (int vi = 0; vi < 4; ++vi)
+                            {
+                                const double weight = inv_mass[indices[vi]];
+                                if (weight > 0.0)
+                                    Xs.row(indices[vi]) += (weight * dlambda * gradients[vi]).transpose();
+                            }
+                        };
+
                         for (size_t bi = 0; bi < bend_edges.size(); ++bi)
                         {
                             const BendEdge& be = bend_edges[bi];
                             if (params.bending_method == BendingMethod::DihedralAngle)
                             {
-                                const int indices[4] = { be.i, be.j, be.k0, be.k1 };
-                                if (indices[0] < 0 || indices[1] < 0 || indices[2] < 0 || indices[3] < 0
-                                    || indices[0] >= N || indices[1] >= N || indices[2] >= N || indices[3] >= N)
-                                    continue;
-
-                                const Eigen::Vector3d xi = Xs.row(be.i);
-                                const Eigen::Vector3d xj = Xs.row(be.j);
-                                const Eigen::Vector3d xk0 = Xs.row(be.k0);
-                                const Eigen::Vector3d xk1 = Xs.row(be.k1);
-                                const Eigen::Vector3d edge = xj - xi;
-                                const Eigen::Vector3d n0 = edge.cross(xk0 - xi);
-                                const Eigen::Vector3d n1 = (xk1 - xi).cross(edge);
-                                const double edge_len_sq = edge.squaredNorm();
-                                const double n0_len_sq = n0.squaredNorm();
-                                const double n1_len_sq = n1.squaredNorm();
-                                if (!(edge_len_sq > 1e-20) || !(n0_len_sq > 1e-20) || !(n1_len_sq > 1e-20))
-                                    continue;
-
-                                const double edge_len = std::sqrt(edge_len_sq);
-                                const Eigen::Vector3d qk0 = -(edge_len / n0_len_sq) * n0;
-                                const Eigen::Vector3d qk1 = -(edge_len / n1_len_sq) * n1;
-                                const Eigen::Vector3d qi =
-                                    ((xk0 - xj).dot(edge) / edge_len_sq) * qk0
-                                    + ((xk1 - xj).dot(edge) / edge_len_sq) * qk1;
-                                const Eigen::Vector3d qj =
-                                    ((xi - xk0).dot(edge) / edge_len_sq) * qk0
-                                    + ((xi - xk1).dot(edge) / edge_len_sq) * qk1;
-                                const Eigen::Vector3d gradients[4] = {
-                                    be.angle_scale * qi,
-                                    be.angle_scale * qj,
-                                    be.angle_scale * qk0,
-                                    be.angle_scale * qk1
-                                };
-
-                                double denominator = bend_alpha;
-                                for (int vi = 0; vi < 4; ++vi)
-                                    denominator += inv_mass[indices[vi]] * gradients[vi].squaredNorm();
-                                if (!(denominator > kEps))
-                                    continue;
-
-                                const double C = be.angle_scale * wrapped_angle_difference(
-                                    dihedral_angle(xi, xj, xk0, xk1), be.rest_angle);
-                                double& lam = lambda_bend[bi];
-                                double dlambda = (-C - bend_alpha * lam) / denominator;
-
-                                // The angle gradient tends to infinity as either triangle
-                                // collapses. Limit one projection to a fraction of the rest
-                                // altitude so a transient collision cannot explode a hinge.
-                                double largest_response = 0.0;
-                                for (int vi = 0; vi < 4; ++vi)
-                                    largest_response = std::max(largest_response,
-                                        inv_mass[indices[vi]] * gradients[vi].norm());
-                                if (largest_response > kEps && be.max_correction > 0.0)
-                                {
-                                    const double max_dlambda = be.max_correction / largest_response;
-                                    dlambda = std::clamp(dlambda, -max_dlambda, max_dlambda);
-                                }
-                                lam += dlambda;
-                                for (int vi = 0; vi < 4; ++vi)
-                                {
-                                    const double weight = inv_mass[indices[vi]];
-                                    if (weight > 0.0)
-                                        Xs.row(indices[vi]) += (weight * dlambda * gradients[vi]).transpose();
-                                }
+                                solve_dihedral(be, lambda_bend[bi], false);
                                 continue;
                             }
                             const int i = be.k0;
@@ -1394,6 +1406,11 @@ namespace poseweaver
                                 Xs.row(i) += (wi * corr).transpose();
                             if (wj > 0.0)
                                 Xs.row(j) -= (wj * corr).transpose();
+
+                            // Opposite-vertex distance encodes the magnitude of a fold but
+                            // not its side. Keep curved rest hinges on their original side
+                            // so adjacent triangles cannot settle into alternating spikes.
+                            solve_dihedral(be, lambda_bend_orientation[bi], true);
                         }
                         ms_bend += to_ms(Clock::now() - t0);
                     }

@@ -145,6 +145,87 @@ namespace poseweaver
 			return Eigen::AngleAxisd(theta, aa / theta).toRotationMatrix();
 		}
 
+		static bool extract_parents(
+			const SmplhModel& model,
+			Eigen::VectorXi& parents,
+			std::string* error_message)
+		{
+			const int J = model.joint_count();
+			if (model.kintree_table.rows() != 2 || model.kintree_table.cols() != J)
+			{
+				set_error(error_message, "SMPLH kintree_table has unexpected shape");
+				return false;
+			}
+
+			using RowVectorXll = Eigen::Matrix<long long, 1, Eigen::Dynamic, Eigen::RowMajor>;
+			const RowVectorXll row0 = model.kintree_table.row(0);
+			const RowVectorXll row1 = model.kintree_table.row(1);
+			const auto is_identity_ids_row = [&](const RowVectorXll& row)
+			{
+				for (int col = 0; col < J; ++col)
+					if (row[col] != col)
+						return false;
+				return true;
+			};
+
+			const RowVectorXll* ids_row = nullptr;
+			const RowVectorXll* parents_row = nullptr;
+			const bool row0_is_ids = is_identity_ids_row(row0);
+			const bool row1_is_ids = is_identity_ids_row(row1);
+			if (row0_is_ids && !row1_is_ids)
+			{
+				ids_row = &row0;
+				parents_row = &row1;
+			}
+			else if (row1_is_ids && !row0_is_ids)
+			{
+				ids_row = &row1;
+				parents_row = &row0;
+			}
+			else
+			{
+				const bool row0_has_root = row0[0] == -1 || row0[0] == 4294967295LL;
+				const bool row1_has_root = row1[0] == -1 || row1[0] == 4294967295LL;
+				if (row0_has_root == row1_has_root)
+				{
+					set_error(error_message, "SMPLH kintree_table ambiguous: cannot determine ids vs parents row");
+					return false;
+				}
+				parents_row = row0_has_root ? &row0 : &row1;
+				ids_row = row0_has_root ? &row1 : &row0;
+			}
+
+			std::vector<int> id_to_col((size_t)J, -1);
+			for (int col = 0; col < J; ++col)
+			{
+				const long long id = (*ids_row)[col];
+				if (id < 0 || id >= J)
+				{
+					set_error(error_message, "SMPLH kintree_table joint ids are out of expected range");
+					return false;
+				}
+				id_to_col[(size_t)id] = col;
+			}
+
+			parents.resize(J);
+			for (int col = 0; col < J; ++col)
+			{
+				const long long parent_id = (*parents_row)[col];
+				if (parent_id == -1 || parent_id == 4294967295LL)
+				{
+					parents[col] = -1;
+					continue;
+				}
+				if (parent_id < 0 || parent_id >= J || id_to_col[(size_t)parent_id] < 0)
+				{
+					set_error(error_message, "SMPLH kintree_table parent id is out of expected range");
+					return false;
+				}
+				parents[col] = id_to_col[(size_t)parent_id];
+			}
+			return true;
+		}
+
 		static bool copy_pose_array_to_axis_angle(
 			const cnpy::NpyArray& poses,
 			Eigen::VectorXd& pose_axis_angle_out,
@@ -299,6 +380,124 @@ namespace poseweaver
 		}
 
 		*this = std::move(tmp);
+		return true;
+	}
+
+	bool smplh_prepare_lbs_cache(
+		const SmplhModel& model,
+		const Eigen::VectorXd& betas,
+		SmplhLbsCache& cache_out,
+		std::string* error_message)
+	{
+		const int V = model.vertex_count();
+		const int J = model.joint_count();
+		const int B = model.beta_count();
+		if (V <= 0 || J <= 0)
+		{
+			set_error(error_message, "SMPLH model is empty (not loaded?)");
+			return false;
+		}
+		if (betas.size() != 0 && betas.size() != B)
+		{
+			std::ostringstream oss;
+			oss << "SMPLH betas has size " << betas.size() << ", expected " << B;
+			set_error(error_message, oss.str());
+			return false;
+		}
+
+		SmplhLbsCache cache;
+		Eigen::Map<const Eigen::VectorXd> v_template_flat(model.v_template.data(), (size_t)V * 3);
+		cache.v_shaped_flat = v_template_flat;
+		if (B > 0)
+		{
+			const Eigen::VectorXd effective_betas = betas.size() == B ? betas : Eigen::VectorXd::Zero(B);
+			cache.v_shaped_flat.noalias() += model.shapedirs * effective_betas;
+		}
+		Eigen::Map<const MatrixX3dRM> v_shaped(cache.v_shaped_flat.data(), V, 3);
+		cache.joints.noalias() = model.J_regressor * v_shaped;
+		if (!extract_parents(model, cache.parents, error_message))
+			return false;
+		cache_out = std::move(cache);
+		return true;
+	}
+
+	bool smplh_evaluate_lbs_cached(
+		const SmplhModel& model,
+		const SmplhLbsCache& cache,
+		const Eigen::VectorXd& pose_axis_angle,
+		MatrixX3dRM& V_out,
+		std::string* error_message)
+	{
+		const int V = model.vertex_count();
+		const int J = model.joint_count();
+		if (!cache.valid_for(model))
+		{
+			set_error(error_message, "SMPLH LBS cache does not match the model");
+			return false;
+		}
+		if (pose_axis_angle.size() != 0 && pose_axis_angle.size() != 3 * J)
+		{
+			std::ostringstream oss;
+			oss << "SMPLH pose_axis_angle has size " << pose_axis_angle.size() << ", expected " << (3 * J);
+			set_error(error_message, oss.str());
+			return false;
+		}
+		const Eigen::VectorXd pose = pose_axis_angle.size() == 3 * J
+			? pose_axis_angle : Eigen::VectorXd::Zero(3 * J);
+
+		std::vector<Eigen::Matrix3d> rotations((size_t)J);
+		for (int j = 0; j < J; ++j)
+			rotations[(size_t)j] = rodrigues(pose.segment<3>(3 * j));
+
+		Eigen::VectorXd pose_feature((J - 1) * 9);
+		for (int j = 1; j < J; ++j)
+		{
+			const Eigen::Matrix3d diff = rotations[(size_t)j] - Eigen::Matrix3d::Identity();
+			for (int row = 0; row < 3; ++row)
+				for (int col = 0; col < 3; ++col)
+					pose_feature[(j - 1) * 9 + row * 3 + col] = diff(row, col);
+		}
+
+		Eigen::VectorXd v_posed_flat = cache.v_shaped_flat;
+		v_posed_flat.noalias() += model.posedirs * pose_feature;
+		Eigen::Map<const MatrixX3dRM> v_posed(v_posed_flat.data(), V, 3);
+
+		std::vector<Eigen::Matrix4d> global((size_t)J);
+		std::vector<Eigen::Matrix4d> transforms((size_t)J);
+		for (int j = 0; j < J; ++j)
+		{
+			Eigen::Matrix4d local = Eigen::Matrix4d::Identity();
+			local.block<3, 3>(0, 0) = rotations[(size_t)j];
+			const int parent = cache.parents[j];
+			if (parent == -1)
+			{
+				local.block<3, 1>(0, 3) = cache.joints.row(j).transpose();
+				global[(size_t)j] = local;
+			}
+			else
+			{
+				local.block<3, 1>(0, 3) = (cache.joints.row(j) - cache.joints.row(parent)).transpose();
+				global[(size_t)j] = global[(size_t)parent] * local;
+			}
+			Eigen::Matrix4d rest = Eigen::Matrix4d::Identity();
+			rest.block<3, 1>(0, 3) = -cache.joints.row(j).transpose();
+			transforms[(size_t)j] = global[(size_t)j] * rest;
+		}
+
+		V_out.resize(V, 3);
+		for (int vertex = 0; vertex < V; ++vertex)
+		{
+			Eigen::Vector4d position;
+			position << v_posed(vertex, 0), v_posed(vertex, 1), v_posed(vertex, 2), 1.0;
+			Eigen::Vector3d skinned = Eigen::Vector3d::Zero();
+			for (int j = 0; j < J; ++j)
+			{
+				const double weight = model.weights(vertex, j);
+				if (weight != 0.0)
+					skinned.noalias() += weight * (transforms[(size_t)j] * position).head<3>();
+			}
+			V_out.row(vertex) = skinned.transpose();
+		}
 		return true;
 	}
 

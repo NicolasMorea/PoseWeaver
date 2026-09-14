@@ -9,6 +9,18 @@ namespace poseweaver
         return false;
     }
 
+    bool build_smplh_sequence_cuda(
+        const CudaSmplhView&,
+        const std::vector<Eigen::VectorXd>&,
+        std::vector<Eigen::MatrixXd>&,
+        std::string* error,
+        std::atomic_bool*)
+    {
+        if (error)
+            *error = "PoseWeaver was built without CUDA support";
+        return false;
+    }
+
     bool run_cloth_cuda_jacobi(
         const Eigen::MatrixXd&,
         const Eigen::MatrixXi&,

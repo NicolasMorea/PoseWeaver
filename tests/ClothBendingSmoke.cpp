@@ -91,5 +91,36 @@ int main()
         std::cerr << "Hinge correction exceeded its trust region.\n";
         return 4;
     }
+
+    Eigen::MatrixXd curved_rest = rest;
+    curved_rest(3, 2) = 0.75;
+    Eigen::MatrixXd mirrored_fold = rest;
+    mirrored_fold(3, 2) = -0.75;
+
+    params.bending_method = poseweaver::BendingMethod::OppositeVertexDistance;
+    params.bend_compliance = 0.0;
+    params.reference_positions = curved_rest;
+    result = {};
+    if (!poseweaver::run_cloth_xpbd(
+            mirrored_fold, faces, distant_body, body_faces, params, &result, &error))
+    {
+        std::cerr << error << '\n';
+        return 5;
+    }
+    if (result.frames.size() != 2 || !result.frames.back().allFinite())
+    {
+        std::cerr << "Opposite-vertex solve produced an invalid frame.\n";
+        return 6;
+    }
+
+    const double rest_angle = hinge_angle(curved_rest);
+    const double initial_mirrored_angle = hinge_angle(mirrored_fold);
+    const double corrected_angle = hinge_angle(result.frames.back());
+    if (!(rest_angle * initial_mirrored_angle < 0.0 && rest_angle * corrected_angle > 0.0))
+    {
+        std::cerr << "Opposite-vertex hinge stayed on the mirrored fold branch: "
+                  << rest_angle << ", " << initial_mirrored_angle << " -> " << corrected_angle << '\n';
+        return 7;
+    }
     return 0;
 }

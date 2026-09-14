@@ -39,6 +39,34 @@ namespace poseweaver
 		Eigen::VectorXd pose_axis_angle; //(3 * #J)
 	};
 
+	struct SmplhLbsCache
+	{
+		Eigen::VectorXd v_shaped_flat;
+		MatrixX3dRM joints;
+		Eigen::VectorXi parents;
+
+		bool valid_for(const SmplhModel& model) const
+		{
+			return v_shaped_flat.size() == model.vertex_count() * 3
+				&& joints.rows() == model.joint_count()
+				&& joints.cols() == 3
+				&& parents.size() == model.joint_count();
+		}
+	};
+
+	bool smplh_prepare_lbs_cache(
+		const SmplhModel& model,
+		const Eigen::VectorXd& betas,
+		SmplhLbsCache& cache_out,
+		std::string* error_message = nullptr);
+
+	bool smplh_evaluate_lbs_cached(
+		const SmplhModel& model,
+		const SmplhLbsCache& cache,
+		const Eigen::VectorXd& pose_axis_angle,
+		MatrixX3dRM& V_out,
+		std::string* error_message = nullptr);
+
 	bool smplh_evaluate_lbs(
 		const SmplhModel& model,
 		const SmplhParams& params,

@@ -32,7 +32,8 @@ namespace poseweaver
             float rest_angle;
             float angle_scale;
             float max_correction;
-            float lambda;
+            float distance_lambda;
+            float angle_lambda;
         };
 
         struct Node
@@ -341,7 +342,11 @@ namespace poseweaver
                 contacts[i] = make_float4(0, 0, 0, 0);
             }
             if (i < stretch_count) stretch[i].lambda = 0;
-            if (i < bend_count) bend[i].lambda = 0;
+            if (i < bend_count)
+            {
+                bend[i].distance_lambda = 0;
+                bend[i].angle_lambda = 0;
+            }
         }
 
         __global__ static void clear_corrections(float4* corrections, unsigned int* weights, unsigned int count)
@@ -422,8 +427,8 @@ namespace poseweaver
             const float denominator = wa + wb + alpha;
             if (length < 1e-8f || denominator <= 0.0f)
                 return;
-            const float dlambda = (-(length - hinge.rest_distance) - alpha * hinge.lambda) / denominator;
-            hinge.lambda += dlambda;
+            const float dlambda = (-(length - hinge.rest_distance) - alpha * hinge.distance_lambda) / denominator;
+            hinge.distance_lambda += dlambda;
             const float3 direction = mul(delta, 1.0f / length);
             if (wa > 0.0f)
             {
@@ -439,7 +444,7 @@ namespace poseweaver
 
         __global__ static void solve_dihedrals(
             float4* positions, const float* inverse_mass, Hinge* hinges, unsigned int count,
-            float alpha, float4* corrections, unsigned int* weights)
+            float alpha, bool flipped_only, float4* corrections, unsigned int* weights)
         {
             const unsigned int constraint = blockIdx.x * blockDim.x + threadIdx.x;
             if (constraint >= count)
@@ -460,6 +465,14 @@ namespace poseweaver
             const float n1_length2 = length2(n1);
             if (edge_length2 <= 1e-16f || n0_length2 <= 1e-16f || n1_length2 <= 1e-16f)
                 return;
+
+            const float current_angle = dihedral_angle(xi, xj, xk0, xk1);
+            if (flipped_only)
+            {
+                const float rest_side = sinf(hinge.rest_angle);
+                if (fabsf(rest_side) <= 1e-6f || sinf(current_angle) * rest_side > 0.0f)
+                    return;
+            }
 
             const float edge_length = sqrtf(edge_length2);
             const float3 qk0 = mul(n0, -edge_length / n0_length2);
@@ -484,8 +497,8 @@ namespace poseweaver
                 return;
 
             const float angle_error = hinge.angle_scale * remainderf(
-                dihedral_angle(xi, xj, xk0, xk1) - hinge.rest_angle, 6.28318530717958647692f);
-            float dlambda = (-angle_error - alpha * hinge.lambda) / denominator;
+                current_angle - hinge.rest_angle, 6.28318530717958647692f);
+            float dlambda = (-angle_error - alpha * hinge.angle_lambda) / denominator;
             float largest_response = 0.0f;
             for (int vertex = 0; vertex < 4; ++vertex)
                 largest_response = fmaxf(largest_response,
@@ -495,7 +508,7 @@ namespace poseweaver
                 const float max_dlambda = hinge.max_correction / largest_response;
                 dlambda = fminf(max_dlambda, fmaxf(-max_dlambda, dlambda));
             }
-            hinge.lambda += dlambda;
+            hinge.angle_lambda += dlambda;
             for (int vertex = 0; vertex < 4; ++vertex)
             {
                 const float mass = inverse_mass[indices[vertex]];
@@ -727,7 +740,7 @@ namespace poseweaver
                     bend.push_back(Hinge{
                         make_uint4((unsigned int)a, (unsigned int)b, (unsigned int)c, (unsigned int)d),
                         (float)(vertices.row(c) - vertices.row(d)).norm(),
-                        dihedral_angle(pa, pb, pc, pd), angle_scale, 0.2f * min_altitude, 0 });
+                        dihedral_angle(pa, pb, pc, pd), angle_scale, 0.2f * min_altitude, 0, 0 });
                 }
             }
         }
@@ -853,6 +866,158 @@ namespace poseweaver
             }
             return true;
         }
+
+        __global__ static void smpl_rotations(
+            const float* poses, float* rotations, int frame_count, int joint_count)
+        {
+            const int index = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+            if (index >= frame_count * joint_count)
+                return;
+            const float* aa = poses + index * 3;
+            float* rotation = rotations + index * 9;
+            const float angle2 = aa[0] * aa[0] + aa[1] * aa[1] + aa[2] * aa[2];
+            if (angle2 < 1e-16f)
+            {
+                for (int i = 0; i < 9; ++i)
+                    rotation[i] = i % 4 == 0 ? 1.0f : 0.0f;
+                return;
+            }
+            const float angle = sqrtf(angle2);
+            const float x = aa[0] / angle;
+            const float y = aa[1] / angle;
+            const float z = aa[2] / angle;
+            const float c = cosf(angle);
+            const float s = sinf(angle);
+            const float one_minus_c = 1.0f - c;
+            rotation[0] = c + x * x * one_minus_c;
+            rotation[1] = x * y * one_minus_c - z * s;
+            rotation[2] = x * z * one_minus_c + y * s;
+            rotation[3] = y * x * one_minus_c + z * s;
+            rotation[4] = c + y * y * one_minus_c;
+            rotation[5] = y * z * one_minus_c - x * s;
+            rotation[6] = z * x * one_minus_c - y * s;
+            rotation[7] = z * y * one_minus_c + x * s;
+            rotation[8] = c + z * z * one_minus_c;
+        }
+
+        __global__ static void smpl_transforms(
+            const float* rotations,
+            const float* joints,
+            const int* parents,
+            float* globals,
+            float* transforms,
+            int frame_count,
+            int joint_count)
+        {
+            const int frame = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+            if (frame >= frame_count)
+                return;
+            for (int joint = 0; joint < joint_count; ++joint)
+            {
+                const float* rotation = rotations + ((size_t)frame * joint_count + joint) * 9;
+                float* global = globals + ((size_t)frame * joint_count + joint) * 12;
+                const int parent = parents[joint];
+                const float tx = parent < 0 ? joints[joint * 3]
+                    : joints[joint * 3] - joints[parent * 3];
+                const float ty = parent < 0 ? joints[joint * 3 + 1]
+                    : joints[joint * 3 + 1] - joints[parent * 3 + 1];
+                const float tz = parent < 0 ? joints[joint * 3 + 2]
+                    : joints[joint * 3 + 2] - joints[parent * 3 + 2];
+                if (parent < 0)
+                {
+                    for (int row = 0; row < 3; ++row)
+                    {
+                        for (int col = 0; col < 3; ++col)
+                            global[row * 4 + col] = rotation[row * 3 + col];
+                    }
+                    global[3] = tx;
+                    global[7] = ty;
+                    global[11] = tz;
+                }
+                else
+                {
+                    const float* parent_global = globals + ((size_t)frame * joint_count + parent) * 12;
+                    for (int row = 0; row < 3; ++row)
+                    {
+                        for (int col = 0; col < 3; ++col)
+                        {
+                            global[row * 4 + col] =
+                                parent_global[row * 4] * rotation[col]
+                                + parent_global[row * 4 + 1] * rotation[3 + col]
+                                + parent_global[row * 4 + 2] * rotation[6 + col];
+                        }
+                        global[row * 4 + 3] = parent_global[row * 4] * tx
+                            + parent_global[row * 4 + 1] * ty
+                            + parent_global[row * 4 + 2] * tz
+                            + parent_global[row * 4 + 3];
+                    }
+                }
+
+                float* transform = transforms + ((size_t)frame * joint_count + joint) * 12;
+                const float jx = joints[joint * 3];
+                const float jy = joints[joint * 3 + 1];
+                const float jz = joints[joint * 3 + 2];
+                for (int row = 0; row < 3; ++row)
+                {
+                    transform[row * 4] = global[row * 4];
+                    transform[row * 4 + 1] = global[row * 4 + 1];
+                    transform[row * 4 + 2] = global[row * 4 + 2];
+                    transform[row * 4 + 3] = global[row * 4 + 3]
+                        - global[row * 4] * jx
+                        - global[row * 4 + 1] * jy
+                        - global[row * 4 + 2] * jz;
+                }
+            }
+        }
+
+        __global__ static void smpl_skin_sequence(
+            const float* v_shaped,
+            const float* posedirs,
+            const float* weights,
+            const float* rotations,
+            const float* transforms,
+            float* output,
+            int frame_count,
+            int vertex_count,
+            int joint_count)
+        {
+            const int index = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+            if (index >= frame_count * vertex_count)
+                return;
+            const int frame = index / vertex_count;
+            const int vertex = index - frame * vertex_count;
+            const int pose_feature_count = (joint_count - 1) * 9;
+            float px = v_shaped[vertex * 3];
+            float py = v_shaped[vertex * 3 + 1];
+            float pz = v_shaped[vertex * 3 + 2];
+            for (int feature = 0; feature < pose_feature_count; ++feature)
+            {
+                const int joint = feature / 9 + 1;
+                const int entry = feature % 9;
+                const float identity = entry % 4 == 0 ? 1.0f : 0.0f;
+                const float coefficient = rotations[((size_t)frame * joint_count + joint) * 9 + entry] - identity;
+                px += posedirs[((size_t)vertex * 3) * pose_feature_count + feature] * coefficient;
+                py += posedirs[((size_t)vertex * 3 + 1) * pose_feature_count + feature] * coefficient;
+                pz += posedirs[((size_t)vertex * 3 + 2) * pose_feature_count + feature] * coefficient;
+            }
+
+            float ox = 0.0f;
+            float oy = 0.0f;
+            float oz = 0.0f;
+            for (int joint = 0; joint < joint_count; ++joint)
+            {
+                const float weight = weights[(size_t)vertex * joint_count + joint];
+                if (weight == 0.0f)
+                    continue;
+                const float* transform = transforms + ((size_t)frame * joint_count + joint) * 12;
+                ox += weight * (transform[0] * px + transform[1] * py + transform[2] * pz + transform[3]);
+                oy += weight * (transform[4] * px + transform[5] * py + transform[6] * pz + transform[7]);
+                oz += weight * (transform[8] * px + transform[9] * py + transform[10] * pz + transform[11]);
+            }
+            output[index * 3] = ox;
+            output[index * 3 + 1] = oy;
+            output[index * 3 + 2] = oz;
+        }
     }
 
     bool cuda_simulation_available(std::string* reason)
@@ -876,6 +1041,129 @@ namespace poseweaver
             *reason = status == cudaSuccess ? "No CUDA GPU was found" : cudaGetErrorString(status);
         cudaGetLastError();
         return false;
+    }
+
+    bool build_smplh_sequence_cuda(
+        const CudaSmplhView& model,
+        const std::vector<Eigen::VectorXd>& poses,
+        std::vector<Eigen::MatrixXd>& frames_out,
+        std::string* error,
+        std::atomic_bool* cancel)
+    {
+        frames_out.clear();
+        if (poses.empty())
+            return true;
+        std::string availability;
+        if (!cuda_simulation_available(&availability))
+        {
+            if (error) *error = "CUDA SMPL sequence unavailable: " + availability;
+            return false;
+        }
+        if (model.vertex_count <= 0 || model.joint_count <= 0
+            || !model.v_shaped || !model.joints || !model.parents
+            || (model.joint_count > 1 && !model.posedirs) || !model.weights)
+        {
+            if (error) *error = "CUDA SMPL sequence received invalid model data";
+            return false;
+        }
+        const int frame_count = (int)poses.size();
+        const int vertex_count = model.vertex_count;
+        const int joint_count = model.joint_count;
+        for (const Eigen::VectorXd& pose : poses)
+        {
+            if (pose.size() != joint_count * 3)
+            {
+                if (error) *error = "CUDA SMPL sequence pose size does not match the model";
+                return false;
+            }
+        }
+        if (cancel && cancel->load())
+        {
+            if (error) *error = "Simulation preparation cancelled";
+            return false;
+        }
+        if (!cuda_ok(cudaSetDevice(0), "Could not select the CUDA GPU", error))
+            return false;
+
+        std::vector<float> host_poses((size_t)frame_count * joint_count * 3);
+        std::vector<float> host_shaped((size_t)vertex_count * 3);
+        std::vector<float> host_joints((size_t)joint_count * 3);
+        std::vector<int> host_parents((size_t)joint_count);
+        const size_t posedirs_count = (size_t)vertex_count * 3 * (joint_count - 1) * 9;
+        const size_t weights_count = (size_t)vertex_count * joint_count;
+        std::vector<float> host_posedirs(posedirs_count);
+        std::vector<float> host_weights(weights_count);
+        for (int frame = 0; frame < frame_count; ++frame)
+            for (int i = 0; i < joint_count * 3; ++i)
+                host_poses[(size_t)frame * joint_count * 3 + i] = (float)poses[(size_t)frame][i];
+        for (int i = 0; i < vertex_count * 3; ++i)
+            host_shaped[(size_t)i] = (float)model.v_shaped[i];
+        for (int joint = 0; joint < joint_count; ++joint)
+        {
+            host_parents[(size_t)joint] = model.parents[joint];
+            for (int axis = 0; axis < 3; ++axis)
+                host_joints[(size_t)joint * 3 + axis] = (float)model.joints[(size_t)joint * 3 + axis];
+        }
+        for (size_t i = 0; i < posedirs_count; ++i)
+            host_posedirs[i] = (float)model.posedirs[i];
+        for (size_t i = 0; i < weights_count; ++i)
+            host_weights[i] = (float)model.weights[i];
+
+        DeviceBuffer<float> d_poses, d_shaped, d_joints, d_posedirs, d_weights;
+        DeviceBuffer<int> d_parents;
+        DeviceBuffer<float> d_rotations, d_globals, d_transforms, d_output;
+        const size_t joint_frame_count = (size_t)frame_count * joint_count;
+        const size_t vertex_frame_count = (size_t)frame_count * vertex_count;
+        if (!d_poses.upload(host_poses, error)
+            || !d_shaped.upload(host_shaped, error)
+            || !d_joints.upload(host_joints, error)
+            || !d_parents.upload(host_parents, error)
+            || !d_posedirs.upload(host_posedirs, error)
+            || !d_weights.upload(host_weights, error)
+            || !d_rotations.allocate(joint_frame_count * 9, error)
+            || !d_globals.allocate(joint_frame_count * 12, error)
+            || !d_transforms.allocate(joint_frame_count * 12, error)
+            || !d_output.allocate(vertex_frame_count * 3, error))
+            return false;
+
+        smpl_rotations<<<blocks(joint_frame_count), kBlockSize>>>(
+            d_poses.data, d_rotations.data, frame_count, joint_count);
+        if (!launch_ok("CUDA SMPL rotation generation failed", error))
+            return false;
+        smpl_transforms<<<blocks((size_t)frame_count), kBlockSize>>>(
+            d_rotations.data, d_joints.data, d_parents.data,
+            d_globals.data, d_transforms.data, frame_count, joint_count);
+        if (!launch_ok("CUDA SMPL transform generation failed", error))
+            return false;
+        smpl_skin_sequence<<<blocks(vertex_frame_count), kBlockSize>>>(
+            d_shaped.data, d_posedirs.data, d_weights.data,
+            d_rotations.data, d_transforms.data, d_output.data,
+            frame_count, vertex_count, joint_count);
+        if (!launch_ok("CUDA SMPL skinning failed", error))
+            return false;
+
+        std::vector<float> host_output(vertex_frame_count * 3);
+        if (!cuda_ok(cudaMemcpy(host_output.data(), d_output.data,
+                host_output.size() * sizeof(float), cudaMemcpyDeviceToHost),
+                "Could not read CUDA SMPL sequence", error))
+            return false;
+        if (cancel && cancel->load())
+        {
+            if (error) *error = "Simulation preparation cancelled";
+            return false;
+        }
+
+        frames_out.resize((size_t)frame_count);
+        for (int frame = 0; frame < frame_count; ++frame)
+        {
+            Eigen::MatrixXd& output = frames_out[(size_t)frame];
+            output.resize(vertex_count, 3);
+            const float* source = host_output.data() + (size_t)frame * vertex_count * 3;
+            for (int vertex = 0; vertex < vertex_count; ++vertex)
+                for (int axis = 0; axis < 3; ++axis)
+                    output(vertex, axis) = source[(size_t)vertex * 3 + axis];
+        }
+        return true;
     }
 
     bool run_cloth_cuda_jacobi(
@@ -1049,11 +1337,16 @@ namespace poseweaver
                         if (params.bending_method == BendingMethod::DihedralAngle)
                             solve_dihedrals<<<blocks(bend.size()), kBlockSize>>>(
                                 d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
-                                bend_alpha, d_corrections.data, d_weights.data);
+                                bend_alpha, false, d_corrections.data, d_weights.data);
                         else
+                        {
                             solve_bend_distances<<<blocks(bend.size()), kBlockSize>>>(
                                 d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
                                 bend_alpha, d_corrections.data, d_weights.data);
+                            solve_dihedrals<<<blocks(bend.size()), kBlockSize>>>(
+                                d_positions.data, d_inverse_mass.data, d_bend.data, (unsigned int)bend.size(),
+                                bend_alpha, true, d_corrections.data, d_weights.data);
+                        }
                     }
                     if (params.collision_enabled)
                         solve_body_collisions<<<blocks(vertex_count), kBlockSize>>>(
