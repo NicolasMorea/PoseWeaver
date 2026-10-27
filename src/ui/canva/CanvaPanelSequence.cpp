@@ -28,6 +28,8 @@ namespace poseweaver::ui_canva
 {
     namespace
     {
+        static void sequence_apply_gender_to_state(AppState& state, const std::string& gender);
+
         static CanvaLayer sequence_copy_layer(const CanvaLayer& source, int id, const std::string& name)
         {
             CanvaLayer layer = source;
@@ -614,7 +616,8 @@ namespace poseweaver::ui_canva
                     const float u = (cx - layer.offset.x) / s - 0.5f;
                     float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f;
                     sequence_sample_layer_bilinear_rgba(layer, w, h, u, v, sr, sg, sb, sa);
-                    sa = std::clamp(sa, 0.0f, 1.0f);
+                    sa = std::clamp(sa, 0.0f, 1.0f)
+                        * std::clamp(layer.opacity, 0.0f, 1.0f);
                     if (sa <= 0.0f)
                         continue;
 
@@ -719,6 +722,7 @@ namespace poseweaver::ui_canva
             bool include_body,
             std::string* out_error)
         {
+            canva_sequence_store_selected_frame(canva);
             if (canva.sequence_cloth_frames.empty())
             {
                 if (out_error)
@@ -846,6 +850,10 @@ namespace poseweaver::ui_canva
                 removed = true;
             }
 
+            canva.cloth_refit_visibility_layer_id = 0;
+            canva.cloth_refit_deformation_layer_id = 0;
+            canva.cloth_refit_map_width = 0;
+            canva.cloth_refit_map_height = 0;
             if (!removed)
                 return;
 
@@ -853,6 +861,113 @@ namespace poseweaver::ui_canva
                 ? -1
                 : std::clamp(canva.active_layer, 0, (int)canva.layers.size() - 1);
             canva_cancel_interactions(canva);
+        }
+
+        static bool sequence_frame_has_refit_maps(
+            const CanvaState& canva,
+            const CanvaSequenceTrackFrame& frame)
+        {
+            const size_t pixel_count = (size_t)canva.width * (size_t)canva.height;
+            return frame.refit_visibility_pixels.size() >= pixel_count * 4u
+                && frame.refit_deformation_source_x.size() >= pixel_count
+                && frame.refit_deformation_source_y.size() >= pixel_count;
+        }
+
+        static void sequence_activate_cloth_frame(
+            AppState& state,
+            CanvaState& canva,
+            int cloth_index)
+        {
+            if (cloth_index < 0 || cloth_index >= (int)canva.sequence_cloth_frames.size())
+                return;
+
+            if (canva.sequence_selected_frame == cloth_index
+                && !canva.sequence_preview_active
+                && canva_has_cloth_refit_maps(canva))
+                return;
+
+            canva_sequence_store_selected_frame(canva);
+            sequence_remove_live_frame_output_layers(canva);
+
+            CanvaSequenceTrackFrame& frame = canva.sequence_cloth_frames[(size_t)cloth_index];
+            const int sketch_index = frame.sketch_frame_index;
+            if (sketch_index >= 0 && sketch_index < (int)canva.sequence_sketch_frames.size())
+            {
+                sequence_put_sketch_frame_on_canvas(canva, sketch_index, "Sequence sketch");
+                CanvaSequenceTrackFrame& sketch = canva.sequence_sketch_frames[(size_t)sketch_index];
+                canva.sequence_active_sketch_index = sketch_index;
+                canva.sequence_model_input_path = sketch.model_input_path;
+                canva.sequence_rig_json_path = sketch.rig_json_path;
+                canva.sequence_iso_path = sketch.iso_path;
+                canva.sequence_depth_path = sketch.depth_path;
+                canva.cloth_fitting_model_input_path = sketch.model_input_path;
+                canva.cloth_fitting_rig_json_path = sketch.rig_json_path;
+                canva.cloth_fitting_iso_path = sketch.iso_path;
+                canva.cloth_fitting_depth_path = sketch.depth_path;
+                state.cloth_render_stroke_reference_path = sketch.model_input_path.string();
+                state.cloth_render_camera_rig_path = sketch.rig_json_path.string();
+            }
+
+            canva.sequence_current_frame_dir = frame.frame_dir;
+            canva.sequence_current_cloth_frame_dir = frame.cloth_frame_dir;
+            state.cloth_render_output_dir = frame.cloth_frame_dir.string();
+            state.cloth_fitting_output_dir = frame.cloth_frame_dir.string();
+            sequence_apply_gender_to_state(state, frame.gender);
+            state.controls.current_frame = std::clamp(
+                frame.sim_frame_index,
+                0,
+                std::max(0, state.controls.frame_count - 1));
+            state.controls.playing = false;
+            state.show_smpl = true;
+            state.show_smpl_character = true;
+            state.show_garment_mesh = true;
+            state.cloth_render_use_current_camera = false;
+
+            CanvaLayer cloth = sequence_copy_layer(
+                frame.layer,
+                canva.next_layer_id++,
+                "Garment (frame " + std::to_string(cloth_index) + ")");
+            cloth.enabled = true;
+            canva.layers.insert(canva.layers.begin(), std::move(cloth));
+
+            if (sequence_frame_has_refit_maps(canva, frame))
+            {
+                CanvaLayer visibility = sequence_make_layer_from_pixels(
+                    canva,
+                    frame.refit_visibility_pixels,
+                    "Final visibility (frame " + std::to_string(cloth_index) + ")",
+                    CanvaLayerKind::ClothFittingOcclusionDebug,
+                    false);
+                visibility.offset = frame.layer.offset;
+                visibility.scale = frame.layer.scale;
+                canva.cloth_refit_visibility_layer_id = visibility.id;
+                canva.layers.insert(canva.layers.begin() + 1, std::move(visibility));
+
+                CanvaLayer deformation = canva_make_layer(
+                    canva.width,
+                    canva.height,
+                    canva.next_layer_id++,
+                    "Deformation field (frame " + std::to_string(cloth_index) + ")");
+                deformation.kind = CanvaLayerKind::ClothFittingDeformation;
+                deformation.enabled = false;
+                deformation.offset = frame.layer.offset;
+                deformation.scale = frame.layer.scale;
+                deformation.deformation_source_x = frame.refit_deformation_source_x;
+                deformation.deformation_source_y = frame.refit_deformation_source_y;
+                canva_update_deformation_field_pixels(deformation, canva.width, canva.height);
+                canva.cloth_refit_deformation_layer_id = deformation.id;
+                canva.layers.insert(canva.layers.begin() + 2, std::move(deformation));
+                canva.cloth_refit_map_width = canva.width;
+                canva.cloth_refit_map_height = canva.height;
+            }
+
+            canva.active_layer = 0;
+            canva.sequence_selected_frame = cloth_index;
+            canva.sequence_preview_active = false;
+            canva.sequence_preview_frame_id = frame.id;
+            canva.sequence_last_synced_sim_frame = state.controls.current_frame;
+            canva_cancel_interactions(canva);
+            sequence_update_rig_overlay_for_sim_frame(state, canva);
         }
 
         static std::filesystem::path sequence_current_pose_path(const AppState& state)
@@ -2026,6 +2141,38 @@ namespace poseweaver::ui_canva
         return true;
     }
 
+    void canva_sequence_store_selected_frame(CanvaState& canva)
+    {
+        const int frame_index = canva.sequence_selected_frame;
+        if (frame_index < 0 || frame_index >= (int)canva.sequence_cloth_frames.size())
+            return;
+
+        CanvaSequenceTrackFrame& frame = canva.sequence_cloth_frames[(size_t)frame_index];
+        const int visibility_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_visibility_layer_id);
+        if (visibility_index >= 0)
+            frame.refit_visibility_pixels = canva.layers[(size_t)visibility_index].pixels;
+
+        const int deformation_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_deformation_layer_id);
+        if (deformation_index >= 0)
+        {
+            const CanvaLayer& deformation = canva.layers[(size_t)deformation_index];
+            frame.refit_deformation_source_x = deformation.deformation_source_x;
+            frame.refit_deformation_source_y = deformation.deformation_source_y;
+        }
+
+        const CanvaLayer* warped = sequence_find_latest_warped_layer(canva);
+        if (warped)
+        {
+            const int stored_id = frame.layer.id;
+            frame.layer = sequence_copy_layer(*warped, stored_id, "Garment (warped)");
+            frame.layer.enabled = true;
+        }
+    }
+
     void canva_sequence_select_time(
         AppState& state,
         CanvaState& canva,
@@ -2050,23 +2197,24 @@ namespace poseweaver::ui_canva
 
         const int cloth_index = sequence_cloth_index_at_time(canva, canva.sequence_time_seconds);
         const int sketch_index = sequence_sketch_index_at_time(canva, canva.sequence_time_seconds);
-        const CanvaLayer* cloth_layer = cloth_index >= 0
-            ? &canva.sequence_cloth_frames[(size_t)cloth_index].layer
-            : nullptr;
         const CanvaLayer* sketch_layer = sketch_index >= 0
             ? &canva.sequence_sketch_frames[(size_t)sketch_index].layer
             : nullptr;
 
-        sequence_assign_preview_layer(canva, 0, cloth_layer);
-        sequence_assign_preview_layer(canva, 1, sketch_layer);
-        for (int i = 2; i < (int)canva.sequence_preview_layers.size(); ++i)
-            canva.sequence_preview_layers[(size_t)i].enabled = false;
-
-        canva.sequence_selected_frame = cloth_index;
-        canva.sequence_preview_active = true;
-        canva.sequence_preview_frame_id = cloth_index >= 0
-            ? canva.sequence_cloth_frames[(size_t)cloth_index].id
-            : 0;
+        if (cloth_index >= 0)
+        {
+            sequence_activate_cloth_frame(state, canva, cloth_index);
+        }
+        else
+        {
+            sequence_assign_preview_layer(canva, 0, nullptr);
+            sequence_assign_preview_layer(canva, 1, sketch_layer);
+            for (int i = 2; i < (int)canva.sequence_preview_layers.size(); ++i)
+                canva.sequence_preview_layers[(size_t)i].enabled = false;
+            canva.sequence_selected_frame = -1;
+            canva.sequence_preview_active = true;
+            canva.sequence_preview_frame_id = 0;
+        }
 
         if (sync_simulation)
         {
@@ -2167,6 +2315,21 @@ namespace poseweaver::ui_canva
             state.controls.current_frame,
             0,
             std::max(0, state.controls.frame_count - 1));
+
+        const int visibility_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_visibility_layer_id);
+        const int deformation_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_deformation_layer_id);
+        if (visibility_index >= 0 && deformation_index >= 0)
+        {
+            const CanvaLayer& visibility = canva.layers[(size_t)visibility_index];
+            const CanvaLayer& deformation = canva.layers[(size_t)deformation_index];
+            cloth_frame.refit_visibility_pixels = visibility.pixels;
+            cloth_frame.refit_deformation_source_x = deformation.deformation_source_x;
+            cloth_frame.refit_deformation_source_y = deformation.deformation_source_y;
+        }
         canva.sequence_cloth_frames.push_back(std::move(cloth_frame));
 
         if (capture_sketch)
@@ -2218,6 +2381,7 @@ namespace poseweaver::ui_canva
                 sketch_frame.pose_npz_path = pose_path;
         }
 
+        canva.sequence_selected_frame = -1;
         canva_sequence_select_frame(state, canva, (int)canva.sequence_cloth_frames.size() - 1);
         canva.sequence_status = "Ready";
         console_add_line(state, "Sequence: captured cloth frame "
@@ -2328,6 +2492,7 @@ namespace poseweaver::ui_canva
                 return;
             }
 
+            canva_sequence_store_selected_frame(canva);
             sequence_remove_live_frame_output_layers(canva);
 
             std::string add_err;

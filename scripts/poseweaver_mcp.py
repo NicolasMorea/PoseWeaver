@@ -234,7 +234,7 @@ TOOLS = [
     ),
     tool(
         "poseweaver_select",
-        "Select PoseWeaver assets by exact listed name. Use null to clear an asset selection.",
+        "Select PoseWeaver assets by exact listed name. Garment accepts a canonical garment or one of its listed texture-variant files. Use null to clear a selection.",
         object_schema(
             {
                 "gender": {"type": "string", "enum": ["male", "female", "neutral"]},
@@ -259,10 +259,41 @@ TOOLS = [
         "Atomically validate and set one or more PoseWeaver parameters. Describe parameters first when unsure.",
         object_schema({"values": {"type": "object", "additionalProperties": True}}, ["values"]),
     ),
-    tool("poseweaver_list_layers", "List canvas layers, stable IDs, order, transforms, visibility, and selection.", object_schema()),
+    tool("poseweaver_list_layers", "List canvas layers, stable IDs, order, transforms, visibility, opacity, and selection.", object_schema()),
+    tool(
+        "poseweaver_edit_fitting_map",
+        "Paint the active cached visibility map or brush the active cached deformation field by stable layer ID. Coordinates use native canvas pixels with a top-left origin.",
+        object_schema(
+            {
+                "layer_id": {"type": "integer", "minimum": 1},
+                "strokes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1024,
+                    "items": object_schema(
+                        {
+                            "mode": {
+                                "type": "string",
+                                "enum": ["visible", "occluded", "push", "smooth", "erase"],
+                                "description": "Visibility paint (visible/occluded) or deformation brush (push/smooth/erase). Erase restores identity deformation.",
+                            },
+                            "from_x": {"type": "number", "description": "Stroke start X in native canvas pixels."},
+                            "from_y": {"type": "number", "description": "Stroke start Y in native canvas pixels."},
+                            "to_x": {"type": "number", "description": "Stroke end X in native canvas pixels."},
+                            "to_y": {"type": "number", "description": "Stroke end Y in native canvas pixels."},
+                            "radius": {"type": "number", "minimum": 0.5, "maximum": 250},
+                            "power": {"type": "number", "minimum": 0, "maximum": 1, "default": 1, "description": "Deformation brush strength; ignored for visibility paint."},
+                        },
+                        ["mode", "from_x", "from_y", "to_x", "to_y", "radius"],
+                    ),
+                },
+            },
+            ["layer_id", "strokes"],
+        ),
+    ),
     tool(
         "poseweaver_manage_layer",
-        "Import, select, rename, transform, hide, reorder, or remove a canvas layer.",
+        "Import, select, rename, transform, set opacity, hide, reorder, or remove a canvas layer.",
         object_schema(
             {
                 "action": {"type": "string", "enum": ["import", "update", "remove", "reorder"]},
@@ -271,6 +302,7 @@ TOOLS = [
                 "name": {"type": "string"},
                 "selected": {"type": "boolean"},
                 "visible": {"type": "boolean"},
+                "opacity": {"type": "number", "minimum": 0, "maximum": 1},
                 "offset_x": {"type": "number"},
                 "offset_y": {"type": "number"},
                 "scale": {"type": "number", "exclusiveMinimum": 0},
@@ -340,6 +372,7 @@ class McpServer:
             "poseweaver_get_parameters": lambda args: self.controller.bridge.call("parameters.get", args),
             "poseweaver_set_parameters": lambda args: self.controller.bridge.call("parameters.set", args),
             "poseweaver_list_layers": lambda _args: self.controller.bridge.call("layers.list"),
+            "poseweaver_edit_fitting_map": lambda args: self.controller.bridge.call("fitting_maps.edit", args),
             "poseweaver_manage_layer": self._manage_layer,
             "poseweaver_export_image": self._export_image,
             "poseweaver_list_operations": lambda _args: self.controller.bridge.call("operations.list"),
@@ -380,12 +413,13 @@ class McpServer:
                 result = {
                     "protocolVersion": requested_version,
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "poseweaver", "version": "1.0.0"},
+                    "serverInfo": {"name": "poseweaver", "version": "1.1.0"},
                     "instructions": (
                         "Use PoseWeaver tools instead of mouse/keyboard control. Launch or check status first. "
                         "List assets before selecting names and describe parameters before setting unfamiliar keys. "
                         "Long operations return job IDs; poll poseweaver_get_job until completed or failed. "
-                        "Use stable layer IDs, not list positions, for edits and exports."
+                        "Use stable layer IDs, not list positions, for edits and exports. Fitting-map layers "
+                        "identify their role in poseweaver_list_layers; edit them before render_and_refit."
                     ),
                 }
             elif method == "ping":

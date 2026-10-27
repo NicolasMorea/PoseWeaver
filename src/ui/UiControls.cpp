@@ -222,7 +222,10 @@ namespace poseweaver
                             {
                                 const bool none_selected = (state.selection.garment_index == -1);
                                 if (ImGui::Selectable("(None)", none_selected))
+                                {
                                     state.selection.garment_index = -1;
+                                    state.selection.garment_texture.clear();
+                                }
                                 if (none_selected)
                                     ImGui::SetItemDefaultFocus();
 
@@ -230,11 +233,45 @@ namespace poseweaver
                                 {
                                     const bool selected = (i == state.selection.garment_index);
                                     if (ImGui::Selectable(state.selection.garments[i].c_str(), selected))
+                                    {
                                         state.selection.garment_index = i;
+                                        state.selection.garment_texture.clear();
+                                    }
                                     if (selected)
                                         ImGui::SetItemDefaultFocus();
                                 }
                                 ImGui::EndListBox();
+                            }
+
+                            if (state.selection.garment_index >= 0)
+                            {
+                                const std::string& garment = state.selection.garments[(size_t)state.selection.garment_index];
+                                const auto& textures = assets.garment_textures(garment);
+                                int texture_index = 0;
+                                if (!state.selection.garment_texture.empty())
+                                {
+                                    const auto found = std::find_if(textures.begin(), textures.end(), [&](const GarmentTextureVariant& texture)
+                                        { return texture.file == state.selection.garment_texture; });
+                                    if (found != textures.end())
+                                        texture_index = static_cast<int>(found - textures.begin());
+                                }
+                                const char* preview = textures.empty() ? "Default" : textures[(size_t)texture_index].name.c_str();
+                                if (ImGui::BeginCombo("Texture", preview))
+                                {
+                                    for (int i = 0; i < (int)textures.size(); ++i)
+                                    {
+                                        const bool selected = i == texture_index;
+                                        if (ImGui::Selectable(textures[(size_t)i].name.c_str(), selected))
+                                        {
+                                            state.selection.garment_texture = textures[(size_t)i].file;
+                                            state.garment_use_source_texture = true;
+                                            state.garment_color_by_smpl_uv = false;
+                                        }
+                                        if (selected)
+                                            ImGui::SetItemDefaultFocus();
+                                    }
+                                    ImGui::EndCombo();
+                                }
                             }
                         }
 

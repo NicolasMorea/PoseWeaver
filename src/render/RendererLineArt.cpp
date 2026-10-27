@@ -456,7 +456,8 @@ namespace poseweaver
         const Eigen::MatrixXi& faces,
         const Eigen::Matrix4f& view,
         const Eigen::Matrix4f& projection,
-        const std::vector<float>& gl_depth)
+        const std::vector<float>& gl_depth,
+        const std::vector<unsigned char>& shading_rgba)
     {
         const size_t pixel_count = (size_t)width * (size_t)height;
         if (width < 3 || height < 3 || rgba.size() < pixel_count * 4u
@@ -468,13 +469,16 @@ namespace poseweaver
         std::vector<float> tone(pixel_count, 1.0f);
         std::array<int, 256> histogram{};
         int opaque_count = 0;
+        const bool has_shading_reference = shading_rgba.size() >= pixel_count * 4u;
         for (size_t index = 0; index < pixel_count; ++index)
         {
             unsigned char* pixel = rgba.data() + index * 4u;
             if (pixel[3] < 32u)
                 continue;
             mask[index] = 1u;
-            tone[index] = pixel_luminance(pixel);
+            tone[index] = pixel_luminance(has_shading_reference
+                ? shading_rgba.data() + index * 4u
+                : pixel);
             if (pixel[3] >= 128u)
                 opaque_count++;
         }
@@ -482,7 +486,7 @@ namespace poseweaver
             return;
 
         const std::vector<float> shaded_tone = shaded
-            ? blur_masked_tone(tone, mask, width, height, 5)
+            ? blur_masked_tone(tone, mask, width, height, 18)
             : tone;
         for (size_t index = 0; index < pixel_count; ++index)
         {
@@ -513,6 +517,7 @@ namespace poseweaver
         const float shadow_start = std::clamp(settings.shadow_threshold, 0.35f, 0.95f);
         const float shadow_range = std::clamp(settings.shadow_range, 0.05f, 0.70f);
         const float shadow_strength = std::clamp(settings.shadow_strength, 0.0f, 1.0f);
+        std::vector<float> shadow_amount(pixel_count, 0.0f);
 
         for (size_t index = 0; index < pixel_count; ++index)
         {
@@ -531,18 +536,47 @@ namespace poseweaver
             {
                 const float normalized = std::clamp((shaded_tone[index] - dark_tone) / tone_range, 0.0f, 1.0f);
                 const float shadow = std::clamp((shadow_start - normalized) / shadow_range, 0.0f, 1.0f);
+                shadow_amount[index] = shadow;
                 const float cel = shadow > 0.68f ? 0.80f : (shadow > 0.18f ? 0.91f : 0.985f);
                 value = 0.985f + (cel - 0.985f) * shadow_strength;
             }
-            const unsigned char paper = (unsigned char)std::clamp((int)std::lround(255.0f * value), 0, 255);
-            pixel[0] = paper;
-            pixel[1] = paper;
-            pixel[2] = paper;
+            const float shade = shaded ? value / 0.985f : 1.0f;
+            pixel[0] = (unsigned char)std::clamp((int)std::lround((float)pixel[0] * shade), 0, 255);
+            pixel[1] = (unsigned char)std::clamp((int)std::lround((float)pixel[1] * shade), 0, 255);
+            pixel[2] = (unsigned char)std::clamp((int)std::lround((float)pixel[2] * shade), 0, 255);
             pixel[3] = std::max(pixel[3], (unsigned char)224u);
         }
 
         const std::vector<float> distance = boundary_distance(mask, width, height);
         const float outline_radius = std::max(0.0f, settings.outline_width) * 0.5f;
+        if (shaded)
+        {
+            const auto line_coverage = [](float coordinate, float spacing, float width)
+            {
+                float phase = std::fmod(coordinate, spacing);
+                if (phase < 0.0f)
+                    phase += spacing;
+                const float line_distance = std::min(phase, spacing - phase);
+                return std::clamp(width + 0.75f - line_distance, 0.0f, 1.0f);
+            };
+            for (int y = 0; y < height; ++y)
+            {
+                for (int x = 0; x < width; ++x)
+                {
+                    const size_t index = (size_t)y * (size_t)width + (size_t)x;
+                    const float shadow = shadow_amount[index];
+                    if (mask[index] == 0u || shadow <= 0.10f
+                        || distance[index] <= outline_radius + 1.0f)
+                        continue;
+
+                    const float primary = line_coverage((float)x + 0.62f * (float)y, 13.0f, 0.65f);
+                    const float primary_strength = std::clamp((shadow - 0.10f) / 0.62f, 0.0f, 1.0f);
+                    const float coverage = primary * primary_strength * (0.28f + 0.42f * shadow_strength);
+                    if (coverage > 0.0f)
+                        blend_ink(rgba.data() + index * 4u, settings.line_color, coverage);
+                }
+            }
+        }
         if (outline_radius > 0.0f)
         {
             for (size_t index = 0; index < pixel_count; ++index)
@@ -569,7 +603,7 @@ namespace poseweaver
             edges,
             normals,
             projected,
-            settings.crease_angle_degrees);
+            shaded ? 0.55f * settings.crease_angle_degrees : settings.crease_angle_degrees);
         for (size_t edge_index = 0; edge_index < edges.size(); ++edge_index)
         {
             if (selected[edge_index] == 0u)
@@ -582,7 +616,7 @@ namespace poseweaver
                 gl_depth,
                 projected[(size_t)edge.a],
                 projected[(size_t)edge.b],
-                settings.wrinkle_width,
+                shaded ? 1.2f * settings.wrinkle_width : settings.wrinkle_width,
                 settings.line_color);
         }
     }

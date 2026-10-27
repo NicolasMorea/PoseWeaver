@@ -67,6 +67,7 @@ namespace poseweaver::ui_canva
         layer.id = id;
         layer.name = name;
         layer.enabled = true;
+        layer.opacity = 1.0f;
         layer.offset = ImVec2(0.0f, 0.0f);
         layer.scale = 1.0f;
         layer.pixels.assign((size_t)w * (size_t)h * 4u, 0u); // transparent
@@ -120,7 +121,20 @@ namespace poseweaver::ui_canva
         constexpr int kMaxUndoSteps = 30;
         CanvaUndo u;
         u.layer_id = layer_id;
-        u.pixels = pixels;
+        const int layer_index = canva_find_layer_index_by_id(canva.layers, layer_id);
+        if (layer_index >= 0
+            && canva.layers[(size_t)layer_index].kind == CanvaLayerKind::ClothFittingDeformation
+            && !canva.layers[(size_t)layer_index].deformation_source_x.empty()
+            && !canva.layers[(size_t)layer_index].deformation_source_y.empty())
+        {
+            const CanvaLayer& layer = canva.layers[(size_t)layer_index];
+            u.deformation_source_x = layer.deformation_source_x;
+            u.deformation_source_y = layer.deformation_source_y;
+        }
+        else
+        {
+            u.pixels = pixels;
+        }
         u.offset = offset;
         u.scale = scale;
         canva.undo.emplace_back(std::move(u));
@@ -141,7 +155,16 @@ namespace poseweaver::ui_canva
             return false;
 
         CanvaLayer& layer = canva.layers[(size_t)idx];
-        layer.pixels = std::move(u.pixels);
+        if (!u.deformation_source_x.empty() && !u.deformation_source_y.empty())
+        {
+            layer.deformation_source_x = std::move(u.deformation_source_x);
+            layer.deformation_source_y = std::move(u.deformation_source_y);
+            canva_update_deformation_field_pixels(layer, canva.width, canva.height);
+        }
+        else
+        {
+            layer.pixels = std::move(u.pixels);
+        }
         layer.offset = u.offset;
         layer.scale = u.scale;
         layer.dirty = true;
@@ -154,6 +177,202 @@ namespace poseweaver::ui_canva
         canva.transform_layer = -1;
 
         return true;
+    }
+
+    static void canva_write_deformation_field_pixel(
+        CanvaLayer& layer,
+        int width,
+        int x,
+        int y)
+    {
+        const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+        const float source_x = layer.deformation_source_x[pixel];
+        const float source_y = layer.deformation_source_y[pixel];
+        unsigned char* rgba = layer.pixels.data() + pixel * 4u;
+        if (!std::isfinite(source_x) || !std::isfinite(source_y)
+            || source_x < 0.0f || source_y < 0.0f)
+        {
+            rgba[0] = 24u;
+            rgba[1] = 24u;
+            rgba[2] = 24u;
+            rgba[3] = 220u;
+            return;
+        }
+
+        const float dx = source_x - (float)x;
+        const float dy = source_y - (float)y;
+        const float magnitude = std::sqrt(dx * dx + dy * dy);
+        rgba[0] = (unsigned char)std::lround(std::clamp(128.0f + dx * 4.0f, 0.0f, 255.0f));
+        rgba[1] = (unsigned char)std::lround(std::clamp(128.0f + dy * 4.0f, 0.0f, 255.0f));
+        rgba[2] = (unsigned char)std::lround(std::clamp(128.0f + magnitude * 3.0f, 0.0f, 255.0f));
+        rgba[3] = 220u;
+    }
+
+    void canva_update_deformation_field_pixels(CanvaLayer& layer, int width, int height)
+    {
+        const size_t pixel_count = (size_t)width * (size_t)height;
+        if (width <= 0 || height <= 0
+            || layer.deformation_source_x.size() < pixel_count
+            || layer.deformation_source_y.size() < pixel_count)
+        {
+            return;
+        }
+
+        layer.pixels.resize(pixel_count * 4u);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                canva_write_deformation_field_pixel(layer, width, x, y);
+        layer.dirty = true;
+        layer.bounds_dirty = true;
+    }
+
+    void canva_apply_deformation_field_brush(
+        CanvaLayer& layer,
+        int width,
+        int height,
+        ImVec2 from,
+        ImVec2 to,
+        float radius,
+        CanvaDeformationBrushMode mode,
+        float power)
+    {
+        const size_t pixel_count = (size_t)width * (size_t)height;
+        if (width <= 0 || height <= 0
+            || layer.deformation_source_x.size() < pixel_count
+            || layer.deformation_source_y.size() < pixel_count)
+        {
+            return;
+        }
+
+        const float delta_x = to.x - from.x;
+        const float delta_y = to.y - from.y;
+        const float segment_length_squared = delta_x * delta_x + delta_y * delta_y;
+        if (mode == CanvaDeformationBrushMode::Push && segment_length_squared < 1e-6f)
+            return;
+
+        radius = std::max(0.5f, radius);
+        power = std::clamp(power, 0.0f, 1.0f);
+        if (power <= 0.0f)
+            return;
+        const int x0 = std::max(0, (int)std::floor(std::min(from.x, to.x) - radius));
+        const int x1 = std::min(width - 1, (int)std::ceil(std::max(from.x, to.x) + radius));
+        const int y0 = std::max(0, (int)std::floor(std::min(from.y, to.y) - radius));
+        const int y1 = std::min(height - 1, (int)std::ceil(std::max(from.y, to.y) + radius));
+
+        const int sample_x0 = std::max(0, x0 - 1);
+        const int sample_x1 = std::min(width - 1, x1 + 1);
+        const int sample_y0 = std::max(0, y0 - 1);
+        const int sample_y1 = std::min(height - 1, y1 + 1);
+        const int sample_width = sample_x1 - sample_x0 + 1;
+        std::vector<float> sample_source_x;
+        std::vector<float> sample_source_y;
+        if (mode == CanvaDeformationBrushMode::Smooth)
+        {
+            const size_t sample_count =
+                (size_t)sample_width * (size_t)(sample_y1 - sample_y0 + 1);
+            sample_source_x.resize(sample_count);
+            sample_source_y.resize(sample_count);
+            for (int y = sample_y0; y <= sample_y1; ++y)
+            {
+                for (int x = sample_x0; x <= sample_x1; ++x)
+                {
+                    const size_t source = (size_t)y * (size_t)width + (size_t)x;
+                    const size_t sample =
+                        (size_t)(y - sample_y0) * (size_t)sample_width
+                        + (size_t)(x - sample_x0);
+                    sample_source_x[sample] = layer.deformation_source_x[source];
+                    sample_source_y[sample] = layer.deformation_source_y[source];
+                }
+            }
+        }
+
+        for (int y = y0; y <= y1; ++y)
+        {
+            for (int x = x0; x <= x1; ++x)
+            {
+                const float point_x = (float)x + 0.5f;
+                const float point_y = (float)y + 0.5f;
+                const float projection = segment_length_squared > 1e-6f
+                    ? std::clamp(
+                        ((point_x - from.x) * delta_x + (point_y - from.y) * delta_y)
+                            / segment_length_squared,
+                        0.0f,
+                        1.0f)
+                    : 0.0f;
+                const float nearest_x = from.x + delta_x * projection;
+                const float nearest_y = from.y + delta_y * projection;
+                const float distance_x = point_x - nearest_x;
+                const float distance_y = point_y - nearest_y;
+                const float distance = std::sqrt(distance_x * distance_x + distance_y * distance_y);
+                if (distance >= radius)
+                    continue;
+
+                const float amount = 1.0f - distance / radius;
+                const float weight = amount * amount * (3.0f - 2.0f * amount) * power;
+                const size_t pixel = (size_t)y * (size_t)width + (size_t)x;
+                const float source_x = layer.deformation_source_x[pixel];
+                const float source_y = layer.deformation_source_y[pixel];
+                if (!std::isfinite(source_x) || !std::isfinite(source_y)
+                    || source_x < 0.0f || source_y < 0.0f)
+                {
+                    continue;
+                }
+
+                float target_x = source_x;
+                float target_y = source_y;
+                if (mode == CanvaDeformationBrushMode::Push)
+                {
+                    target_x = source_x - delta_x;
+                    target_y = source_y - delta_y;
+                }
+                else if (mode == CanvaDeformationBrushMode::Erase)
+                {
+                    target_x = (float)x;
+                    target_y = (float)y;
+                }
+                else
+                {
+                    float displacement_x = 0.0f;
+                    float displacement_y = 0.0f;
+                    int sample_count = 0;
+                    for (int sample_y = std::max(0, y - 1); sample_y <= std::min(height - 1, y + 1); ++sample_y)
+                    {
+                        for (int sample_x = std::max(0, x - 1); sample_x <= std::min(width - 1, x + 1); ++sample_x)
+                        {
+                            const size_t sample =
+                                (size_t)(sample_y - sample_y0) * (size_t)sample_width
+                                + (size_t)(sample_x - sample_x0);
+                            const float neighbor_x = sample_source_x[sample];
+                            const float neighbor_y = sample_source_y[sample];
+                            if (!std::isfinite(neighbor_x) || !std::isfinite(neighbor_y)
+                                || neighbor_x < 0.0f || neighbor_y < 0.0f)
+                            {
+                                continue;
+                            }
+                            displacement_x += neighbor_x - (float)sample_x;
+                            displacement_y += neighbor_y - (float)sample_y;
+                            ++sample_count;
+                        }
+                    }
+                    if (sample_count == 0)
+                        continue;
+                    target_x = (float)x + displacement_x / (float)sample_count;
+                    target_y = (float)y + displacement_y / (float)sample_count;
+                }
+
+                layer.deformation_source_x[pixel] = std::clamp(
+                    source_x + (target_x - source_x) * weight,
+                    0.0f,
+                    (float)(width - 1));
+                layer.deformation_source_y[pixel] = std::clamp(
+                    source_y + (target_y - source_y) * weight,
+                    0.0f,
+                    (float)(height - 1));
+                canva_write_deformation_field_pixel(layer, width, x, y);
+            }
+        }
+        layer.dirty = true;
+        layer.bounds_dirty = true;
     }
 
     static void canva_blend_over(unsigned char* dst_rgba, const ImVec4& src)
@@ -392,6 +611,7 @@ namespace poseweaver::ui_canva
         state.scene_view_smpl_fit_rms = 0.0f;
         state.scene_view_snapshot_pose_name.clear();
         state.scene_view_snapshot_path.clear();
+        state.scene_view_snapshot_include_cloth = false;
         state.scene_view_snapshot_use_rigopt_camera = false;
         state.scene_view_snapshot_rigopt_camera_scale = 1.0f;
         state.scene_view_snapshot_rigopt_camera_translation = { 0.0f, 0.0f };

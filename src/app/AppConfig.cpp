@@ -79,7 +79,7 @@ namespace
         }
         if (std::sscanf(line, "ClothInkStyle=%d", &iv) == 1)
         {
-            state->cloth_ink_style = static_cast<poseweaver::ClothInkStyle>(std::clamp(iv, 0, 3));
+            state->cloth_ink_style = static_cast<poseweaver::ClothInkStyle>(std::clamp(iv, 0, 4));
         }
         {
             float r = 1.0f, g = 1.0f, b = 1.0f;
@@ -331,7 +331,7 @@ namespace
                 state->cloth_render_target_detail_size = std::clamp(v, 0.0001f, 0.25f);
         }
         if (std::sscanf(line, "ClothRenderMethod=%d", &iv) == 1)
-            state->cloth_render_method = std::clamp(iv, 0, 5);
+            state->cloth_render_method = std::clamp(iv, 0, 6);
         {
             float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
             if (std::sscanf(line, "CanvaBrushColor=%f,%f,%f,%f", &r, &g, &b, &a) == 4)
@@ -618,7 +618,7 @@ namespace
         buf->appendf("Sketch2IsoContinuityIterations=%d\n", state->sketch2iso_continuity_iterations);
         buf->appendf("IsoDistanceThreshold=%.9f\n", state->iso_distance_threshold);
         buf->appendf("ClothRenderTargetDetailSize=%.9f\n", state->cloth_render_target_detail_size);
-        buf->appendf("ClothRenderMethod=%d\n", std::clamp(state->cloth_render_method, 0, 5));
+        buf->appendf("ClothRenderMethod=%d\n", std::clamp(state->cloth_render_method, 0, 6));
 
         buf->appendf("SimulationDevice=%d\n",
             state->xpbd_params.device == poseweaver::SimulationDevice::Gpu ? 1 : 0);

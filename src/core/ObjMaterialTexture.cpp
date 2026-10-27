@@ -138,8 +138,8 @@ namespace poseweaver
         const Eigen::RowVector3d default_color = !material_order.empty()
             ? materials[material_order.front()].diffuse
             : Eigen::RowVector3d(0.8, 0.8, 0.8);
-        out.face_colors.resize(static_cast<int>(faces.size()), 3);
-        out.face_colors.rowwise() = default_color;
+        Eigen::MatrixXd polygon_colors(static_cast<int>(faces.size()), 3);
+        polygon_colors.rowwise() = default_color;
         for (const auto& range : material_ranges)
         {
             const auto found = materials.find(std::get<0>(range));
@@ -148,14 +148,25 @@ namespace poseweaver
             const int first = std::max(0, std::get<1>(range));
             const int last = std::min(static_cast<int>(faces.size()) - 1, std::get<2>(range));
             for (int face = first; face <= last; ++face)
-                out.face_colors.row(face) = found->second.diffuse;
+                polygon_colors.row(face) = found->second.diffuse;
+        }
+
+        int triangle_count = 0;
+        for (const auto& face : faces)
+            triangle_count += std::max(0, static_cast<int>(face.size()) - 2);
+        out.face_colors.resize(triangle_count, 3);
+        int triangle = 0;
+        for (int polygon = 0; polygon < static_cast<int>(faces.size()); ++polygon)
+        {
+            for (int corner = 1; corner + 1 < static_cast<int>(faces[(size_t)polygon].size()); ++corner)
+                out.face_colors.row(triangle++) = polygon_colors.row(polygon);
         }
 
         bool valid_uv = !texture_coordinates.empty() && texture_faces.size() == faces.size();
         for (const auto& coordinate : texture_coordinates)
             valid_uv = valid_uv && coordinate.size() >= 2;
-        for (const auto& face : texture_faces)
-            valid_uv = valid_uv && face.size() == 3;
+        for (int polygon = 0; polygon < static_cast<int>(texture_faces.size()); ++polygon)
+            valid_uv = valid_uv && texture_faces[(size_t)polygon].size() == faces[(size_t)polygon].size();
         if (valid_uv)
         {
             out.uv.resize(static_cast<int>(texture_coordinates.size()), 2);
@@ -164,10 +175,18 @@ namespace poseweaver
                 out.uv(i, 0) = texture_coordinates[static_cast<std::size_t>(i)][0];
                 out.uv(i, 1) = texture_coordinates[static_cast<std::size_t>(i)][1];
             }
-            out.uv_faces.resize(static_cast<int>(texture_faces.size()), 3);
-            for (int i = 0; i < out.uv_faces.rows(); ++i)
-                for (int j = 0; j < 3; ++j)
-                    out.uv_faces(i, j) = texture_faces[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)];
+            out.uv_faces.resize(triangle_count, 3);
+            triangle = 0;
+            for (const auto& face : texture_faces)
+            {
+                for (int corner = 1; corner + 1 < static_cast<int>(face.size()); ++corner)
+                {
+                    out.uv_faces(triangle, 0) = face[0];
+                    out.uv_faces(triangle, 1) = face[(size_t)corner];
+                    out.uv_faces(triangle, 2) = face[(size_t)corner + 1u];
+                    ++triangle;
+                }
+            }
         }
 
         std::filesystem::path texture_path;

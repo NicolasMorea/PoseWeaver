@@ -28,5 +28,6 @@ namespace poseweaver
         const Eigen::MatrixXi& faces,
         const Eigen::Matrix4f& view,
         const Eigen::Matrix4f& projection,
-        const std::vector<float>& gl_depth);
+        const std::vector<float>& gl_depth,
+        const std::vector<unsigned char>& shading_rgba);
 }

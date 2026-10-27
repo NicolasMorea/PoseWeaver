@@ -26,10 +26,18 @@ namespace poseweaver::ui_canva
         Transform
     };
 
+    enum class CanvaDeformationBrushMode
+    {
+        Push,
+        Smooth,
+        Erase
+    };
+
     enum class CanvaLayerKind
     {
         Generic,
         Smpl,
+        Scene,
         VitPose,
         Sketch2UV,
         Sketch2ISO,
@@ -55,6 +63,7 @@ namespace poseweaver::ui_canva
         std::string name;
         CanvaLayerKind kind = CanvaLayerKind::Generic;
         bool enabled = true;
+        float opacity = 1.0f;
 
         // Layer transform in canvas pixels (top-left origin).
         // Canvas position = offset + (layer_pixel * scale).
@@ -86,12 +95,17 @@ namespace poseweaver::ui_canva
         int stylization_line_gap_radius = 0;
         std::array<float, 3> stylization_cloth_color{ 1.0f, 1.0f, 1.0f };
         std::array<float, 3> stylization_line_color{ 0.0f, 0.0f, 0.0f };
+
+        std::vector<float> deformation_source_x;
+        std::vector<float> deformation_source_y;
     };
 
     struct CanvaUndo
     {
         int layer_id = 0;
         std::vector<unsigned char> pixels; // RGBA8 snapshot
+        std::vector<float> deformation_source_x;
+        std::vector<float> deformation_source_y;
         ImVec2 offset = ImVec2(0.0f, 0.0f);
         float scale = 1.0f;
     };
@@ -141,6 +155,9 @@ namespace poseweaver::ui_canva
         int sketch_frame_index = -1;
         int cloth_frame_index = -1;
         std::vector<int> cloth_frame_indices;
+        std::vector<unsigned char> refit_visibility_pixels;
+        std::vector<float> refit_deformation_source_x;
+        std::vector<float> refit_deformation_source_y;
         std::uint64_t rig_request_id = 0;
         std::uint64_t betas_request_id = 0;
         std::uint64_t iso_request_id = 0;
@@ -195,6 +212,8 @@ namespace poseweaver::ui_canva
         float brush_radius = 8.0f; // in canvas pixels
         ImVec4 brush_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
         bool visibility_brush_visible = true;
+        CanvaDeformationBrushMode deformation_brush_mode = CanvaDeformationBrushMode::Push;
+        float deformation_brush_power = 1.0f;
 
         CanvaTool tool = CanvaTool::Brush;
 
@@ -236,6 +255,8 @@ namespace poseweaver::ui_canva
         std::uint64_t ignore_vitpose_request_id = 0;
         std::uint64_t last_scene_view_snapshot_completed_id = 0;
         std::uint64_t pending_scene_view_snapshot_request_id = 0;
+        bool pending_scene_view_snapshot_layer_enabled = false;
+        bool pending_scene_view_snapshot_include_cloth = false;
 
         bool vitpose_pending_inference = false;
         std::uint64_t vitpose_pending_request_id = 0;
@@ -301,8 +322,7 @@ namespace poseweaver::ui_canva
         int cloth_refit_map_width = 0;
         int cloth_refit_map_height = 0;
         int cloth_refit_visibility_layer_id = 0;
-        std::vector<float> cloth_refit_deformation_source_x;
-        std::vector<float> cloth_refit_deformation_source_y;
+        int cloth_refit_deformation_layer_id = 0;
 
         std::filesystem::path pending_scene_view_snapshot_model_input_path;
 
@@ -527,6 +547,11 @@ namespace poseweaver::ui_canva
         const std::string& file_path,
         const std::filesystem::path& model_input_path,
         std::string* out_error);
+    bool canva_add_scene_render_layer(
+        CanvaState& canva,
+        const std::string& file_path,
+        const std::filesystem::path& model_input_path,
+        std::string* out_error);
     bool canva_add_nlf_projected_smpl_layer(
         CanvaState& canva,
         const std::filesystem::path& nlf_json_path,
@@ -606,6 +631,16 @@ namespace poseweaver::ui_canva
     int canva_pick_layer_at(const CanvaState& canva, const ImVec2& canvas_pos);
     void canva_prune_undo_for_layer(std::vector<CanvaUndo>& undo, int layer_id);
     void canva_push_undo(CanvaState& canva, int layer_id, const std::vector<unsigned char>& pixels, const ImVec2& offset, float scale);
+    void canva_apply_deformation_field_brush(
+        CanvaLayer& layer,
+        int width,
+        int height,
+        ImVec2 from,
+        ImVec2 to,
+        float radius,
+        CanvaDeformationBrushMode mode,
+        float power);
+    void canva_update_deformation_field_pixels(CanvaLayer& layer, int width, int height);
     bool canva_queue_cloth_fitting_predictions(
         AppState& state,
         CanvaState& canva,
@@ -688,7 +723,8 @@ namespace poseweaver::ui_canva
         const CanvaState& canva,
         std::vector<unsigned char>* out_rgba,
         std::string* out_error,
-        bool sketch_layers_only = false);
+        bool sketch_layers_only = false,
+        bool transparent_background = false);
     std::filesystem::path canva_render_frame_dir(int frame_index);
     std::filesystem::path canva_render_cloth_frame_dir(int frame_index, int cloth_frame_index);
     int canva_count_cloth_frames_for_sketch(const CanvaState& canva, int sketch_frame_index);
@@ -712,6 +748,7 @@ namespace poseweaver::ui_canva
     CanvaState& canva_state();
     void canva_ensure_initialized(AppState& state, CanvaState& canva);
     void canva_sequence_capture_current_frame(AppState& state, CanvaState& canva);
+    void canva_sequence_store_selected_frame(CanvaState& canva);
     bool canva_sequence_import_sketch_file(
         AppState& state,
         CanvaState& canva,

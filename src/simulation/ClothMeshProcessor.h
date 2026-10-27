@@ -106,5 +106,8 @@ namespace poseweaver
         Eigen::MatrixXd& out_V,
         Eigen::MatrixXi& out_F,
         ClothRenderRefineResult* result,
-        std::string* error);
+        std::string* error,
+        const Eigen::MatrixXd* cloth_UV = nullptr,
+        Eigen::MatrixXd* out_UV = nullptr,
+        Eigen::VectorXi* out_source_faces = nullptr);
 }

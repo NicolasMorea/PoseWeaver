@@ -167,6 +167,8 @@ int main()
     const std::filesystem::path color_gltf_path = garment_dir / "color-only.gltf";
     const std::filesystem::path color_obj_path = garment_dir / "color-only.obj";
     const std::filesystem::path color_mtl_path = garment_dir / "color-only.mtl";
+    const std::filesystem::path polygon_obj_path = garment_dir / "polygon.obj";
+    const std::filesystem::path polygon_mtl_path = garment_dir / "polygon.mtl";
     if (!write_text(obj_path,
             "mtllib shirt.mtl\n"
             "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
@@ -178,6 +180,16 @@ int main()
             "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
             "usemtl blue\nf 1 2 3\n")
         || !write_text(color_mtl_path, "newmtl blue\nKd 0.1 0.2 0.8\n")
+        || !write_text(polygon_obj_path,
+            "mtllib polygon.mtl\n"
+            "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+            "v 2 0 0\nv 3 0 0\nv 3 1 0\nv 2 1 0\n"
+            "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+            "usemtl blue\nf 1/1 2/2 3/3 4/4\n"
+            "usemtl red\nf 5/1 6/2 7/3 8/4\n")
+        || !write_text(polygon_mtl_path,
+            "newmtl blue\nKd 0.1 0.2 0.8\n"
+            "newmtl red\nKd 0.8 0.2 0.1\n")
         || !write_test_tga(image_path)
         || !write_test_glb(glb_path)
         || !write_test_gltf(gltf_path)
@@ -207,6 +219,17 @@ int main()
         std::filesystem::remove_all(root, ec);
         return 3;
     }
+    const auto& shirt_textures = assets.garment_textures("nested/shirt.obj");
+    if (std::find(garments.begin(), garments.end(), "nested/color-only.obj") != garments.end()
+        || shirt_textures.size() != 2
+        || shirt_textures[0].file != "nested/shirt.obj"
+        || shirt_textures[0].name != "Default"
+        || shirt_textures[1].file != "nested/color-only.obj")
+    {
+        std::cerr << "Garment texture variant grouping failed\n";
+        std::filesystem::remove_all(root, ec);
+        return 11;
+    }
 
     poseweaver::ObjMaterialTexture obj;
     if (!poseweaver::load_obj_material_texture(obj_path, obj)
@@ -232,6 +255,21 @@ int main()
         return 5;
     }
 
+    poseweaver::ObjMaterialTexture polygon_obj;
+    if (!poseweaver::load_obj_material_texture(polygon_obj_path, polygon_obj)
+        || !polygon_obj.has_material
+        || polygon_obj.face_colors.rows() != 4
+        || polygon_obj.uv_faces.rows() != 4
+        || (polygon_obj.face_colors.row(0) - Eigen::RowVector3d(0.1, 0.2, 0.8)).norm() > 1e-9
+        || (polygon_obj.face_colors.row(1) - Eigen::RowVector3d(0.1, 0.2, 0.8)).norm() > 1e-9
+        || (polygon_obj.face_colors.row(2) - Eigen::RowVector3d(0.8, 0.2, 0.1)).norm() > 1e-9
+        || (polygon_obj.face_colors.row(3) - Eigen::RowVector3d(0.8, 0.2, 0.1)).norm() > 1e-9)
+    {
+        std::cerr << "OBJ polygon material triangulation failed: " << polygon_obj.warning << '\n';
+        std::filesystem::remove_all(root, ec);
+        return 6;
+    }
+
     poseweaver::GltfGarment glb;
     std::string error;
     if (!poseweaver::load_gltf_garment(glb_path, glb, &error)
@@ -243,7 +281,7 @@ int main()
     {
         std::cerr << "GLB texture loading failed: " << error << ' ' << glb.texture_warning << '\n';
         std::filesystem::remove_all(root, ec);
-        return 6;
+        return 7;
     }
 
     poseweaver::GltfGarment gltf;
@@ -256,7 +294,7 @@ int main()
     {
         std::cerr << "glTF external resource loading failed: " << error << ' ' << gltf.texture_warning << '\n';
         std::filesystem::remove_all(root, ec);
-        return 7;
+        return 8;
     }
 
     poseweaver::GltfGarment color_gltf;
@@ -268,10 +306,10 @@ int main()
     {
         std::cerr << "glTF material color loading failed: " << error << '\n';
         std::filesystem::remove_all(root, ec);
-        return 8;
+        return 9;
     }
 
     std::filesystem::remove_all(root, ec);
     std::cout << "Garment asset smoke test passed\n";
-    return ec ? 9 : 0;
+    return ec ? 10 : 0;
 }

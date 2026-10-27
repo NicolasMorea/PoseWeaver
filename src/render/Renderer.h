@@ -248,6 +248,7 @@ namespace poseweaver
         Eigen::MatrixXd m_cloth_ink_preview_source_vertices;
         Eigen::MatrixXi m_cloth_ink_preview_source_faces;
         ClothInkStyle m_cloth_ink_preview_style = ClothInkStyle::Off;
+        std::uint64_t m_cloth_ink_preview_material_version = 0;
         int m_last_fb_h = 0;
         Eigen::MatrixXd m_garment_rest_vertices;
         Eigen::MatrixXd m_garment_base_smpl_vertices;
@@ -268,6 +269,7 @@ namespace poseweaver
         bool m_smplh_deform_dirty = true;
         bool m_smplh_last_show_character = true;
         bool m_garment_last_show_mesh = false;
+        std::string m_garment_material_name;
         bool m_garment_has_source_texture = false;
         bool m_garment_has_image_texture = false;
         Eigen::MatrixXd m_garment_source_colors;
@@ -416,6 +418,7 @@ namespace poseweaver
 
         std::uint64_t m_pose_version = 0;
         std::uint64_t m_garment_version = 0;
+        std::uint64_t m_garment_material_version = 0;
         std::uint64_t m_last_posed_pose_version = 0;
         std::uint64_t m_last_posed_garment_version = 0;
 

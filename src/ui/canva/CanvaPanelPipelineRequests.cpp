@@ -87,7 +87,8 @@ namespace poseweaver::ui_canva
         const CanvaState& canva,
         std::vector<unsigned char>* out_rgba,
         std::string* out_error,
-        bool sketch_layers_only)
+        bool sketch_layers_only,
+        bool transparent_background)
     {
         const int w = canva.width;
         const int h = canva.height;
@@ -100,7 +101,9 @@ namespace poseweaver::ui_canva
 
         if (!out_rgba)
             return false;
-        out_rgba->assign((size_t)w * (size_t)h * 4u, 255u); // opaque white background
+        out_rgba->assign(
+            (size_t)w * (size_t)h * 4u,
+            transparent_background ? 0u : 255u);
 
         // Composite bottom->top to match rendering order.
         for (int li = (int)canva.layers.size() - 1; li >= 0; --li)
@@ -140,7 +143,8 @@ namespace poseweaver::ui_canva
 
                     float sr = 0.0f, sg = 0.0f, sb = 0.0f, sa = 0.0f;
                     canva_sample_layer_bilinear_rgba(layer, w, h, u, v, sr, sg, sb, sa);
-                    sa = std::clamp(sa, 0.0f, 1.0f);
+                    sa = std::clamp(sa, 0.0f, 1.0f)
+                        * std::clamp(layer.opacity, 0.0f, 1.0f);
                     if (sa <= 0.0f)
                         continue;
 
@@ -148,16 +152,18 @@ namespace poseweaver::ui_canva
                     const float dr = (float)(*out_rgba)[idx + 0u] / 255.0f;
                     const float dg = (float)(*out_rgba)[idx + 1u] / 255.0f;
                     const float db = (float)(*out_rgba)[idx + 2u] / 255.0f;
+                    const float da = (float)(*out_rgba)[idx + 3u] / 255.0f;
 
                     const float inv = 1.0f - sa;
-                    const float or_ = sr * sa + dr * inv;
-                    const float og_ = sg * sa + dg * inv;
-                    const float ob_ = sb * sa + db * inv;
+                    const float oa = sa + da * inv;
+                    const float or_ = oa > 0.0f ? (sr * sa + dr * da * inv) / oa : 0.0f;
+                    const float og_ = oa > 0.0f ? (sg * sa + dg * da * inv) / oa : 0.0f;
+                    const float ob_ = oa > 0.0f ? (sb * sa + db * da * inv) / oa : 0.0f;
 
                     (*out_rgba)[idx + 0u] = (unsigned char)std::clamp<int>((int)(or_ * 255.0f + 0.5f), 0, 255);
                     (*out_rgba)[idx + 1u] = (unsigned char)std::clamp<int>((int)(og_ * 255.0f + 0.5f), 0, 255);
                     (*out_rgba)[idx + 2u] = (unsigned char)std::clamp<int>((int)(ob_ * 255.0f + 0.5f), 0, 255);
-                    (*out_rgba)[idx + 3u] = 255u;
+                    (*out_rgba)[idx + 3u] = (unsigned char)std::clamp<int>((int)(oa * 255.0f + 0.5f), 0, 255);
                 }
             }
         }
@@ -263,7 +269,7 @@ namespace poseweaver::ui_canva
      bool canva_save_visible_layers_png(const CanvaState& canva, std::filesystem::path* out_path, std::string* out_error)
     {
         std::vector<unsigned char> out_rgba;
-        if (!canva_composite_visible_layers_rgba(canva, &out_rgba, out_error))
+        if (!canva_composite_visible_layers_rgba(canva, &out_rgba, out_error, false, true))
             return false;
 
         std::filesystem::path out;
@@ -394,18 +400,54 @@ namespace poseweaver::ui_canva
         canva.render_cloth_fine = fine;
         canva.render_cloth_fit_after = fit_after;
         canva.render_cloth_refit_after = refit_after;
-        canva.render_cloth_model_input_path = canva_cloth_render_alignment_input(state, canva);
         canva.render_cloth_status = fine ? "Refining" : "Rendering";
 
+        const int selected_frame_index = canva.sequence_selected_frame;
+        const bool use_sequence_frame = selected_frame_index >= 0
+            && selected_frame_index < (int)canva.sequence_cloth_frames.size();
+        const CanvaSequenceTrackFrame* selected_frame = use_sequence_frame
+            ? &canva.sequence_cloth_frames[(size_t)selected_frame_index]
+            : nullptr;
+        const CanvaSequenceTrackFrame* selected_sketch = nullptr;
+        if (selected_frame
+            && selected_frame->sketch_frame_index >= 0
+            && selected_frame->sketch_frame_index < (int)canva.sequence_sketch_frames.size())
+        {
+            selected_sketch =
+                &canva.sequence_sketch_frames[(size_t)selected_frame->sketch_frame_index];
+        }
+
+        canva.render_cloth_model_input_path = selected_sketch
+            && !selected_sketch->model_input_path.empty()
+            ? selected_sketch->model_input_path
+            : canva_cloth_render_alignment_input(state, canva);
         state.show_garment_mesh = true;
         state.cloth_render_fine = fine;
-        state.cloth_render_use_current_camera = true;
+        state.cloth_render_use_current_camera = selected_sketch == nullptr
+            || selected_sketch->rig_json_path.empty();
         state.cloth_render_stroke_reference_path = canva.render_cloth_model_input_path.string();
-        state.cloth_render_camera_rig_path.clear();
+        state.cloth_render_camera_rig_path = state.cloth_render_use_current_camera
+            ? std::string()
+            : selected_sketch->rig_json_path.string();
         state.cloth_render_target_detail_size =
             std::clamp(state.cloth_render_target_detail_size, 0.0001f, 0.25f);
         state.cloth_render_path.clear();
-        canva_prepare_cloth_output_dirs(state, canva, 0, 0);
+        if (selected_frame)
+        {
+            state.controls.current_frame = std::clamp(
+                selected_frame->sim_frame_index,
+                0,
+                std::max(0, state.controls.frame_count - 1));
+            state.controls.playing = false;
+            canva.sequence_current_frame_dir = selected_frame->frame_dir;
+            canva.sequence_current_cloth_frame_dir = selected_frame->cloth_frame_dir;
+            state.cloth_render_output_dir = selected_frame->cloth_frame_dir.string();
+            state.cloth_fitting_output_dir = selected_frame->cloth_frame_dir.string();
+        }
+        else
+        {
+            canva_prepare_cloth_output_dirs(state, canva, 0, 0);
+        }
         canva.render_cloth_request_id = ++state.cloth_render_request_id;
 
         console_add_line(state,
@@ -540,6 +582,50 @@ namespace poseweaver::ui_canva
 
         const int preferred = std::clamp(state.canva_preferred_bone_prediction, 0, 1);
         if (preferred == 0)
+        {
+            if (state.sketch2rig.service == nullptr || state.sketch2betas.service == nullptr)
+            {
+                canva.bone_prediction_debug_mode = 4;
+                canva.bone_prediction_debug_status = "Custom models unavailable";
+                if (out_error)
+                    *out_error = "custom rig/betas workers are not available";
+                return false;
+            }
+            if (state.sketch2rig.status != ModelInferenceStatus::Ready
+                || state.sketch2betas.status != ModelInferenceStatus::Ready)
+            {
+                state.sketch2rig.service->start();
+                state.sketch2betas.service->start();
+
+                canva.extract_pose_active = true;
+                canva.extract_pose_rig_done = false;
+                canva.extract_pose_betas_done = false;
+                canva.extract_pose_hide_rig_layer = hide_rig_layer;
+                canva.extract_pose_generate_cloth_after = generate_cloth_after;
+                canva.extract_pose_using_nlf = false;
+                canva.extract_pose_nlf_fallback_allowed = false;
+                canva.extract_pose_waiting_custom_workers = true;
+                canva.extract_pose_direct_nlf = false;
+                canva.bone_prediction_debug_mode = 0;
+                canva.bone_prediction_nlf_confidence = -1.0f;
+                canva.bone_prediction_debug_status = "Loading Custom models";
+                canva.extract_pose_model_input_path = sketch_path;
+                canva.extract_pose_rig_path = sketch_path.parent_path() / "sketch_rig.json";
+                canva.extract_pose_betas_path = sketch_path.parent_path() / "sketch_betas.json";
+                if (generate_cloth_after)
+                {
+                    canva_generate_cloth_reset_timings(canva, false);
+                    canva_generate_cloth_start_step(canva, GenerateClothStepId::Inference);
+                    canva.generate_cloth_model_input_path = sketch_path;
+                    canva.generate_cloth_rig_json_path = canva.extract_pose_rig_path;
+                    canva.generate_cloth_status = "Loading Custom models";
+                    canva.generate_cloth_failed_step = -1;
+                    canva.generate_cloth_extract_rig_start = std::chrono::steady_clock::now();
+                    canva.generate_cloth_extract_betas_start = canva.generate_cloth_extract_rig_start;
+                }
+                console_add_line(state, "Canva: Loading Sketch2Rig and Sketch2Betas for Extract Pose");
+                return true;
+            }
             return canva_queue_extract_pose_custom_from_sketch(
                 state,
                 canva,
@@ -547,6 +633,7 @@ namespace poseweaver::ui_canva
                 generate_cloth_after,
                 hide_rig_layer,
                 out_error);
+        }
 
         if (state.nlf.service == nullptr)
         {
@@ -1343,8 +1430,10 @@ namespace poseweaver::ui_canva
         state.show_smpl_character = true;
         state.scene_view_snapshot_pose_name = npz_path.filename().string();
         state.scene_view_snapshot_path.clear();
+        state.scene_view_snapshot_include_cloth = false;
         state.scene_view_snapshot_use_rigopt_camera = false;
         canva.pending_scene_view_snapshot_request_id = ++state.scene_view_snapshot_request_id;
+        canva.pending_scene_view_snapshot_include_cloth = false;
         canva.pending_scene_view_snapshot_model_input_path = canva.rig_optimization_model_input_path;
         state.scene_view_snap_to_target_request_id++;
 

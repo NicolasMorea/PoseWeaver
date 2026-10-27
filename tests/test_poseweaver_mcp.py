@@ -78,6 +78,7 @@ class McpServerTests(unittest.TestCase):
             }
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "1.1.0")
         self.assertIn("tools", response["result"]["capabilities"])
 
     def test_tool_catalog_has_unique_names(self):
@@ -86,6 +87,12 @@ class McpServerTests(unittest.TestCase):
         names = [item["name"] for item in tools]
         self.assertEqual(len(names), len(set(names)))
         self.assertIn("poseweaver_start_operation", names)
+        self.assertIn("poseweaver_edit_fitting_map", names)
+        manage_layer = next(item for item in tools if item["name"] == "poseweaver_manage_layer")
+        self.assertEqual(
+            manage_layer["inputSchema"]["properties"]["opacity"],
+            {"type": "number", "minimum": 0, "maximum": 1},
+        )
 
     def test_layer_action_maps_to_bridge_method(self):
         response = self.server.dispatch(
@@ -95,21 +102,50 @@ class McpServerTests(unittest.TestCase):
                 "method": "tools/call",
                 "params": {
                     "name": "poseweaver_manage_layer",
-                    "arguments": {"action": "update", "layer_id": 7, "visible": False},
+                    "arguments": {"action": "update", "layer_id": 7, "visible": False, "opacity": 0.4},
                 },
             }
         )
         self.assertFalse(response["result"]["isError"])
         self.assertEqual(
             self.controller.bridge.calls[-1],
-            ("layers.set", {"layer_id": 7, "visible": False}),
+            ("layers.set", {"layer_id": 7, "visible": False, "opacity": 0.4}),
+        )
+
+    def test_fitting_map_edit_maps_to_bridge_method(self):
+        arguments = {
+            "layer_id": 9,
+            "strokes": [
+                {
+                    "mode": "push",
+                    "from_x": 10,
+                    "from_y": 20,
+                    "to_x": 14,
+                    "to_y": 18,
+                    "radius": 12,
+                    "power": 0.5,
+                }
+            ],
+        }
+        response = self.server.dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "poseweaver_edit_fitting_map", "arguments": arguments},
+            }
+        )
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            self.controller.bridge.calls[-1],
+            ("fitting_maps.edit", arguments),
         )
 
     def test_unknown_tool_returns_tool_error(self):
         response = self.server.dispatch(
             {
                 "jsonrpc": "2.0",
-                "id": 4,
+                "id": 5,
                 "method": "tools/call",
                 "params": {"name": "not_a_tool", "arguments": {}},
             }

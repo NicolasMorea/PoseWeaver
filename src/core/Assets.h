@@ -6,6 +6,12 @@
 
 namespace poseweaver
 {
+    struct GarmentTextureVariant
+    {
+        std::string name;
+        std::string file;
+    };
+
     class AssetIndex
     {
     public:
@@ -15,15 +21,17 @@ namespace poseweaver
 
         const std::vector<std::string>& poses() const { return m_poses; }
         const std::vector<std::string>& garments() const { return m_garments; }
+        const std::vector<GarmentTextureVariant>& garment_textures(const std::string& garment) const;
         const std::vector<std::string>& meshes() const { return m_meshes; }
 
     private:
         std::filesystem::path m_assets_root;
         std::vector<std::string> m_poses;
         std::vector<std::string> m_garments;
+        std::vector<std::vector<GarmentTextureVariant>> m_garment_textures;
         std::vector<std::string> m_meshes;
 
-        static std::vector<std::string> list_entries(const std::filesystem::path& dir);
+        void index_garments(const std::filesystem::path& dir);
         static std::vector<std::string> list_pose_files(const std::filesystem::path& dir);
         static std::vector<std::string> list_mesh_files(const std::filesystem::path& dir);
     };

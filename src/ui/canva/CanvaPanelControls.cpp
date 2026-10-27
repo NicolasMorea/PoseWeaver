@@ -72,6 +72,13 @@ namespace poseweaver::ui_canva
             canva.active_layer >= 0
             && canva.active_layer < (int)canva.layers.size()
             && canva_layer_is_visibility_map(canva.layers[(size_t)canva.active_layer]);
+        const bool active_deformation_field =
+            canva.active_layer >= 0
+            && canva.active_layer < (int)canva.layers.size()
+            && canva.layers[(size_t)canva.active_layer].kind
+                == CanvaLayerKind::ClothFittingDeformation
+            && !canva.layers[(size_t)canva.active_layer].deformation_source_x.empty()
+            && !canva.layers[(size_t)canva.active_layer].deformation_source_y.empty();
         ImGui::BeginDisabled(canva.tool != CanvaTool::Brush);
         ImGui::SliderFloat("Size", &canva.brush_radius, 0.5f, 250.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
         if (active_visibility_map)
@@ -83,6 +90,46 @@ namespace poseweaver::ui_canva
             if (ImGui::RadioButton("Hidden (red)", !canva.visibility_brush_visible))
                 canva.visibility_brush_visible = false;
             ImGui::TextDisabled("Red/green only; alpha is locked.");
+        }
+        else if (active_deformation_field)
+        {
+            ImGui::TextUnformatted("Deformation brush");
+            if (ImGui::RadioButton(
+                    "Push",
+                    canva.deformation_brush_mode == CanvaDeformationBrushMode::Push))
+            {
+                canva.deformation_brush_mode = CanvaDeformationBrushMode::Push;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(
+                    "Smooth",
+                    canva.deformation_brush_mode == CanvaDeformationBrushMode::Smooth))
+            {
+                canva.deformation_brush_mode = CanvaDeformationBrushMode::Smooth;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton(
+                    "Erase",
+                    canva.deformation_brush_mode == CanvaDeformationBrushMode::Erase))
+            {
+                canva.deformation_brush_mode = CanvaDeformationBrushMode::Erase;
+            }
+            ImGui::SliderFloat(
+                "Power",
+                &canva.deformation_brush_power,
+                0.0f,
+                1.0f,
+                "%.2f");
+            canva.deformation_brush_power =
+                std::clamp(canva.deformation_brush_power, 0.0f, 1.0f);
+            const char* deformation_hint =
+                canva.deformation_brush_mode == CanvaDeformationBrushMode::Push
+                ? "Drag to push the refitted cloth."
+                : canva.deformation_brush_mode == CanvaDeformationBrushMode::Smooth
+                ? "Paint to smooth nearby deformation."
+                : "Paint to remove all deformation, including the computed fit.";
+            ImGui::TextDisabled("%s", deformation_hint);
+            ImGui::TextDisabled("Red = horizontal, green = vertical, blue = magnitude.");
         }
         else
         {
@@ -182,7 +229,7 @@ namespace poseweaver::ui_canva
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Save##canva_save_image"))
+        if (ImGui::Button("Save PNG##canva_save_image"))
         {
             std::filesystem::path out_path;
             std::string err;
@@ -195,6 +242,8 @@ namespace poseweaver::ui_canva
                 console_add_line(state, std::string("Canva: Save failed: ") + (err.empty() ? "(unknown error)" : err));
             }
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Save visible layers as a PNG with a transparent background.");
 
         ImGui::Separator();
         ImGui::TextUnformatted("VitPose");
@@ -909,22 +958,96 @@ namespace poseweaver::ui_canva
             ImGui::Text("(NLF %.3f)", (double)canva.bone_prediction_nlf_confidence);
         }
 
-        const bool custom_bone_models_ready =
+        const bool custom_bone_models_available =
             state.sketch2rig.service != nullptr &&
-            state.sketch2betas.service != nullptr &&
-            state.sketch2rig.status == ModelInferenceStatus::Ready &&
-            state.sketch2betas.status == ModelInferenceStatus::Ready;
+            state.sketch2betas.service != nullptr;
         const bool nlf_bone_model_ready =
             state.nlf.service != nullptr &&
             state.nlf.status == ModelInferenceStatus::Ready;
         const bool can_extract_pose =
             !canva.extract_pose_active &&
             (state.canva_preferred_bone_prediction == 0
-                ? custom_bone_models_ready
+                ? custom_bone_models_available
                 : nlf_bone_model_ready);
+        const bool pose_selected =
+            state.selection.pose_index >= 0
+            && state.selection.pose_index < (int)state.selection.poses.size()
+            && state.pending_pose_selection.empty();
         const bool garment_selected =
             state.selection.garment_index >= 0
             && state.selection.garment_index < (int)state.selection.garments.size();
+        ImGui::BeginDisabled(!state.pending_pose_selection.empty());
+        if (ImGui::Button("Render SMPL"))
+        {
+            std::filesystem::path model_input_path;
+            std::string err;
+            if (canva_save_model_input_png(canva, &model_input_path, &err))
+            {
+                state.scene_view_snapshot_pose_name = pose_selected
+                    ? state.selection.poses[(size_t)state.selection.pose_index]
+                    : std::string();
+                state.scene_view_snapshot_path.clear();
+                state.scene_view_snapshot_include_cloth = false;
+                state.scene_view_snapshot_use_rigopt_camera = false;
+                canva.pending_scene_view_snapshot_request_id =
+                    ++state.scene_view_snapshot_request_id;
+                canva.pending_scene_view_snapshot_layer_enabled = true;
+                canva.pending_scene_view_snapshot_include_cloth = false;
+                canva.pending_scene_view_snapshot_model_input_path = model_input_path;
+                state.scene_view_snap_to_target_request_id++;
+                console_add_line(state, "Canva: queued SMPL render");
+            }
+            else
+            {
+                console_add_line(state, "Canva: SMPL render failed to queue: "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+            }
+        }
+        ImGui::EndDisabled();
+        if (!state.pending_pose_selection.empty()
+            && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Wait for the selected pose to finish loading.");
+        else if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Render the current SMPL character, including the Rest / T-pose, as a canvas layer.");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!state.pending_pose_selection.empty() || !garment_selected);
+        if (ImGui::Button("Render 3D scene"))
+        {
+            std::filesystem::path model_input_path;
+            std::string err;
+            if (canva_save_model_input_png(canva, &model_input_path, &err))
+            {
+                state.scene_view_snapshot_pose_name = pose_selected
+                    ? state.selection.poses[(size_t)state.selection.pose_index]
+                    : std::string();
+                state.scene_view_snapshot_path.clear();
+                state.scene_view_snapshot_include_cloth = true;
+                state.scene_view_snapshot_use_rigopt_camera = false;
+                canva.pending_scene_view_snapshot_request_id =
+                    ++state.scene_view_snapshot_request_id;
+                canva.pending_scene_view_snapshot_layer_enabled = true;
+                canva.pending_scene_view_snapshot_include_cloth = true;
+                canva.pending_scene_view_snapshot_model_input_path = model_input_path;
+                state.scene_view_snap_to_target_request_id++;
+                console_add_line(state, "Canva: queued 3D scene render");
+            }
+            else
+            {
+                console_add_line(state, "Canva: 3D scene render failed to queue: "
+                    + (err.empty() ? std::string("(unknown error)") : err));
+            }
+        }
+        ImGui::EndDisabled();
+        if (!garment_selected
+            && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Select a cloth mesh to render the SMPL + cloth scene.");
+        else if (!state.pending_pose_selection.empty()
+            && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Wait for the selected pose to finish loading.");
+        else if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Render the current SMPL character and cloth together as a canvas layer.");
+
         const bool can_render_cloth =
             garment_selected
             && !canva.render_cloth_active
@@ -937,6 +1060,7 @@ namespace poseweaver::ui_canva
             "Soft 2D shader",
             "Grease pencil",
             "Grease pencil + shading",
+            "Std shader shaded",
         };
         ImGui::SetNextItemWidth(190.0f);
         ImGui::Combo(
@@ -944,7 +1068,7 @@ namespace poseweaver::ui_canva
             &state.cloth_render_method,
             cloth_render_methods,
             IM_ARRAYSIZE(cloth_render_methods));
-        state.cloth_render_method = std::clamp(state.cloth_render_method, 0, 5);
+        state.cloth_render_method = std::clamp(state.cloth_render_method, 0, 6);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Used for generated canvas cloth only; independent of the Scene View shader.");
         ImGui::BeginDisabled(!can_render_cloth);
@@ -976,7 +1100,7 @@ namespace poseweaver::ui_canva
         }
         ImGui::EndDisabled();
         if (!can_render_and_refit && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Run Fit once to create the visibility and deformation maps reused by Refit.");
+            ImGui::SetTooltip("Run Fit once to create the visibility map and editable deformation field reused by Refit.");
         ImGui::SameLine();
         ImGui::Text("Status: %s",
             !garment_selected && !canva.render_cloth_active
@@ -1000,10 +1124,6 @@ namespace poseweaver::ui_canva
             && state.sketch2iso.status == ModelInferenceStatus::Ready
             && state.sketch2depth.service != nullptr
             && state.sketch2depth.status == ModelInferenceStatus::Ready;
-        const bool pose_selected =
-            state.selection.pose_index >= 0
-            && state.selection.pose_index < (int)state.selection.poses.size()
-            && state.pending_pose_selection.empty();
         const bool can_simulate =
             garment_selected &&
             pose_selected &&
@@ -1450,6 +1570,12 @@ namespace poseweaver::ui_canva
         {
             if (canva_layer_is_visibility_map(layer))
                 return std::pair<const char*, ImVec4>("V", ImVec4(0.30f, 0.85f, 0.38f, 1.0f));
+            if (layer.kind == CanvaLayerKind::Scene)
+                return std::pair<const char*, ImVec4>("3D", ImVec4(0.42f, 0.78f, 0.95f, 1.0f));
+            if (layer.kind == CanvaLayerKind::ClothFittingDeformation
+                && !layer.deformation_source_x.empty()
+                && !layer.deformation_source_y.empty())
+                return std::pair<const char*, ImVec4>("F", ImVec4(0.30f, 0.78f, 0.92f, 1.0f));
             if (layer.kind == CanvaLayerKind::Generic)
                 return std::pair<const char*, ImVec4>("S", ImVec4(0.35f, 0.68f, 1.0f, 1.0f));
             if (layer.kind == CanvaLayerKind::GeneratedCloth
@@ -1477,7 +1603,9 @@ namespace poseweaver::ui_canva
             if (ImGui::IsItemHovered())
             {
                 const char* nature = icon[0] == 'S' ? "Sketch"
+                    : icon[0] == '3' ? "3D scene"
                     : icon[0] == 'V' ? "Visibility map"
+                    : icon[0] == 'F' ? "Deformation field"
                     : icon[0] == 'C' ? "Cloth render"
                     : "Debug";
                 ImGui::SetTooltip("%s layer", nature);
@@ -1526,9 +1654,18 @@ namespace poseweaver::ui_canva
         if (canva.active_layer >= 0 && canva.active_layer < (int)canva.layers.size())
         {
             CanvaLayer& layer = canva.layers[(size_t)canva.active_layer];
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(170.0f);
+            float opacity_percent = std::clamp(layer.opacity, 0.0f, 1.0f) * 100.0f;
+            if (ImGui::SliderFloat("Opacity", &opacity_percent, 0.0f, 100.0f, "%.0f%%",
+                    ImGuiSliderFlags_AlwaysClamp))
+            {
+                layer.opacity = opacity_percent / 100.0f;
+                show_canva_layers();
+            }
+
             if (layer.kind == CanvaLayerKind::ClothFittingWarpedSmoothed)
             {
-                ImGui::Separator();
                 ImGui::TextUnformatted("Warped cloth stylization");
                 bool smoothing_changed = false;
                 const char* layer_methods[] = { "Anime cel", "Soft toon", "Pure line art", "None" };

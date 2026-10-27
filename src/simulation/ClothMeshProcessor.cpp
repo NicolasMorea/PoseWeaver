@@ -749,12 +749,19 @@ namespace poseweaver
         Eigen::MatrixXd& out_V,
         Eigen::MatrixXi& out_F,
         ClothRenderRefineResult* result,
-        std::string* error)
+        std::string* error,
+        const Eigen::MatrixXd* cloth_UV,
+        Eigen::MatrixXd* out_UV,
+        Eigen::VectorXi* out_source_faces)
     {
         if (result)
             *result = ClothRenderRefineResult{};
         out_V.resize(0, 3);
         out_F.resize(0, 3);
+        if (out_UV)
+            out_UV->resize(0, 2);
+        if (out_source_faces)
+            out_source_faces->resize(0);
 
         if (cloth_V.cols() != 3 || cloth_F.cols() != 3 || cloth_V.rows() <= 0 || cloth_F.rows() <= 0)
         {
@@ -780,6 +787,14 @@ namespace poseweaver
                 *error = "Cloth faces contain invalid vertex indices.";
             return false;
         }
+        const bool refine_uv = cloth_UV != nullptr && out_UV != nullptr;
+        if ((cloth_UV == nullptr) != (out_UV == nullptr)
+            || (refine_uv && (cloth_UV->rows() != cloth_V.rows() || cloth_UV->cols() < 2 || !cloth_UV->allFinite())))
+        {
+            if (error)
+                *error = "Render UVs must be finite and aligned with cloth vertices.";
+            return false;
+        }
 
         constexpr int kMaxPasses = 10;
         constexpr int kMaxVertices = 2000000;
@@ -788,6 +803,8 @@ namespace poseweaver
 
         Eigen::MatrixXd V = cloth_V;
         Eigen::MatrixXi F = cloth_F;
+        Eigen::MatrixXd UV = refine_uv ? cloth_UV->leftCols(2).eval() : Eigen::MatrixXd{};
+        Eigen::VectorXi source_faces = Eigen::VectorXi::LinSpaced(F.rows(), 0, F.rows() - 1);
 
         const auto max_edge_length = [](const Eigen::MatrixXd& vertices, const Eigen::MatrixXi& faces)
         {
@@ -840,6 +857,13 @@ namespace poseweaver
             vertices.reserve((size_t)V.rows() + (size_t)F.rows());
             for (int vi = 0; vi < V.rows(); ++vi)
                 vertices.push_back(V.row(vi));
+            std::vector<Eigen::RowVector2d> texture_coordinates;
+            if (refine_uv)
+            {
+                texture_coordinates.reserve((size_t)V.rows() + (size_t)F.rows());
+                for (int vi = 0; vi < UV.rows(); ++vi)
+                    texture_coordinates.push_back(UV.row(vi));
+            }
 
             const auto curved_midpoint = [&](const int i, const int j)
             {
@@ -874,16 +898,25 @@ namespace poseweaver
 
                 const int index = (int)vertices.size();
                 vertices.push_back(curved_midpoint(i, j));
+                if (refine_uv)
+                    texture_coordinates.push_back(0.5 * (UV.row(i) + UV.row(j)));
                 midpoint_index.emplace(key, index);
                 return index;
             };
 
             std::vector<Eigen::Vector3i> faces;
             faces.reserve((size_t)F.rows() * 2u);
+            std::vector<int> next_source_faces;
+            next_source_faces.reserve((size_t)F.rows() * 2u);
             bool split_any = false;
 
             for (int fi = 0; fi < F.rows(); ++fi)
             {
+                const auto add_face = [&](const int i, const int j, const int k)
+                {
+                    faces.emplace_back(i, j, k);
+                    next_source_faces.push_back(source_faces(fi));
+                };
                 const int a = F(fi, 0);
                 const int b = F(fi, 1);
                 const int c = F(fi, 2);
@@ -894,7 +927,7 @@ namespace poseweaver
 
                 if (split_count == 0)
                 {
-                    faces.emplace_back(a, b, c);
+                    add_face(a, b, c);
                     continue;
                 }
 
@@ -907,47 +940,47 @@ namespace poseweaver
                 {
                     if (s0)
                     {
-                        faces.emplace_back(a, m0, c);
-                        faces.emplace_back(m0, b, c);
+                        add_face(a, m0, c);
+                        add_face(m0, b, c);
                     }
                     else if (s1)
                     {
-                        faces.emplace_back(b, m1, a);
-                        faces.emplace_back(m1, c, a);
+                        add_face(b, m1, a);
+                        add_face(m1, c, a);
                     }
                     else
                     {
-                        faces.emplace_back(c, m2, b);
-                        faces.emplace_back(m2, a, b);
+                        add_face(c, m2, b);
+                        add_face(m2, a, b);
                     }
                 }
                 else if (split_count == 2)
                 {
                     if (s0 && s1)
                     {
-                        faces.emplace_back(b, m1, m0);
-                        faces.emplace_back(a, m0, m1);
-                        faces.emplace_back(a, m1, c);
+                        add_face(b, m1, m0);
+                        add_face(a, m0, m1);
+                        add_face(a, m1, c);
                     }
                     else if (s1 && s2)
                     {
-                        faces.emplace_back(c, m2, m1);
-                        faces.emplace_back(b, m1, m2);
-                        faces.emplace_back(b, m2, a);
+                        add_face(c, m2, m1);
+                        add_face(b, m1, m2);
+                        add_face(b, m2, a);
                     }
                     else
                     {
-                        faces.emplace_back(a, m0, m2);
-                        faces.emplace_back(c, m2, m0);
-                        faces.emplace_back(c, m0, b);
+                        add_face(a, m0, m2);
+                        add_face(c, m2, m0);
+                        add_face(c, m0, b);
                     }
                 }
                 else
                 {
-                    faces.emplace_back(a, m0, m2);
-                    faces.emplace_back(m0, b, m1);
-                    faces.emplace_back(m2, m1, c);
-                    faces.emplace_back(m0, m1, m2);
+                    add_face(a, m0, m2);
+                    add_face(m0, b, m1);
+                    add_face(m2, m1, c);
+                    add_face(m0, m1, m2);
                 }
             }
 
@@ -964,10 +997,19 @@ namespace poseweaver
             V.resize((int)vertices.size(), 3);
             for (int vi = 0; vi < (int)vertices.size(); ++vi)
                 V.row(vi) = vertices[(size_t)vi];
+            if (refine_uv)
+            {
+                UV.resize((int)texture_coordinates.size(), 2);
+                for (int vi = 0; vi < (int)texture_coordinates.size(); ++vi)
+                    UV.row(vi) = texture_coordinates[(size_t)vi];
+            }
 
             F.resize((int)faces.size(), 3);
             for (int fi = 0; fi < (int)faces.size(); ++fi)
                 F.row(fi) = faces[(size_t)fi];
+            source_faces.resize((int)next_source_faces.size());
+            for (int fi = 0; fi < (int)next_source_faces.size(); ++fi)
+                source_faces(fi) = next_source_faces[(size_t)fi];
 
             added_vertices += V.rows() - previous_vertex_count;
         }
@@ -982,6 +1024,10 @@ namespace poseweaver
 
         out_V = std::move(V);
         out_F = std::move(F);
+        if (refine_uv)
+            *out_UV = std::move(UV);
+        if (out_source_faces)
+            *out_source_faces = std::move(source_faces);
         if (result)
         {
             result->passes = passes;

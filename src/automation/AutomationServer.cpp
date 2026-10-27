@@ -66,6 +66,7 @@ namespace poseweaver
             {
             case CanvaLayerKind::Generic: return "generic";
             case CanvaLayerKind::Smpl: return "smpl";
+            case CanvaLayerKind::Scene: return "scene";
             case CanvaLayerKind::VitPose: return "vitpose";
             case CanvaLayerKind::Sketch2UV: return "sketch2uv";
             case CanvaLayerKind::Sketch2ISO: return "sketch2iso";
@@ -114,12 +115,13 @@ namespace poseweaver
 
         json layer_json(const CanvaState& canva, const CanvaLayer& layer, int index)
         {
-            return {
+            json result = {
                 { "id", layer.id },
                 { "index", index },
                 { "name", layer.name },
                 { "kind", layer_kind_name(layer.kind) },
                 { "visible", layer.enabled },
+                { "opacity", layer.opacity },
                 { "selected", index == canva.active_layer },
                 { "offset", { layer.offset.x, layer.offset.y } },
                 { "scale", layer.scale },
@@ -127,6 +129,11 @@ namespace poseweaver
                 { "pixel_height", canva.height },
                 { "has_pixels", !layer.pixels.empty() }
             };
+            if (layer.id == canva.cloth_refit_visibility_layer_id)
+                result["fitting_map_role"] = "visibility";
+            else if (layer.id == canva.cloth_refit_deformation_layer_id)
+                result["fitting_map_role"] = "deformation";
+            return result;
         }
 
         std::filesystem::path checked_output_path(const json& params)
@@ -259,7 +266,7 @@ namespace poseweaver
             PW_BOOL("view.show_collision_colliders", "Show collision geometry.", show_collision_colliders);
             PW_BOOL("view.show_rig", "Show the predicted rig.", show_sketch2rig_rig);
             PW_BOOL("view.garment_color_by_smpl_uv", "Color garment by SMPL UV.", garment_color_by_smpl_uv);
-            PW_INT("render.method", "0 standard, 1 detailed ink, 2 clean line, 3 soft 2D, 4 grease pencil line art, 5 grease pencil line art with cel shading.", cloth_render_method, 0, 5);
+            PW_INT("render.method", "0 standard, 1 detailed ink, 2 clean line, 3 soft 2D, 4 grease pencil line art, 5 grease pencil line art with cel shading, 6 standard shader with scene lighting.", cloth_render_method, 0, 6);
             PW_FLOAT("render.target_detail_size", "Fine cloth render target edge length.", cloth_render_target_detail_size, 0.0001, 0.25);
 
             PW_FLOAT("fitting.depth_margin", "Cloth fitting depth margin.", cloth_fitting_depth_margin, 0.0, 1.0);
@@ -470,7 +477,7 @@ namespace poseweaver
                 out["failed_step"] = canva.generate_cloth_failed_step;
                 out["elapsed_seconds"] = canva.generate_cloth_total_seconds;
             }
-            else if (job.kind == "render_cloth")
+            else if (job.kind == "render_cloth" || job.kind == "render_and_refit")
                 out["stage"] = canva.render_cloth_status;
             else if (job.kind == "cloth_fitting")
             {
@@ -505,7 +512,8 @@ namespace poseweaver
             if (job.kind == "simulation") return state.controls.simulating;
             if (job.kind == "generate_cloth" || job.kind == "full_generation" || job.kind == "generate_and_fit")
                 return canva.generate_cloth_active || canva.extract_pose_active;
-            if (job.kind == "render_cloth") return canva.render_cloth_active;
+            if (job.kind == "render_cloth" || job.kind == "render_and_refit")
+                return canva.render_cloth_active;
             if (job.kind == "cloth_fitting") return canva.cloth_fitting_active;
             if (job.kind == "extract_pose") return canva.extract_pose_active;
             if (job.kind == "rig_optimization") return canva.rig_optimization_active;
@@ -520,7 +528,8 @@ namespace poseweaver
             if (job.kind == "simulation") return state.controls.sim_stage == "Failed";
             if (job.kind == "generate_cloth" || job.kind == "full_generation" || job.kind == "generate_and_fit")
                 return canva.generate_cloth_status == "Failed";
-            if (job.kind == "render_cloth") return canva.render_cloth_status == "Failed";
+            if (job.kind == "render_cloth" || job.kind == "render_and_refit")
+                return canva.render_cloth_status == "Failed";
             if (job.kind == "cloth_fitting") return canva.cloth_fitting_status == "Failed";
             if (job.kind == "rig_optimization") return canva.rig_optimization_status == "Failed";
             if (job.kind == "generate_displacement") return canva.generate_displacement_status == "Failed";
@@ -577,6 +586,7 @@ namespace poseweaver
                     { "gender", gender },
                     { "pose", selected_name(state.selection.poses, state.selection.pose_index) },
                     { "garment", selected_name(state.selection.garments, state.selection.garment_index) },
+                    { "garment_texture", state.selection.garment_texture },
                     { "mesh", selected_name(state.selection.meshes, state.selection.mesh_index) }
                 } },
                 { "simulation", {
@@ -655,9 +665,16 @@ namespace poseweaver
                 job->observed_active = true;
                 job->state = "running";
             }
-            else if (name == "render_cloth")
+            else if (name == "render_cloth" || name == "render_and_refit")
             {
-                if (!canva_queue_render_cloth(state, canva, params.value("fine", false), false, false, &error))
+                const bool refit = name == "render_and_refit";
+                if (!canva_queue_render_cloth(
+                        state,
+                        canva,
+                        params.value("fine", false),
+                        false,
+                        refit,
+                        &error))
                     throw std::runtime_error(error.empty() ? "failed to queue cloth render" : error);
                 job = &create_job(name);
                 job->observed_active = true;
@@ -754,6 +771,7 @@ namespace poseweaver
             {
                 if (params.contains("path"))
                     state.scene_view_snapshot_path = checked_output_path(params).string();
+                state.scene_view_snapshot_include_cloth = false;
                 const std::uint64_t marker = ++state.scene_view_snapshot_request_id;
                 job = &create_job(name, marker);
                 job->observed_active = true;
@@ -858,9 +876,23 @@ namespace poseweaver
                 }
                 if (method == "assets.list")
                 {
+                    json garment_textures = json::object();
+                    for (const std::string& garment : assets.garments())
+                    {
+                        json variants = json::array();
+                        for (const GarmentTextureVariant& variant : assets.garment_textures(garment))
+                        {
+                            variants.push_back({
+                                { "name", variant.name },
+                                { "file", variant.file }
+                            });
+                        }
+                        garment_textures[garment] = std::move(variants);
+                    }
                     return success(id, {
                         { "poses", assets.poses() },
                         { "garments", assets.garments() },
+                        { "garment_textures", std::move(garment_textures) },
                         { "meshes", assets.meshes() }
                     });
                 }
@@ -903,7 +935,52 @@ namespace poseweaver
                         index = found;
                     };
                     set_asset("pose", state.selection.poses, state.selection.pose_index);
-                    set_asset("garment", state.selection.garments, state.selection.garment_index);
+                    if (params.contains("garment"))
+                    {
+                        if (params["garment"].is_null()
+                            || params["garment"].get<std::string>().empty())
+                        {
+                            state.selection.garment_index = -1;
+                            state.selection.garment_texture.clear();
+                        }
+                        else
+                        {
+                            const std::string name = params["garment"].get<std::string>();
+                            const int canonical = find_name(state.selection.garments, name);
+                            if (canonical >= 0)
+                            {
+                                state.selection.garment_index = canonical;
+                                state.selection.garment_texture.clear();
+                            }
+                            else
+                            {
+                                int variant_index = -1;
+                                for (int i = 0; i < static_cast<int>(state.selection.garments.size()); ++i)
+                                {
+                                    const auto& variants = assets.garment_textures(
+                                        state.selection.garments[static_cast<std::size_t>(i)]);
+                                    const auto variant = std::find_if(
+                                        variants.begin(),
+                                        variants.end(),
+                                        [&](const GarmentTextureVariant& candidate)
+                                        {
+                                            return candidate.file == name;
+                                        });
+                                    if (variant != variants.end())
+                                    {
+                                        variant_index = i;
+                                        break;
+                                    }
+                                }
+                                if (variant_index < 0)
+                                    throw std::runtime_error("unknown garment or texture variant: " + name);
+                                state.selection.garment_index = variant_index;
+                                state.selection.garment_texture = name;
+                                state.garment_use_source_texture = true;
+                                state.garment_color_by_smpl_uv = false;
+                            }
+                        }
+                    }
                     set_asset("mesh", state.selection.meshes, state.selection.mesh_index);
                     return success(id, app_status(state, canva)["selection"]);
                 }
@@ -968,6 +1045,120 @@ namespace poseweaver
                         layers.push_back(layer_json(canva, canva.layers[static_cast<std::size_t>(i)], i));
                     return success(id, { { "layers", std::move(layers) } });
                 }
+                if (method == "fitting_maps.edit")
+                {
+                    const int layer_id = params.value("layer_id", 0);
+                    const int index = canva_find_layer_index_by_id(canva, layer_id);
+                    if (index < 0)
+                        throw std::runtime_error("layer not found: " + std::to_string(layer_id));
+                    if (!params.contains("strokes") || !params["strokes"].is_array()
+                        || params["strokes"].empty())
+                    {
+                        throw std::runtime_error("strokes must be a non-empty array");
+                    }
+                    if (params["strokes"].size() > 1024u)
+                        throw std::runtime_error("strokes cannot contain more than 1024 items");
+
+                    CanvaLayer& layer = canva.layers[static_cast<std::size_t>(index)];
+                    const bool visibility = layer.id == canva.cloth_refit_visibility_layer_id
+                        && canva_layer_is_visibility_map(layer);
+                    const bool deformation = layer.id == canva.cloth_refit_deformation_layer_id
+                        && layer.kind == CanvaLayerKind::ClothFittingDeformation;
+                    if (!visibility && !deformation)
+                    {
+                        throw std::runtime_error(
+                            "layer is not an active cached visibility map or deformation field");
+                    }
+
+                    struct Stroke
+                    {
+                        std::string mode;
+                        ImVec2 from;
+                        ImVec2 to;
+                        float radius = 0.0f;
+                        float power = 1.0f;
+                    };
+                    std::vector<Stroke> strokes;
+                    strokes.reserve(params["strokes"].size());
+                    const auto coordinate = [&](const json& stroke, const char* key, float maximum)
+                    {
+                        if (!stroke.contains(key) || !stroke[key].is_number())
+                            throw std::runtime_error(std::string(key) + " must be a number");
+                        const float value = stroke[key].get<float>();
+                        if (!std::isfinite(value) || value < 0.0f || value >= maximum)
+                            throw std::runtime_error(std::string(key) + " is outside the canvas");
+                        return value;
+                    };
+                    for (const json& value : params["strokes"])
+                    {
+                        if (!value.is_object() || !value.contains("mode") || !value["mode"].is_string())
+                            throw std::runtime_error("each stroke requires a mode");
+                        Stroke stroke;
+                        stroke.mode = value["mode"].get<std::string>();
+                        stroke.from = ImVec2(
+                            coordinate(value, "from_x", static_cast<float>(canva.width)),
+                            coordinate(value, "from_y", static_cast<float>(canva.height)));
+                        stroke.to = ImVec2(
+                            coordinate(value, "to_x", static_cast<float>(canva.width)),
+                            coordinate(value, "to_y", static_cast<float>(canva.height)));
+                        stroke.radius = value.value("radius", 0.0f);
+                        stroke.power = value.value("power", 1.0f);
+                        if (!std::isfinite(stroke.radius) || stroke.radius < 0.5f || stroke.radius > 250.0f)
+                            throw std::runtime_error("stroke radius must be between 0.5 and 250 pixels");
+                        if (!std::isfinite(stroke.power) || stroke.power < 0.0f || stroke.power > 1.0f)
+                            throw std::runtime_error("stroke power must be between zero and one");
+                        if (visibility && stroke.mode != "visible" && stroke.mode != "occluded")
+                            throw std::runtime_error("visibility strokes must use visible or occluded mode");
+                        if (deformation && stroke.mode != "push" && stroke.mode != "smooth"
+                            && stroke.mode != "erase")
+                        {
+                            throw std::runtime_error(
+                                "deformation strokes must use push, smooth, or erase mode");
+                        }
+                        strokes.push_back(std::move(stroke));
+                    }
+
+                    canva_push_undo(canva, layer.id, layer.pixels, layer.offset, layer.scale);
+                    for (const Stroke& stroke : strokes)
+                    {
+                        if (visibility)
+                        {
+                            const ImVec4 color = stroke.mode == "visible"
+                                ? ImVec4(32.0f / 255.0f, 220.0f / 255.0f, 80.0f / 255.0f, 1.0f)
+                                : ImVec4(1.0f, 48.0f / 255.0f, 48.0f / 255.0f, 1.0f);
+                            canva_draw_segment(
+                                layer,
+                                canva.width,
+                                canva.height,
+                                stroke.from,
+                                stroke.to,
+                                stroke.radius,
+                                color);
+                        }
+                        else
+                        {
+                            const CanvaDeformationBrushMode mode = stroke.mode == "push"
+                                ? CanvaDeformationBrushMode::Push
+                                : stroke.mode == "smooth"
+                                    ? CanvaDeformationBrushMode::Smooth
+                                    : CanvaDeformationBrushMode::Erase;
+                            canva_apply_deformation_field_brush(
+                                layer,
+                                canva.width,
+                                canva.height,
+                                stroke.from,
+                                stroke.to,
+                                stroke.radius,
+                                mode,
+                                stroke.power);
+                        }
+                    }
+                    canva.active_layer = index;
+                    canva_cancel_interactions(canva);
+                    json result = layer_json(canva, layer, index);
+                    result["strokes_applied"] = strokes.size();
+                    return success(id, std::move(result));
+                }
                 if (method == "layers.import")
                 {
                     if (!params.contains("path") || !params["path"].is_string())
@@ -992,6 +1183,13 @@ namespace poseweaver
                     if (params.contains("selected") && params["selected"].get<bool>()) canva.active_layer = index;
                     if (params.contains("name")) layer.name = params["name"].get<std::string>();
                     if (params.contains("visible")) layer.enabled = params["visible"].get<bool>();
+                    if (params.contains("opacity"))
+                    {
+                        const float opacity = params["opacity"].get<float>();
+                        if (!std::isfinite(opacity) || opacity < 0.0f || opacity > 1.0f)
+                            throw std::runtime_error("opacity must be finite and between zero and one");
+                        layer.opacity = opacity;
+                    }
                     if (params.contains("offset_x")) layer.offset.x = params["offset_x"].get<float>();
                     if (params.contains("offset_y")) layer.offset.y = params["offset_y"].get<float>();
                     if (params.contains("scale"))
@@ -1059,7 +1257,7 @@ namespace poseweaver
                 {
                     return success(id, { { "operations", {
                         "simulation", "generate_cloth", "full_generation", "generate_and_fit",
-                        "render_cloth", "cloth_fitting", "stylize_cloth", "extract_pose", "rig_optimization",
+                        "render_cloth", "render_and_refit", "cloth_fitting", "stylize_cloth", "extract_pose", "rig_optimization",
                         "generate_displacement", "generate_iso_displacement", "scene_snapshot",
                         "garment_pushout", "garment_ease", "garment_prefit", "garment_relax",
                         "save_constraints", "clear_constraints", "clear_simulation", "undo_canvas", "reset_canvas"

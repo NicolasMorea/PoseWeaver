@@ -215,23 +215,37 @@ namespace poseweaver::ui_canva
             if (!state.scene_view_snapshot_path.empty())
             {
                 std::string err;
-                if (canva_add_smpl_render_layer(
+                const bool added = canva.pending_scene_view_snapshot_include_cloth
+                    ? canva_add_scene_render_layer(
                         canva,
                         state.scene_view_snapshot_path,
                         canva.pending_scene_view_snapshot_model_input_path,
-                        &err))
+                        &err)
+                    : canva_add_smpl_render_layer(
+                        canva,
+                        state.scene_view_snapshot_path,
+                        canva.pending_scene_view_snapshot_model_input_path,
+                        &err);
+                if (added)
                 {
-                    console_add_line(state, "Canva: Added SMPL layer");
-                    canva.pending_scene_view_snapshot_request_id = 0;
-                    canva.pending_scene_view_snapshot_model_input_path.clear();
+                    canva.layers.front().enabled =
+                        canva.pending_scene_view_snapshot_layer_enabled;
+                    console_add_line(state, canva.pending_scene_view_snapshot_include_cloth
+                        ? "Canva: Added 3D scene layer"
+                        : "Canva: Added SMPL layer");
                 }
                 else
                 {
-                    console_add_line(state, std::string("Canva: Failed to add SMPL layer: ")
+                    console_add_line(state, std::string(canva.pending_scene_view_snapshot_include_cloth
+                            ? "Canva: Failed to add 3D scene layer: "
+                            : "Canva: Failed to add SMPL layer: ")
                         + (err.empty() ? "(unknown error)" : err));
-                    canva.pending_scene_view_snapshot_model_input_path.clear();
                 }
             }
+            canva.pending_scene_view_snapshot_request_id = 0;
+            canva.pending_scene_view_snapshot_layer_enabled = false;
+            canva.pending_scene_view_snapshot_include_cloth = false;
+            canva.pending_scene_view_snapshot_model_input_path.clear();
         }
     }
 
@@ -1195,6 +1209,7 @@ namespace poseweaver::ui_canva
                         if (canva_refit_cloth_with_cached_maps(
                                 state, canva, renderer, canva.layers.front(), &refit_error))
                         {
+                            canva_sequence_store_selected_frame(canva);
                             canva.render_cloth_status = "Done";
                             console_add_line(state, "Canva: Render + Refit reused saved visibility and deformation maps");
                         }

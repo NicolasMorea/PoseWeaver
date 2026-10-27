@@ -840,13 +840,19 @@ namespace poseweaver::ui_canva
         const int visibility_index = canva_find_layer_index_by_id(
             canva.layers,
             canva.cloth_refit_visibility_layer_id);
+        const int deformation_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_deformation_layer_id);
         return canva.cloth_refit_map_width == canva.width
             && canva.cloth_refit_map_height == canva.height
             && visibility_index >= 0
+            && deformation_index >= 0
             && canva_layer_is_visibility_map(canva.layers[(size_t)visibility_index])
             && canva.layers[(size_t)visibility_index].pixels.size() >= pixel_count * 4u
-            && canva.cloth_refit_deformation_source_x.size() >= pixel_count
-            && canva.cloth_refit_deformation_source_y.size() >= pixel_count;
+            && canva.layers[(size_t)deformation_index].kind
+                == CanvaLayerKind::ClothFittingDeformation
+            && canva.layers[(size_t)deformation_index].deformation_source_x.size() >= pixel_count
+            && canva.layers[(size_t)deformation_index].deformation_source_y.size() >= pixel_count;
     }
 
     bool canva_refit_cloth_with_cached_maps(
@@ -874,14 +880,18 @@ namespace poseweaver::ui_canva
         const int visibility_index = canva_find_layer_index_by_id(
             canva.layers,
             canva.cloth_refit_visibility_layer_id);
+        const int deformation_index = canva_find_layer_index_by_id(
+            canva.layers,
+            canva.cloth_refit_deformation_layer_id);
         const CanvaLayer& visibility_layer = canva.layers[(size_t)visibility_index];
+        const CanvaLayer& deformation_layer = canva.layers[(size_t)deformation_index];
         if (!renderer.refit_cloth_render_with_maps(
                 source_layer.pixels,
                 canva.width,
                 canva.height,
                 visibility_layer.pixels,
-                canva.cloth_refit_deformation_source_x,
-                canva.cloth_refit_deformation_source_y,
+                deformation_layer.deformation_source_x,
+                deformation_layer.deformation_source_y,
                 warped_cloth,
                 warped_occluded_cloth,
                 out_error))
@@ -987,6 +997,14 @@ namespace poseweaver::ui_canva
         for (const auto& step : fitting.deformation_steps)
             if (!require_pixels(step, "deformation step"))
                 return false;
+        const size_t pixel_count = (size_t)canva.width * (size_t)canva.height;
+        if (fitting.deformation_source_x.size() < pixel_count
+            || fitting.deformation_source_y.size() < pixel_count)
+        {
+            if (out_error)
+                *out_error = "deformation field does not match the canvas size";
+            return false;
+        }
 
         const std::vector<unsigned char> raw_cloth = source_layer.pixels;
         const ImVec2 source_offset = source_layer.offset;
@@ -1150,6 +1168,26 @@ namespace poseweaver::ui_canva
                 std::move(fitting.filtered_final_occlusion),
                 "Filtered final occlusion",
                 CanvaLayerKind::ClothFittingOcclusionDebug);
+
+            CanvaLayer deformation_field = canva_make_layer(
+                canva.width,
+                canva.height,
+                canva.next_layer_id++,
+                "deformation field");
+            deformation_field.kind = CanvaLayerKind::ClothFittingDeformation;
+            deformation_field.deformation_source_x = std::move(fitting.deformation_source_x);
+            deformation_field.deformation_source_y = std::move(fitting.deformation_source_y);
+            deformation_field.offset = source_offset;
+            deformation_field.scale = source_scale;
+            deformation_field.enabled = false;
+            canva_update_deformation_field_pixels(deformation_field, canva.width, canva.height);
+            canva.cloth_refit_deformation_layer_id = deformation_field.id;
+            const auto deformation_insert_pos =
+                canva.layers.begin() + std::min<int>(1, (int)canva.layers.size());
+            canva.layers.insert(deformation_insert_pos, std::move(deformation_field));
+            canva.cloth_refit_map_width = canva.width;
+            canva.cloth_refit_map_height = canva.height;
+
             for (int i = 0; i < (int)fitting.deformation_steps.size(); ++i)
             {
                 std::ostringstream name;
@@ -1285,8 +1323,6 @@ namespace poseweaver::ui_canva
             && !canva.sequence_waiting_render;
         const int tested_count = fitting.tested_count;
         const int removed_count = fitting.removed_count;
-        std::vector<float> refit_deformation_source_x = std::move(fitting.deformation_source_x);
-        std::vector<float> refit_deformation_source_y = std::move(fitting.deformation_source_y);
         if (!canva_add_cloth_fitting_layers(
                 canva,
                 source,
@@ -1301,13 +1337,6 @@ namespace poseweaver::ui_canva
             if (out_error)
                 *out_error = add_err.empty() ? "failed to create output layer" : add_err;
             return false;
-        }
-        if (include_hidden_output_layers && canva.cloth_refit_visibility_layer_id != 0)
-        {
-            canva.cloth_refit_map_width = canva.width;
-            canva.cloth_refit_map_height = canva.height;
-            canva.cloth_refit_deformation_source_x = std::move(refit_deformation_source_x);
-            canva.cloth_refit_deformation_source_y = std::move(refit_deformation_source_y);
         }
         if (canva.cloth_fitting_timing_started)
             canva.cloth_fitting_step_seconds[(size_t)ClothFittingTimingStep::LayerCreation] =

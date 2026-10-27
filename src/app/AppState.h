@@ -16,6 +16,7 @@ namespace poseweaver
         Detailed = 1,
         Clean = 2,
         SoftGeometry = 3,
+        BlueWireframe = 4,
     };
 
     class ModelInferenceService;
@@ -155,6 +156,7 @@ namespace poseweaver
 
         std::vector<std::string> garments;
         int garment_index = -1;
+        std::string garment_texture;
 
         std::vector<std::string> meshes;
         int mesh_index = -1;
@@ -255,6 +257,7 @@ namespace poseweaver
         std::uint64_t scene_view_snapshot_completed_id = 0;
         std::string scene_view_snapshot_pose_name;
         std::string scene_view_snapshot_path;
+        bool scene_view_snapshot_include_cloth = false;
         bool scene_view_snapshot_use_rigopt_camera = false;
         float scene_view_snapshot_rigopt_camera_scale = 1.0f;
         std::array<float, 2> scene_view_snapshot_rigopt_camera_translation{ 0.0f, 0.0f };

@@ -55,6 +55,15 @@ doc
 assets
 !assets/
 assets/*
+!assets/shaders/
+assets/shaders/*
+!assets/shaders/cloth_toon.vert.glsl
+!assets/shaders/cloth_toon.frag.glsl
+!assets/shaders/two_light.vert.glsl
+!assets/shaders/two_light.frag.glsl
+!assets/poses/
+assets/poses/*
+!assets/poses/garment_a_pose.npz
 !assets/smplh/
 assets/smplh/*
 !assets/smplh/isomap_64d.npz

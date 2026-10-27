@@ -280,8 +280,10 @@ namespace poseweaver::ui_canva
         }
         state.scene_view_snapshot_pose_name = result.npz_path.filename().string();
         state.scene_view_snapshot_path.clear();
+        state.scene_view_snapshot_include_cloth = false;
         state.scene_view_snapshot_use_rigopt_camera = false;
         canva.pending_scene_view_snapshot_request_id = ++state.scene_view_snapshot_request_id;
+        canva.pending_scene_view_snapshot_include_cloth = false;
         canva.pending_scene_view_snapshot_model_input_path = canva.extract_pose_model_input_path;
         state.scene_view_snap_to_target_request_id++;
         canva.extract_pose_active = false;
@@ -700,10 +702,26 @@ namespace poseweaver::ui_canva
                 model_input_path,
                 "SMPL",
                 CanvaLayerKind::Smpl,
-                true,
+                false,
                 out_error))
             return false;
         return true;
+    }
+
+     bool canva_add_scene_render_layer(
+        CanvaState& canva,
+        const std::string& file_path,
+        const std::filesystem::path& model_input_path,
+        std::string* out_error)
+    {
+        return canva_add_preprocess_aligned_png_layer(
+            canva,
+            file_path,
+            model_input_path,
+            "3D scene",
+            CanvaLayerKind::Scene,
+            true,
+            out_error);
     }
 
     static void canva_blend_rgba(

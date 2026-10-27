@@ -664,6 +664,7 @@ namespace poseweaver
                 "Ink: Detailed",
                 "Ink: Clean Lines",
                 "Ink: Soft 2D",
+                "Blue wireframe",
             };
             if (ImGui::Combo("##cloth_ink_style", &ink_style, ink_styles, IM_ARRAYSIZE(ink_styles)))
                 state.cloth_ink_style = static_cast<ClothInkStyle>(ink_style);

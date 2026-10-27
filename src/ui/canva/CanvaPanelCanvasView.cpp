@@ -123,7 +123,9 @@ namespace poseweaver::ui_canva
                 const ImVec2 lp0 = ImVec2(p0.x + layer.offset.x * canva.zoom, p0.y + layer.offset.y * canva.zoom);
                 const float s = std::max(1e-6f, layer.scale);
                 const ImVec2 lp1 = ImVec2(lp0.x + canvas_size.x * s, lp0.y + canvas_size.y * s);
-                dl->AddImage(tid, lp0, lp1);
+                const float opacity = std::clamp(layer.opacity, 0.0f, 1.0f);
+                dl->AddImage(tid, lp0, lp1, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, opacity)));
             }
 
             dl->PopClipRect();
@@ -359,6 +361,10 @@ namespace poseweaver::ui_canva
 
                     if (in_layer)
                     {
+                        const bool liquify =
+                            layer.kind == CanvaLayerKind::ClothFittingDeformation
+                            && !layer.deformation_source_x.empty()
+                            && !layer.deformation_source_y.empty();
                         const ImVec4 paint_color = canva_layer_is_visibility_map(layer)
                             ? (canva.visibility_brush_visible
                                 ? ImVec4(32.0f / 255.0f, 220.0f / 255.0f, 80.0f / 255.0f, 1.0f)
@@ -372,12 +378,44 @@ namespace poseweaver::ui_canva
                             canva.drawing = true;
                             canva.last_canvas_pos = layer_local;
                             const float r_layer = canva.brush_radius / s;
-                            canva_stamp_circle(layer, canva.width, canva.height, layer_local.x, layer_local.y, r_layer, paint_color);
+                            if (liquify
+                                && canva.deformation_brush_mode
+                                    != CanvaDeformationBrushMode::Push)
+                            {
+                                canva_apply_deformation_field_brush(
+                                    layer,
+                                    canva.width,
+                                    canva.height,
+                                    layer_local,
+                                    layer_local,
+                                    r_layer,
+                                    canva.deformation_brush_mode,
+                                    canva.deformation_brush_power);
+                            }
+                            else if (!liquify)
+                            {
+                                canva_stamp_circle(layer, canva.width, canva.height, layer_local.x, layer_local.y, r_layer, paint_color);
+                            }
                         }
                         else
                         {
                             const float r_layer = canva.brush_radius / s;
-                            canva_draw_segment(layer, canva.width, canva.height, canva.last_canvas_pos, layer_local, r_layer, paint_color);
+                            if (liquify)
+                            {
+                                canva_apply_deformation_field_brush(
+                                    layer,
+                                    canva.width,
+                                    canva.height,
+                                    canva.last_canvas_pos,
+                                    layer_local,
+                                    r_layer,
+                                    canva.deformation_brush_mode,
+                                    canva.deformation_brush_power);
+                            }
+                            else
+                            {
+                                canva_draw_segment(layer, canva.width, canva.height, canva.last_canvas_pos, layer_local, r_layer, paint_color);
+                            }
                             canva.last_canvas_pos = layer_local;
                         }
                     }
@@ -389,6 +427,15 @@ namespace poseweaver::ui_canva
                 else
                 {
                     canva.drawing = false;
+                }
+
+                if (hovered && in_canvas)
+                {
+                    const float preview_radius = canva.brush_radius * canva.zoom;
+                    dl->PushClipRect(p0, p1, true);
+                    dl->AddCircle(mouse, preview_radius, IM_COL32(0, 0, 0, 220), 0, 3.0f);
+                    dl->AddCircle(mouse, preview_radius, IM_COL32(255, 255, 255, 230), 0, 1.0f);
+                    dl->PopClipRect();
                 }
 
             }

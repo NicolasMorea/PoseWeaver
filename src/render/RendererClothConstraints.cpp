@@ -361,21 +361,31 @@ namespace poseweaver
             garment.add_points(P, C);
         }
 
-        Eigen::MatrixXd colors(N, 3);
         if (state.garment_color_by_smpl_uv &&
             m_garment_uv_vertex_colors_valid &&
             m_garment_uv_vertex_colors.rows() == N)
         {
-            colors = m_garment_uv_vertex_colors;
+            Eigen::MatrixXd colors = m_garment_uv_vertex_colors;
+            for (int vi = 0; vi < N; ++vi)
+                if (m_garment_constraints[(size_t)vi])
+                    colors.row(vi) = Eigen::RowVector3d(0.05, 0.95, 1.0);
+            garment.set_colors(colors);
+        }
+        else if (state.garment_use_source_texture && m_garment_has_source_texture)
+        {
+            if (m_garment_has_image_texture)
+                garment.set_colors(Eigen::RowVector3d::Ones());
+            else
+                garment.set_colors(m_garment_source_colors);
         }
         else
         {
+            Eigen::MatrixXd colors(N, 3);
             colors.rowwise() = Eigen::RowVector3d(0.97, 0.74, 0.50);
+            for (int vi = 0; vi < N; ++vi)
+                if (m_garment_constraints[(size_t)vi])
+                    colors.row(vi) = Eigen::RowVector3d(0.05, 0.95, 1.0);
+            garment.set_colors(colors);
         }
-
-        for (int vi = 0; vi < N; ++vi)
-            if (m_garment_constraints[(size_t)vi])
-                colors.row(vi) = Eigen::RowVector3d(0.05, 0.95, 1.0);
-        garment.set_colors(colors);
     }
 }

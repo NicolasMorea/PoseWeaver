@@ -32,7 +32,8 @@ namespace poseweaver
             igl::opengl::ViewerData& data,
             const std::vector<unsigned char>& rgba,
             int width,
-            int height)
+            int height,
+            bool flip_y)
         {
             using Channel = Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic>;
             Channel red(width, height);
@@ -43,7 +44,8 @@ namespace poseweaver
             {
                 for (int x = 0; x < width; ++x)
                 {
-                    const std::size_t index = (static_cast<std::size_t>(y)
+                    const int source_y = flip_y ? height - 1 - y : y;
+                    const std::size_t index = (static_cast<std::size_t>(source_y)
                         * static_cast<std::size_t>(width)
                         + static_cast<std::size_t>(x)) * 4u;
                     red(x, y) = rgba[index];
@@ -91,6 +93,9 @@ namespace poseweaver
         std::string desired;
         if (state.selection.garment_index >= 0 && state.selection.garment_index < (int)state.selection.garments.size())
             desired = state.selection.garments[(size_t)state.selection.garment_index];
+        const std::string desired_material = state.selection.garment_texture.empty()
+            ? desired
+            : state.selection.garment_texture;
         const bool weld_enabled = state.garment_vertex_merge_enabled;
         const double weld_epsilon = std::max(0.0, (double)state.garment_vertex_merge_distance);
 
@@ -102,6 +107,7 @@ namespace poseweaver
             data.clear();
             data.set_visible(false);
             m_garment_mesh_name.clear();
+            m_garment_material_name.clear();
             m_garment_has_source_texture = false;
             m_garment_has_image_texture = false;
             m_garment_source_colors.resize(0, 0);
@@ -127,6 +133,7 @@ namespace poseweaver
             if (was_loaded)
             {
                 m_garment_version++;
+                m_garment_material_version++;
                 console_add_line(state, "Garment unloaded");
             }
             return;
@@ -140,6 +147,7 @@ namespace poseweaver
         if (mesh_changed)
         {
             const std::filesystem::path mesh_path = assets_dir() / "garments" / desired;
+            const std::filesystem::path material_path = assets_dir() / "garments" / desired_material;
             const bool loading_gltf = is_gltf_path(mesh_path);
 
             Eigen::MatrixXd V;
@@ -156,7 +164,7 @@ namespace poseweaver
             const bool loaded_gltf_texture = loading_gltf && ok && gltf.has_image_texture();
             const bool loaded_obj_material = !loading_gltf
                 && ok
-                && load_obj_material_texture(mesh_path, obj_texture)
+                && load_obj_material_texture(material_path, obj_texture)
                 && obj_texture.has_material;
             const bool loaded_obj_texture = loaded_obj_material && obj_texture.has_image_texture();
             if (loading_gltf && ok)
@@ -176,6 +184,7 @@ namespace poseweaver
                 data.clear();
                 data.set_visible(false);
                 m_garment_mesh_name.clear();
+                m_garment_material_name.clear();
                 m_garment_has_source_texture = false;
                 m_garment_has_image_texture = false;
                 m_garment_source_colors.resize(0, 0);
@@ -214,13 +223,15 @@ namespace poseweaver
             if (loaded_gltf_texture || loaded_obj_texture)
             {
                 data.set_uv(UV, F_uv);
+                data.dirty |= igl::opengl::MeshGL::DIRTY_MESH;
                 if (loaded_gltf_texture)
                 {
                     set_rgba_texture(
                         data,
                         gltf.texture_rgba,
                         gltf.texture_width,
-                        gltf.texture_height);
+                        gltf.texture_height,
+                        false);
                 }
                 else
                 {
@@ -228,7 +239,8 @@ namespace poseweaver
                         data,
                         obj_texture.rgba,
                         obj_texture.width,
-                        obj_texture.height);
+                        obj_texture.height,
+                        true);
                 }
             }
             data.show_faces = 1;
@@ -248,6 +260,7 @@ namespace poseweaver
             m_viewer.core().align_camera_center(V, F);
 
             m_garment_mesh_name = desired;
+            m_garment_material_name = desired_material;
             m_garment_has_source_texture = loaded_gltf_material || loaded_obj_material;
             m_garment_has_image_texture = loaded_gltf_texture || loaded_obj_texture;
             if (loaded_gltf_material && gltf.face_colors.rows() == F.rows())
@@ -257,6 +270,7 @@ namespace poseweaver
             else
                 m_garment_source_colors = Eigen::MatrixXd::Ones(1, 3);
             m_garment_version++;
+            m_garment_material_version++;
             m_garment_vertex_merge_settings_valid = true;
             m_garment_vertex_merge_enabled_last = weld_enabled;
             m_garment_vertex_merge_distance_last = weld_epsilon;
@@ -297,6 +311,36 @@ namespace poseweaver
             m_garment_last_show_mesh = true;
         }
 
+        if (!mesh_changed && desired_material != m_garment_material_name)
+        {
+            ObjMaterialTexture material;
+            const std::filesystem::path material_path = assets_dir() / "garments" / desired_material;
+            const bool loaded_material = load_obj_material_texture(material_path, material)
+                && material.has_material;
+            const bool loaded_texture = loaded_material
+                && material.has_image_texture()
+                && material.uv_faces.rows() == data.F.rows();
+            if (loaded_texture)
+            {
+                data.set_uv(material.uv, material.uv_faces);
+                data.dirty |= igl::opengl::MeshGL::DIRTY_MESH;
+                set_rgba_texture(data, material.rgba, material.width, material.height, true);
+            }
+            m_garment_has_source_texture = loaded_material;
+            m_garment_has_image_texture = loaded_texture;
+            if (loaded_material && material.face_colors.rows() == data.F.rows())
+                m_garment_source_colors = std::move(material.face_colors);
+            else
+                m_garment_source_colors = Eigen::MatrixXd::Ones(1, 3);
+            m_garment_material_name = desired_material;
+            m_garment_material_version++;
+            console_add_line(state,
+                std::string("Changed garment texture: ") + desired_material
+                + " (image_texture=" + (loaded_texture ? "yes" : "no") + ")");
+            if (!material.warning.empty())
+                console_add_line(state, "OBJ texture warning: " + material.warning);
+        }
+
         ensure_garment_to_smpl_mapping(state);
         ensure_garment_uv_projection();
         update_garment_constraint_visualization(state);
@@ -312,7 +356,9 @@ namespace poseweaver
             const bool use_source_texture = m_garment_has_source_texture
                 && state.garment_use_source_texture;
             data.show_texture = use_source_texture && m_garment_has_image_texture ? 1 : 0;
-            if (use_source_texture)
+            if (data.show_texture)
+                data.set_colors(Eigen::RowVector3d::Ones());
+            else if (use_source_texture)
                 data.set_colors(m_garment_source_colors);
             else
                 data.set_colors(Eigen::RowVector3d(0.97, 0.74, 0.50));
@@ -558,7 +604,7 @@ namespace poseweaver
 
     void Renderer::handle_garment_posing(AppState& state, bool force)
     {
-        if (!state.show_garment_mesh || m_garment_mesh_name.empty())
+        if ((!state.show_garment_mesh && !force) || m_garment_mesh_name.empty())
             return;
         if (!m_garment_to_smpl.valid())
             return;
